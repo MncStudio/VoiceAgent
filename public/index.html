@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VoiceAgent 语音助手</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+      background: #f5f6fa; color: #2d3436; min-height: 100vh;
+      display: flex; flex-direction: column; align-items: center; padding: 2rem 1rem;
+    }
+    h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+    .sub { color: #95a5a6; font-size: 0.9rem; margin-bottom: 2rem; }
+    #recordBtn {
+      width: 96px; height: 96px; border-radius: 50%; border: none; cursor: pointer;
+      background: #6c5ce7; color: #fff; font-size: 1.1rem; transition: all 0.2s;
+      box-shadow: 0 4px 14px rgba(108, 92, 231, 0.35);
+    }
+    #recordBtn:hover { transform: scale(1.05); }
+    #recordBtn.recording { background: #e74c3c; animation: pulse 1.2s infinite; }
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(231, 76, 60, 0.5); }
+      50% { box-shadow: 0 0 0 16px rgba(231, 76, 60, 0); }
+    }
+    .status { margin: 1.5rem 0; min-height: 1.4rem; color: #6c5ce7; font-size: 0.95rem; }
+    .panel {
+      width: 100%; max-width: 560px; background: #fff; border-radius: 12px;
+      padding: 1.2rem; box-shadow: 0 2px 12px rgba(0,0,0,0.06); display: none;
+    }
+    .msg { margin-bottom: 1rem; }
+    .msg .who { font-size: 0.8rem; color: #95a5a6; margin-bottom: 0.3rem; }
+    .msg .body { line-height: 1.6; font-size: 0.95rem; white-space: pre-wrap; }
+    .msg.user .body { color: #2d3436; }
+    .msg.reply .body { color: #6c5ce7; font-weight: 500; }
+    #errBox { color: #e74c3c; font-size: 0.9rem; margin-top: 1rem; display: none; }
+  </style>
+</head>
+<body>
+  <h1>VoiceAgent</h1>
+  <div class="sub">按住说话，松开发送</div>
+
+  <button id="recordBtn">🎤</button>
+  <div class="status" id="status">点击按钮开始说话</div>
+
+  <div class="panel" id="panel"></div>
+  <div id="errBox"></div>
+
+  <script>
+    let mediaRecorder = null;
+    let chunks = [];
+    let recording = false;
+    let recStartTime = 0;
+    let shouldSend = false;
+    const MIN_DURATION = 400; // 最短录音毫秒数，低于此值视为误触，丢弃
+
+    // 会话 ID:保持多轮对话上下文。首次访问生成一个。
+    const SESSION_KEY = 'voiceagent_session';
+    let sessionId = localStorage.getItem(SESSION_KEY) || crypto.randomUUID();
+    localStorage.setItem(SESSION_KEY, sessionId);
+
+    const btn = document.getElementById('recordBtn');
+    const status = document.getElementById('status');
+    const panel = document.getElementById('panel');
+    const errBox = document.getElementById('errBox');
+
+    function pickMimeType() {
+      const candidates = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4',
+        'audio/ogg;codecs=opus',
+      ];
+      for (const c of candidates) {
+        if (MediaRecorder.isTypeSupported(c)) return c;
+      }
+      return ''; // 交给浏览器默认
+    }
+
+    async function startRecording() {
+      errBox.style.display = 'none';
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      chunks = [];
+      const mimeType = pickMimeType();
+      mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+      mediaRecorder.onstop = sendAudio;
+      recStartTime = Date.now();
+      mediaRecorder.start();
+      recording = true;
+      btn.classList.add('recording');
+      status.textContent = '正在录音，松开停止…';
+    }
+
+    function stopRecording() {
+      if (!recording) return;
+      recording = false;
+      btn.classList.remove('recording');
+      const duration = Date.now() - recStartTime;
+      if (duration < MIN_DURATION) {
+        // 录音太短，大概率是误触，丢弃不发送
+        shouldSend = false;
+        status.textContent = '录音太短，请按住按钮说话';
+        mediaRecorder.stop();
+        mediaRecorder.stream.getTracks().forEach((t) => t.stop());
+        chunks = [];
+        return;
+      }
+      shouldSend = true;
+      status.textContent = '正在识别，请稍候…';
+      mediaRecorder.stop();
+      mediaRecorder.stream.getTracks().forEach((t) => t.stop());
+    }
+
+    async function sendAudio() {
+      if (!shouldSend) return;
+      const blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+      if (blob.size < 1000) {
+        status.textContent = '';
+        errBox.textContent = '录音内容为空，请重试';
+        errBox.style.display = 'block';
+        return;
+      }
+      const form = new FormData();
+      form.append('audio', blob, 'recording');
+      form.append('sessionId', sessionId);
+
+      try {
+        const res = await fetch('/api/chat', { method: 'POST', body: form });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+
+        addMsg('user', data.userText);
+        addMsg('reply', data.replyText);
+        playWav(data.wavAudio);
+        status.textContent = '回答完毕，可以继续提问';
+      } catch (err) {
+        status.textContent = '';
+        errBox.textContent = '出错了：' + err.message;
+        errBox.style.display = 'block';
+      }
+    }
+
+    function addMsg(who, text) {
+      panel.style.display = 'block';
+      const m = document.createElement('div');
+      m.className = 'msg ' + who;
+      m.innerHTML = '<div class="who">' + (who === 'user' ? '你说' : '助手') + '</div><div class="body"></div>';
+      m.querySelector('.body').textContent = text;
+      panel.appendChild(m);
+      panel.scrollTop = panel.scrollHeight;
+    }
+
+    function playWav(base64) {
+      const bytes = atob(base64);
+      const arr = new Uint8Array(bytes.length);
+      for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+      const audio = new Audio(URL.createObjectURL(new Blob([arr], { type: 'audio/wav' })));
+      audio.play().catch(() => {});
+    }
+
+    btn.addEventListener('mousedown', () => { startRecording().catch((e) => { status.textContent = ''; errBox.textContent = '无法录音：' + e.message; errBox.style.display = 'block'; }); });
+    btn.addEventListener('mouseup', stopRecording);
+    // 移动端
+    btn.addEventListener('touchstart', (e) => { e.preventDefault(); startRecording().catch((e) => { status.textContent = ''; errBox.textContent = '无法录音：' + e.message; errBox.style.display = 'block'; }); });
+    btn.addEventListener('touchend', stopRecording);
+  </script>
+</body>
+</html>
