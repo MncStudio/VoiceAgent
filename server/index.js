@@ -9,6 +9,7 @@ const audio = require('./audio');
 const asr = require('./asr');
 const llm = require('./llm');
 const tts = require('./tts');
+const vad = require('./vad');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -22,6 +23,7 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 app.post('/api/chat', upload.single('audio'), async (req, res) => {
   const inputPath = audio.tempPath('.webm');
   let wavPath = null;
+  let vadOut = null;
 
   try {
     if (!req.file) {
@@ -33,8 +35,11 @@ app.post('/api/chat', upload.single('audio'), async (req, res) => {
     const wav = await audio.transcodeToWav(inputPath);
     wavPath = wav;
 
-    // 2. ASR:音频 → 文字
-    const userText = await asr.recognize(wav);
+    // 2. VAD:裁掉首尾静音,只把有效语音送给 ASR
+    vadOut = await vad.trimSilence(wav);
+
+    // 3. ASR:音频 → 文字
+    const userText = await asr.recognize(vadOut);
 
     // 3. LLM:文字 → 回复(带多轮上下文)
     const sessionId = req.body.sessionId;
@@ -52,7 +57,7 @@ app.post('/api/chat', upload.single('audio'), async (req, res) => {
     console.error('[chat]', err.message);
     res.status(500).json({ error: err.message });
   } finally {
-    audio.cleanup(inputPath, wavPath);
+    audio.cleanup(inputPath, wavPath, vadOut);
   }
 });
 

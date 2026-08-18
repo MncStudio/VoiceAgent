@@ -1,6 +1,6 @@
 # VoiceAgent 语音代理
 
-浏览器录音 → ASR 识别 → LLM 生成回复 → TTS 合成 → 浏览器播放,一个完整的语音问答闭环。
+浏览器录音 → ASR 识别 → LLM 生成回复 → TTS 合成 → 浏览器播放,一个完整的语音问答闭环。后端在 ASR 之前用 Silero VAD 裁掉首尾静音,只把有效语音送识别。
 
 ## 两套配置:local / online
 
@@ -38,6 +38,8 @@ server/
 ├── config.js    # 加载 server/config/{profile}.json
 ├── config/      # 两套配置(含 key,已 gitignore 不入库)
 ├── audio.js     # ffmpeg 转码(webm → wav)、临时文件清理
+├── vad.js       # Silero VAD 静音裁剪(onnxruntime-node 推理)
+├── models/      # silero_vad.onnx 模型文件
 ├── asr.js       # 音频 → 文字(本地 HTTP / 百炼 WS 分流)
 ├── llm.js       # 文字 → 回复(语析 agent / DeepSeek 分流,多轮记忆)
 ├── tts.js       # 回复 → wav 音频(本地 HTTP / 百炼 WS 分流)
