@@ -112,6 +112,7 @@
   <div class="panel" id="panel"></div>
   <div id="errBox"></div>
 
+  <script src="/tts-player.js"></script>
   <script>
     // ================= 通用:会话 ID、打断式播放、请求序号 =================
     // sessionId 保持多轮记忆,语音和文字共用。
@@ -119,66 +120,11 @@
     const sessionId = localStorage.getItem(SESSION_KEY) || crypto.randomUUID();
     localStorage.setItem(SESSION_KEY, sessionId);
 
-    // ============ 打断式播放 + 流式 TTS(边生成边播) ============
-    // playGen:每次新播放递增;旧 gen 的音块/音频全部失效,实现"开口即打断"。
-    let playGen = 0;
-    let audioCtx = null;      // 播放用 AudioContext
-    let ttsWs = null;         // 当前 /api/tts 连接
-    let ttsSampleRate = 24000; // 收 meta 后更新为 config.tts.sampleRate
-    let nextTime = 0;         // 下个音块的预定播放时刻
-    const activeSources = new Set();
-
-    function ensureAudioCtx() {
-      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      if (audioCtx.state === 'suspended') audioCtx.resume();
-      return audioCtx;
-    }
-
-    function stopPlayback() {
-      playGen++;                      // 旧 gen 全部失效
-      if (ttsWs) { try { ttsWs.close(); } catch {} ttsWs = null; }
-      activeSources.forEach((s) => { try { s.stop(); } catch {} });
-      activeSources.clear();
-      nextTime = 0;
-    }
-
-    // 流式播放:开 /api/tts WS 合成,收到 PCM 块用 Web Audio 排队播放,首个音块到达即出声。
-    function playStreamed(text) {
-      stopPlayback();
-      const gen = playGen;
-      const ctx = ensureAudioCtx();
-      nextTime = ctx.currentTime + 0.15; // 150ms 缓冲,抗网络抖动
-      const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/api/tts';
-      const ws = new WebSocket(url);
-      ws.binaryType = 'arraybuffer';
-      ttsWs = ws;
-      ws.onopen = () => ws.send(JSON.stringify({ type: 'synthesize', text }));
-      ws.onmessage = (e) => {
-        if (gen !== playGen) return; // 已打断,丢弃旧合成
-        if (typeof e.data === 'string') {
-          const msg = JSON.parse(e.data);
-          if (msg.type === 'meta') ttsSampleRate = msg.sampleRate || ttsSampleRate;
-          else if (msg.type === 'error') showError('TTS 失败:' + msg.message);
-          else if (msg.type === 'done') ws.close();
-          return;
-        }
-        // 二进制 = 裸 s16le PCM → Float32 → AudioBuffer 排队播
-        const int16 = new Int16Array(e.data);
-        const f32 = new Float32Array(int16.length);
-        for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768;
-        const buf = ctx.createBuffer(1, f32.length, ttsSampleRate);
-        buf.copyToChannel(f32, 0);
-        const src = ctx.createBufferSource();
-        src.buffer = buf;
-        src.connect(ctx.destination);
-        activeSources.add(src);
-        src.onended = () => activeSources.delete(src);
-        src.start(nextTime);
-        nextTime += buf.duration;
-      };
-      ws.onclose = () => { if (ttsWs === ws) ttsWs = null; };
-      ws.onerror = () => { if (gen === playGen) showError('TTS 连接异常'); };
-    }
+    // ============ 流式 TTS 播放器(封装在 public/tts-player.js) ============
+    // ttsPlayer.play(replyText) 边生成边播,重复调用自动打断旧回答;ttsPlayer.stop() 手动打断。
+    // 播放期间 ttsPlayer.playing 为 true,唤醒采集据此暂停,防回答声音被误判为用户提问。
+    const ttsPlayer = new TtsPlayer();
+    ttsPlayer.onError = (msg) => showError('TTS 失败:' + msg);
 
     // 请求竞态保护:只让"最后一次提问"的响应生效,丢弃晚到的旧响应。
     let reqSeq = 0;
@@ -206,12 +152,12 @@
     // 用法:new WebSocket(ws://<host>/api/wake?sessionId=…) → 发二进制 int16 PCM →
     //       命中唤醒词 {"type":"wake","word":"…"} → 进入唤醒窗口,窗口内免唤醒词说话,
     //       后端直接回 {"type":"answer","userText":…,"replyText":…} 自动回答(文本);
-    //       前端拿 replyText 调 playStreamed(经 /api/tts 流式播放);
+    //       前端拿 replyText 调 ttsPlayer.play(经 /api/tts 流式播放);
     //       窗口超时回 {"type":"sleep"},需重新说唤醒词。
     let wakeActive = false;
     let wakeWs = null;
     let micStream = null;
-    let audioCtx = null;
+    let wakeCtx = null; // 唤醒采集专用 16k AudioContext,与播放用的 audioCtx 独立
     let srcNode = null;
     let procNode = null;
     const wakeBtn = document.getElementById('wakeBtn');
@@ -221,19 +167,25 @@
     async function startWake() {
       micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       // 采集固定 16k,与后端 VAD/ASR 一致(浏览器自动重采样)。
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-      if (Math.abs(audioCtx.sampleRate - 16000) > 1) {
-        throw new Error('浏览器不支持 16k 采样率(实际 ' + audioCtx.sampleRate + 'Hz),无法做唤醒检测');
+      wakeCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      if (Math.abs(wakeCtx.sampleRate - 16000) > 1) {
+        throw new Error('浏览器不支持 16k 采样率(实际 ' + wakeCtx.sampleRate + 'Hz),无法做唤醒检测');
       }
       const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://')
         + location.host + '/api/wake?sessionId=' + encodeURIComponent(sessionId);
       wakeWs = new WebSocket(wsUrl);
 
-      srcNode = audioCtx.createMediaStreamSource(micStream);
-      procNode = audioCtx.createScriptProcessor(4096, 1, 1); // 每块 256ms(16k)
+      srcNode = wakeCtx.createMediaStreamSource(micStream);
+      procNode = wakeCtx.createScriptProcessor(4096, 1, 1); // 每块 256ms(16k)
       srcNode.connect(procNode);
-      procNode.connect(audioCtx.destination);
+      // 采集链路不能直通扬声器:麦克风声音会被实时外放,助手回答一出声就采回去,
+      // 形成回声/啸叫(听感"呜啦呜啦")。接 0 增益节点让 onaudioprocess 正常触发但不外放。
+      const muteGain = wakeCtx.createGain();
+      muteGain.gain.value = 0;
+      procNode.connect(muteGain);
+      muteGain.connect(wakeCtx.destination);
       procNode.onaudioprocess = (e) => {
+        if (ttsPlayer.playing) return; // 回答播放期间不发送,防扬声器声音被误判为用户提问
         if (wakeWs && wakeWs.readyState === WebSocket.OPEN) {
           const f = e.inputBuffer.getChannelData(0);
           const i16 = new Int16Array(f.length);
@@ -247,7 +199,7 @@
           // 唤醒自动回答:窗口内免按键直接答,userText 为去掉唤醒词后的提问;音频走 /api/tts 流式
           addMsg('user', msg.userText);
           addMsg('reply', msg.replyText);
-          playStreamed(msg.replyText);
+          ttsPlayer.play(msg.replyText);
           wakeHint.textContent = '对话中,可直接说话(免唤醒词)';
           status.textContent = '回答完毕,窗口内可直接提问';
         } else if (msg.type === 'wake') {
@@ -266,10 +218,10 @@
       wakeActive = false;
       if (procNode) { procNode.onaudioprocess = null; procNode.disconnect(); }
       if (srcNode) srcNode.disconnect();
-      if (audioCtx) audioCtx.close().catch(() => {});
+      if (wakeCtx) wakeCtx.close().catch(() => {});
       if (wakeWs) wakeWs.close();
       if (micStream) micStream.getTracks().forEach((t) => t.stop());
-      wakeWs = null; audioCtx = null; srcNode = null; procNode = null; micStream = null;
+      wakeWs = null; wakeCtx = null; srcNode = null; procNode = null; micStream = null;
     }
 
     wakeBtn.addEventListener('click', () => {
@@ -309,7 +261,7 @@
     }
 
     async function startRecording() {
-      stopPlayback(); // 打断式播放(2):开口即打断正在播的回答
+      ttsPlayer.stop(); // 打断式播放(2):开口即打断正在播的回答
       errBox.style.display = 'none';
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       chunks = [];
@@ -362,7 +314,7 @@
         if (seq !== reqSeq) return; // 已有更新的提问,丢弃旧响应
         addMsg('user', data.userText);
         addMsg('reply', data.replyText);
-        playStreamed(data.replyText);
+        ttsPlayer.play(data.replyText);
         status.textContent = '回答完毕,可以继续提问';
       } catch (err) {
         if (seq === reqSeq) { status.textContent = ''; showError('出错了:' + err.message); }
@@ -390,7 +342,7 @@
       if (!text) return;
       textInput.value = '';
       const seq = ++reqSeq; // 打断式播放(3):文字提问同样抢占最新请求
-      stopPlayback(); // 开口即打断
+      ttsPlayer.stop(); // 开口即打断
       status.textContent = '正在回复…';
       try {
         const res = await fetch('/api/chat_text', {
@@ -403,7 +355,7 @@
         if (seq !== reqSeq) return;
         addMsg('user', text);
         addMsg('reply', data.replyText);
-        playStreamed(data.replyText);
+        ttsPlayer.play(data.replyText);
         status.textContent = '回答完毕,可以继续提问';
       } catch (err) {
         if (seq === reqSeq) { status.textContent = ''; showError('出错了:' + err.message); }
