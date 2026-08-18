@@ -74,6 +74,37 @@ async function frameProbs(samples, session) {
   return probs;
 }
 
+// 流式 VAD:有状态逐帧推理。feed(int16 块)内部缓存残差、跨块对齐 512 窗口,
+// 每推理一帧回调 onFrame(prob, samples)(samples 是该帧 512 个 float32 样本)。
+// 供 wake.js 唤醒检测用;trimSilence 整段裁剪仍用原逻辑。
+async function createVadStream(onFrame) {
+  const session = await getSession();
+  const sr = new ort.Tensor('int64', new BigInt64Array([BigInt(SAMPLE_RATE)]), []);
+  let state = new Float32Array(2 * STATE_SIZE).fill(0);
+  let pending = new Float32Array(0);
+  return {
+    async feed(int16) {
+      const f32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768;
+      const combined = new Float32Array(pending.length + f32.length);
+      combined.set(pending);
+      combined.set(f32, pending.length);
+      const usable = combined.length - (combined.length % WINDOW);
+      for (let i = 0; i < usable; i += WINDOW) {
+        const samples = new Float32Array(combined.subarray(i, i + WINDOW));
+        const r = await session.run({
+          input: new ort.Tensor('float32', samples, [1, WINDOW]),
+          state: new ort.Tensor('float32', state, [2, 1, STATE_SIZE]),
+          sr,
+        });
+        state = r.stateN.data;
+        onFrame(r.output.data[0], samples);
+      }
+      pending = combined.slice(usable);
+    },
+  };
+}
+
 // int16 样本 → 16k mono s16le wav
 function samplesToWav(samples) {
   const dataSize = samples.length * 2;
@@ -122,4 +153,4 @@ async function trimSilence(wavPath) {
   return outPath;
 }
 
-module.exports = { trimSilence };
+module.exports = { trimSilence, samplesToWav, createVadStream };

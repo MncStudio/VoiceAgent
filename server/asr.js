@@ -11,8 +11,25 @@ async function recognize(wavPath) {
   if (config.asr.provider === 'paraformer-ws') {
     return asrWs(fs.readFileSync(wavPath));
   }
+  return recognizeLocal(wavPath);
+}
 
-  // 本地 HTTP 实现
+// ASR:内存中的 wav Buffer → 识别文字(供唤醒检测等流式场景,免落盘给 HTTP 用)。
+async function recognizeBuffer(wavBuffer) {
+  if (config.asr.provider === 'paraformer-ws') {
+    return asrWs(wavBuffer);
+  }
+  const audio = require('./audio');
+  const p = audio.tempPath('.wav');
+  fs.writeFileSync(p, wavBuffer);
+  try {
+    return await recognizeLocal(p);
+  } finally {
+    audio.cleanup(p);
+  }
+}
+
+async function recognizeLocal(wavPath) {
   const body = new FormData();
   body.append('file', new Blob([fs.readFileSync(wavPath)], { type: 'audio/wav' }), 'audio.wav');
 
@@ -34,4 +51,4 @@ async function recognize(wavPath) {
   return text;
 }
 
-module.exports = { recognize };
+module.exports = { recognize, recognizeBuffer };
