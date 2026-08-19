@@ -122,7 +122,7 @@
 
     // ============ 流式 TTS 播放器(封装在 public/tts-player.js) ============
     // ttsPlayer.play(replyText) 边生成边播,重复调用自动打断旧回答;ttsPlayer.stop() 手动打断。
-    // 播放期间 ttsPlayer.playing 为 true,唤醒采集据此暂停,防回答声音被误判为用户提问。
+    // 唤醒模式下后端 VAD 判到你开口会回 interrupt,这里收到就 stop(开口即打断,不等识别完)。
     const ttsPlayer = new TtsPlayer();
     ttsPlayer.onError = (msg) => showError('TTS 失败:' + msg);
 
@@ -165,7 +165,17 @@
     const wakeHint = document.getElementById('wakeHint');
 
     async function startWake() {
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // echoCancellation 消扬声器回声:外放时回答声不会再被 VAD 误判成"用户开口"而自打断
+      // (打断要求采集常开,开 AEC 是防止外放自打断的关键)。noiseSuppression/autoGainControl 顺带降噪。
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          sampleRate: 16000,
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
       // 采集固定 16k,与后端 VAD/ASR 一致(浏览器自动重采样)。
       wakeCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
       if (Math.abs(wakeCtx.sampleRate - 16000) > 1) {
@@ -184,8 +194,9 @@
       muteGain.gain.value = 0;
       procNode.connect(muteGain);
       muteGain.connect(wakeCtx.destination);
+      // 采集常开:后端 VAD 判开口(约 96ms)即回 interrupt,前端收到就停播放。
+      // 外放回声由上方 getUserMedia 的 echoCancellation 消除;极端环境仍建议戴耳机(物理最稳)。
       procNode.onaudioprocess = (e) => {
-        if (ttsPlayer.playing) return; // 回答播放期间不发送,防扬声器声音被误判为用户提问
         if (wakeWs && wakeWs.readyState === WebSocket.OPEN) {
           const f = e.inputBuffer.getChannelData(0);
           const i16 = new Int16Array(f.length);
@@ -202,6 +213,9 @@
           ttsPlayer.play(msg.replyText);
           wakeHint.textContent = '对话中,可直接说话(免唤醒词)';
           status.textContent = '回答完毕,窗口内可直接提问';
+        } else if (msg.type === 'interrupt') {
+          // 后端 VAD 判到你开口:立即打断正在播的回答(检测在后端,这里只执行停止)
+          ttsPlayer.stop();
         } else if (msg.type === 'wake') {
           // 命中唤醒词,进入唤醒窗口
           wakeHint.textContent = '已唤醒,窗口内可直接说话';
@@ -263,7 +277,10 @@
     async function startRecording() {
       ttsPlayer.stop(); // 打断式播放(2):开口即打断正在播的回答
       errBox.style.display = 'none';
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // 按住说话同样开回声消除/降噪;MediaRecorder 按设备默认采样率录(opus 内部 48k),不设 sampleRate
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
       chunks = [];
       const mimeType = pickMimeType();
       mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);

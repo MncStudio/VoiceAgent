@@ -6,7 +6,7 @@
 //   ttsPlayer.onError = (msg) => showError('TTS 失败:' + msg);
 //   ttsPlayer.play(replyText);   // 边生成边播,重复调用自动打断旧回答
 //   ttsPlayer.stop();            // 手动打断
-//   ttsPlayer.playing            // 播放期间为 true,可据此暂停唤醒采集
+//   ttsPlayer.playing            // 播放期间为 true
 //
 // 关键点(别改):播放起点必须等首个 PCM 块到达时才定为 ctx.currentTime + 0.15。
 // 若在 play() 开始时预设起点,TTS 首块要等 ~800ms 才到,start() 拿到的是过期时间戳,

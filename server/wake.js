@@ -4,10 +4,11 @@ const vad = require('./vad');
 const asr = require('./asr');
 const turn = require('./turn');
 const { Timing } = require('./timing');
+const { pinyin } = require('pinyin-pro'); // 拼音模糊匹配,兼容 ASR 同音字误识别
 
 // 唤醒检测:前端常驻推 16k mono int16 PCM 块,这里用流式 Silero VAD 判"开口段",
-// 段结束送 ASR,归一化文本后与配置的唤醒词匹配。命中后**自动回答**:去掉唤醒词,
-// 剩余文本直接送 LLM→TTS,音频经 WS 回传前端播放(免按键)。
+// 段结束送 ASR,归一化文本后与配置的唤醒词匹配(字符精确 + 拼音模糊,兼容同音字误识别)。
+// 命中后**自动回答**:去掉唤醒词,剩余文本直接送 LLM→TTS,音频经 WS 回传前端播放(免按键)。
 // 命中唤醒词即进入"唤醒窗口"(config 的 wakeTimeout,秒):窗口内再说话不用带唤醒词,
 // 直接回答;窗口超时自动休眠,需重新说唤醒词。
 // 唤醒词来自 server/config/{profile}.json 的 wakeWords,可配置多个、可改。
@@ -25,6 +26,28 @@ function normalize(s) {
     /[\s　，。！？；：、“”‘’（）【】《》〈〉〔〕……—·,.!?;:'"()\[\]{}<>@#$%^&*+=_\-~`/\\|]/g,
     ''
   ).toLowerCase();
+}
+
+// 逐字符转拼音音节(忽略声调)。汉字→拼音(如 智/志 都→zhi),非汉字→保留原字符,
+// 保证每个元素与原文一个字符一一对应,拼音匹配到的窗口能精确映射回原文剥词。
+function toSyllables(s) {
+  const out = [];
+  for (const ch of s) {
+    const p = pinyin(ch, { toneType: 'none' });
+    out.push(p || ch);
+  }
+  return out;
+}
+
+// sub 是否 syl 的连续子序列:返回起始下标,未命中返回 -1。
+function findSubseq(syl, sub) {
+  outer: for (let i = 0; i + sub.length <= syl.length; i++) {
+    for (let j = 0; j < sub.length; j++) {
+      if (syl[i + j] !== sub[j]) continue outer;
+    }
+    return i;
+  }
+  return -1;
 }
 
 // 环形缓冲:保留最近 PAD_SAMPLES 个样本,作为开口前/段尾的静音 padding。
@@ -53,6 +76,7 @@ class Ring {
 class WakeDetector {
   constructor(wakeWords, sessionId, onEvent, wakeTimeoutMs) {
     this.wakeWords = wakeWords.map(normalize).filter(Boolean);
+    this.wakeSyllables = this.wakeWords.map(toSyllables); // 拼音匹配用,构造时预计算一次
     this.sessionId = sessionId; // 唤醒自动回答与语音/文字共享多轮记忆
     this.onEvent = onEvent; // 回调(type, payload):answer=回答、wake=命中唤醒词、sleep=已休眠
     this.wakeTimeoutMs = wakeTimeoutMs || 300000; // 唤醒窗口时长,默认 5 分钟
@@ -68,6 +92,28 @@ class WakeDetector {
     this.classifying = false; // 前一次 ASR 未完成时不启动新的,避免堆积
   }
 
+  // 匹配唤醒词:先按字符精确匹配(快路径),不中再按拼音匹配(忽略声调)。
+  // 拼音匹配解决 ASR 同音字误识别(如「你好小智」被识别成「你好小志」,志/智拼音都是 zhi)。
+  // 命中返回 { word, rest },rest=剥掉唤醒词后的剩余文本(归一化);未命中返回 null。
+  match(text) {
+    const n = normalize(text);
+    const word = this.wakeWords.find((w) => n.includes(w));
+    if (word) return { word, rest: n.replace(word, '').trim() };
+    // 拼音匹配:唤醒词音节序列是文本音节序列的连续子序列。
+    // 音节逐字对应原文,命中的窗口映射回 n 的字符区间剥词(唤醒词为纯中文,字符数=音节数)。
+    const syl = toSyllables(n);
+    for (let i = 0; i < this.wakeWords.length; i++) {
+      const sub = this.wakeSyllables[i];
+      if (!sub.length) continue;
+      const idx = findSubseq(syl, sub);
+      if (idx >= 0) {
+        const w = this.wakeWords[i];
+        return { word: w, rest: (n.slice(0, idx) + n.slice(idx + w.length)).trim() };
+      }
+    }
+    return null;
+  }
+
   async init() {
     this.vadStream = await vad.createVadStream((prob, samples) => this.onFrame(prob, samples));
   }
@@ -80,6 +126,9 @@ class WakeDetector {
       if (isSpeech) {
         this.speechStreak++;
         if (this.speechStreak >= START_FRAMES) {
+          // 判到开口(约 96ms)立即通知前端打断正在播的回答,不等整句识别完。
+          // 检测由后端 VAD 统一做(前端不判音量):开口即打断,前端收到 interrupt 停播放。
+          this.onEvent('interrupt');
           this.state = 'speaking';
           // 段头 padding = 已缓存的最近 100ms
           this.speechFrames = [this.ring.toArray()];
@@ -141,7 +190,6 @@ class WakeDetector {
       .then((text) => {
         t.mark('ASR识别');
         t.log();
-        const n = normalize(text);
         const now = Date.now();
 
         // 唤醒窗口超时 → 休眠,需重新说唤醒词。在下一个开口段识别后判定。
@@ -152,23 +200,23 @@ class WakeDetector {
 
         if (this.armed) {
           // 已唤醒:整句直接送 LLM,不用再带唤醒词。
-          // 若还带着唤醒词(习惯性带上),剥掉再送。
+          // 若还带着唤醒词(习惯性带上),剥掉再送(字符/拼音匹配均可)。
           this.lastActiveAt = now;
-          const word = this.wakeWords.find((w) => n.includes(w));
-          this.answer(word ? n.replace(word, '').trim() : text.trim(), word);
+          const m = this.match(text);
+          this.answer(m ? m.rest : text.trim(), m ? m.word : undefined);
           return;
         }
 
         // 未唤醒:必须匹配唤醒词才回答,否则整段丢弃。
-        const word = this.wakeWords.find((w) => n.includes(w));
-        if (!word) {
+        const m = this.match(text);
+        if (!m) {
           console.log(`[wake] 未命中唤醒词,识别为:「${text}」`);
           return;
         }
         this.armed = true;
         this.lastActiveAt = now;
-        this.onEvent('wake', { word });
-        this.answer(n.replace(word, '').trim(), word);
+        this.onEvent('wake', { word: m.word });
+        this.answer(m.rest, m.word);
       })
       .catch((e) => console.error(`[wake] 唤醒段识别失败: ${e.message}`))
       .finally(() => {
