@@ -18,7 +18,7 @@ const START_FRAMES = 3; // 连续语音帧数 → 判开口(约 96ms)
 const END_FRAMES = 15; // 连续静音帧数 → 判段结束(约 480ms)
 const PAD_SAMPLES = 1600; // 段前后各保留 100ms 静音,防止掐头去尾
 const MAX_SEG_SAMPLES = 5 * 16000; // 单段上限 5s,超时强制截断
-const WAKE_REPLY = '我在，请讲'; // 只说唤醒词、没带问题时发给 LLM 的固定输入
+const WAKE_REPLY = '我在，请讲'; // 只说唤醒词、没带问题时的固定问候回复(不走 LLM,不写进多轮历史)
 
 // 归一化:去空白/全半角标点/转小写,ASR 结果和唤醒词统一后再做包含匹配。
 function normalize(s) {
@@ -224,13 +224,17 @@ class WakeDetector {
       });
   }
 
-  // 去掉唤醒词后送 LLM。音频由前端经 /api/tts 流式合成播放,这里只回文本。
+  // 只说唤醒词、没带问题:直接回固定问候,不走 LLM,避免把「我在，请讲」当用户消息写进多轮历史。
+  // 带问题才走 turn.ask(与语音/文字共享多轮记忆)。音频由前端经 /api/tts 流式合成播放,这里只回文本。
   answer(question, word) {
-    const input = question || WAKE_REPLY;
+    if (!question) {
+      this.onEvent('answer', { userText: word || WAKE_REPLY, replyText: WAKE_REPLY });
+      return;
+    }
     turn
-      .ask(input, this.sessionId)
+      .ask(question, this.sessionId)
       .then(({ replyText }) => {
-        this.onEvent('answer', { userText: question || word || input, replyText });
+        this.onEvent('answer', { userText: question, replyText });
       })
       .catch((e) => console.error(`[wake] 回答失败: ${e.message}`));
   }
