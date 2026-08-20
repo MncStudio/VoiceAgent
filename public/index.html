@@ -58,7 +58,7 @@
 </head>
 <body>
   <h1>VoiceAgent 接口演示</h1>
-  <div class="sub">本页即接口文档 + 调用示例,演示四个后端接口,可直接移植到你的前端项目</div>
+  <div class="sub">本页即接入示例,只调用 <code>VoiceAgent</code> SDK 一个入口,可直接移植到你的前端项目</div>
 
   <div class="stack">
     <!-- ① 唤醒监听 -->
@@ -67,15 +67,15 @@
       <div class="api-desc">
         连接 <code>/api/wake?sessionId=…</code>,持续发送 16k mono int16 PCM 块(二进制)。
         后端用 VAD+ASR 检测唤醒词(可改 <code>server/config/*.json</code> 的 <code>wakeWords</code>),
-        命中后去掉唤醒词、剩余文本送 LLM,回 <code>{"type":"answer","replyText":…}</code>(文本);
-        音频由前端经 <code>/api/tts</code> WS 流式合成播放。
-        命中即进入唤醒窗口(<code>wakeTimeout</code> 秒,默认 300):窗口内说话<b>免唤醒词</b>直接回答,
-        超时回 <code>{"type":"sleep"}</code> 自动休眠,需重新说唤醒词。
+        命中后去掉唤醒词、剩余文本送 LLM,自动回答并经 <code>/api/tts</code> 流式播放。
+        命中即进入唤醒窗口(<code>wakeTimeout</code> 秒):窗口内说话<b>免唤醒词</b>直接回答,
+        超时自动休眠,需重新说唤醒词。页面加载即自动开始监听。
       </div>
       <div class="row">
         <button id="wakeBtn" class="secondary">开始监听</button>
         <span class="wake-dot" id="wakeDot"></span>
-        <span id="wakeHint" style="color:#95a5a6;font-size:0.85rem">待唤醒,说「你好小智 + 问题」</span>
+        <span id="wakeTimer" style="display:none;font-weight:600;color:#6c5ce7;"></span>
+        <span id="wakeHint" style="color:#95a5a6;font-size:0.85rem">正在请求麦克风权限…</span>
       </div>
     </div>
 
@@ -85,7 +85,7 @@
       <div class="api-desc">
         <code>multipart/form-data</code>:<code>audio</code>(webm/mp4 录音)+ <code>sessionId</code> →
         后端转码→VAD 裁静音→ASR→LLM,返回 <code>{replyText, userText}</code>;
-        音频由前端经 <code>/api/tts</code> WS 流式合成播放(边生成边播,无需等整段)。
+        音频由前端经 <code>/api/tts</code> 流式合成播放(边生成边播,无需等整段)。
       </div>
       <div class="row">
         <button id="recordBtn">🎤 按住说话</button>
@@ -112,26 +112,19 @@
   <div class="panel" id="panel"></div>
   <div id="errBox"></div>
 
-  <script src="/tts-player.js"></script>
+  <script src="/voice-agent.js"></script>
   <script>
-    // ================= 通用:会话 ID、打断式播放、请求序号 =================
-    // sessionId 保持多轮记忆,语音和文字共用。
-    const SESSION_KEY = 'voiceagent_session';
-    const sessionId = localStorage.getItem(SESSION_KEY) || crypto.randomUUID();
-    localStorage.setItem(SESSION_KEY, sessionId);
-
-    // ============ 流式 TTS 播放器(封装在 public/tts-player.js) ============
-    // ttsPlayer.play(replyText) 边生成边播,重复调用自动打断旧回答;ttsPlayer.stop() 手动打断。
-    // 唤醒模式下后端 VAD 判到你开口会回 interrupt,这里收到就 stop(开口即打断,不等识别完)。
-    const ttsPlayer = new TtsPlayer();
-    ttsPlayer.onError = (msg) => showError('TTS 失败:' + msg);
-
-    // 请求竞态保护:只让"最后一次提问"的响应生效,丢弃晚到的旧响应。
-    let reqSeq = 0;
-
+    // ================= UI 元素 =================
     const status = document.getElementById('status');
     const panel = document.getElementById('panel');
     const errBox = document.getElementById('errBox');
+    const wakeBtn = document.getElementById('wakeBtn');
+    const wakeDot = document.getElementById('wakeDot');
+    const wakeHint = document.getElementById('wakeHint');
+    const wakeTimer = document.getElementById('wakeTimer');
+    const recordBtn = document.getElementById('recordBtn');
+    const textInput = document.getElementById('textInput');
+    const sendBtn = document.getElementById('sendBtn');
 
     function showError(msg) {
       errBox.textContent = msg;
@@ -148,235 +141,89 @@
       panel.scrollTop = panel.scrollHeight;
     }
 
-    // ================= ① 唤醒词监听(GET /api/wake, WebSocket) =================
-    // 用法:new WebSocket(ws://<host>/api/wake?sessionId=…) → 发二进制 int16 PCM →
-    //       命中唤醒词 {"type":"wake","word":"…"} → 进入唤醒窗口,窗口内免唤醒词说话,
-    //       后端直接回 {"type":"answer","userText":…,"replyText":…} 自动回答(文本);
-    //       前端拿 replyText 调 ttsPlayer.play(经 /api/tts 流式播放);
-    //       窗口超时回 {"type":"sleep"},需重新说唤醒词。
-    let wakeActive = false;
-    let wakeWs = null;
-    let micStream = null;
-    let wakeCtx = null; // 唤醒采集专用 16k AudioContext,与播放用的 audioCtx 独立
-    let srcNode = null;
-    let procNode = null;
-    const wakeBtn = document.getElementById('wakeBtn');
-    const wakeDot = document.getElementById('wakeDot');
-    const wakeHint = document.getElementById('wakeHint');
+    // ================= VoiceAgent SDK =================
+    // 一个入口搞定三路问答 + 自动 TTS 播放。autoWake:true 页面加载即自动开始唤醒监听。
+    // 唤醒窗口倒计时:onWake 拿到 timeoutSeconds(窗口总秒数)后每秒递减,
+    // onReply(窗口内有回答)重置,sleep 归零。接入方可据此换成进度条/圆环等样式。
+    let wakeTotalSec = 0;   // 窗口总秒数(wake 事件带回)
+    let idleSec = 0;        // 最近一次休眠时的实际静默秒数(sleep 事件带回)
+    let timerId = null;
 
-    async function startWake() {
-      // echoCancellation 消扬声器回声:外放时回答声不会再被 VAD 误判成"用户开口"而自打断
-      // (打断要求采集常开,开 AEC 是防止外放自打断的关键)。noiseSuppression/autoGainControl 顺带降噪。
-      micStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          sampleRate: 16000,
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
-      // 采集固定 16k,与后端 VAD/ASR 一致(浏览器自动重采样)。
-      wakeCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-      if (Math.abs(wakeCtx.sampleRate - 16000) > 1) {
-        throw new Error('浏览器不支持 16k 采样率(实际 ' + wakeCtx.sampleRate + 'Hz),无法做唤醒检测');
-      }
-      const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://')
-        + location.host + '/api/wake?sessionId=' + encodeURIComponent(sessionId);
-      wakeWs = new WebSocket(wsUrl);
-
-      srcNode = wakeCtx.createMediaStreamSource(micStream);
-      procNode = wakeCtx.createScriptProcessor(4096, 1, 1); // 每块 256ms(16k)
-      srcNode.connect(procNode);
-      // 采集链路不能直通扬声器:麦克风声音会被实时外放,助手回答一出声就采回去,
-      // 形成回声/啸叫(听感"呜啦呜啦")。接 0 增益节点让 onaudioprocess 正常触发但不外放。
-      const muteGain = wakeCtx.createGain();
-      muteGain.gain.value = 0;
-      procNode.connect(muteGain);
-      muteGain.connect(wakeCtx.destination);
-      // 采集常开:后端 VAD 判开口(约 96ms)即回 interrupt,前端收到就停播放。
-      // 外放回声由上方 getUserMedia 的 echoCancellation 消除;极端环境仍建议戴耳机(物理最稳)。
-      procNode.onaudioprocess = (e) => {
-        if (wakeWs && wakeWs.readyState === WebSocket.OPEN) {
-          const f = e.inputBuffer.getChannelData(0);
-          const i16 = new Int16Array(f.length);
-          for (let i = 0; i < f.length; i++) i16[i] = Math.max(-1, Math.min(1, f[i])) * 32767;
-          wakeWs.send(i16.buffer);
-        }
-      };
-      wakeWs.onmessage = (e) => {
-        const msg = JSON.parse(e.data);
-        if (msg.type === 'answer') {
-          // 唤醒自动回答:窗口内免按键直接答,userText 为去掉唤醒词后的提问;音频走 /api/tts 流式
-          addMsg('user', msg.userText);
-          addMsg('reply', msg.replyText);
-          ttsPlayer.play(msg.replyText);
-          wakeHint.textContent = '对话中,可直接说话(免唤醒词)';
-          status.textContent = '回答完毕,窗口内可直接提问';
-        } else if (msg.type === 'interrupt') {
-          // 后端 VAD 判到你开口:立即打断正在播的回答(检测在后端,这里只执行停止)
-          ttsPlayer.stop();
-        } else if (msg.type === 'wake') {
-          // 命中唤醒词,进入唤醒窗口
-          wakeHint.textContent = '已唤醒,窗口内可直接说话';
-        } else if (msg.type === 'sleep') {
-          // 唤醒窗口超时,已休眠,需重新说唤醒词
-          wakeHint.textContent = '已休眠,说「你好小智」重新唤醒';
-        }
-      };
-      wakeWs.onerror = () => { if (wakeActive) { stopWake(); showError('唤醒连接异常'); } };
-      wakeWs.onclose = () => { if (wakeActive) stopWake(); };
+    function startCountdown(total) {
+      stopCountdown();
+      wakeTotalSec = total;
+      let left = total;
+      wakeTimer.style.display = '';
+      wakeTimer.textContent = left + 's';
+      timerId = setInterval(() => {
+        left--;
+        if (left <= 0) { stopCountdown(); return; }
+        wakeTimer.textContent = left + 's';
+      }, 1000);
+    }
+    function stopCountdown() {
+      if (timerId) { clearInterval(timerId); timerId = null; }
+      wakeTimer.style.display = 'none';
     }
 
-    function stopWake() {
-      wakeActive = false;
-      if (procNode) { procNode.onaudioprocess = null; procNode.disconnect(); }
-      if (srcNode) srcNode.disconnect();
-      if (wakeCtx) wakeCtx.close().catch(() => {});
-      if (wakeWs) wakeWs.close();
-      if (micStream) micStream.getTracks().forEach((t) => t.stop());
-      wakeWs = null; wakeCtx = null; srcNode = null; procNode = null; micStream = null;
-    }
-
-    wakeBtn.addEventListener('click', () => {
-      if (wakeActive) {
-        stopWake();
-        wakeBtn.textContent = '开始监听';
-        wakeDot.classList.remove('active');
-        wakeHint.textContent = '待唤醒,说「你好小智 + 问题」';
-        status.textContent = '监听已停止';
-      } else {
-        startWake().then(() => {
-          wakeActive = true;
-          wakeBtn.textContent = '停止监听';
-          wakeDot.classList.add('active');
-          wakeHint.textContent = '待唤醒,说「你好小智 + 问题」';
-          status.textContent = '监听中,说「你好小智」唤醒';
-        }).catch((e) => { stopWake(); showError('无法监听:' + e.message); });
-      }
-    });
-
-    // ================= ② 按住说话(POST /api/chat, multipart) =================
-    // 用法:FormData.append('audio', webmBlob) + append('sessionId', id)
-    let mediaRecorder = null;
-    let chunks = [];
-    let recording = false;
-    let recStartTime = 0;
-    let shouldSend = false;
-    const MIN_DURATION = 400;
-    const recordBtn = document.getElementById('recordBtn');
-
-    function pickMimeType() {
-      const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
-      for (const c of candidates) {
-        if (MediaRecorder.isTypeSupported(c)) return c;
-      }
-      return '';
-    }
-
-    async function startRecording() {
-      ttsPlayer.stop(); // 打断式播放(2):开口即打断正在播的回答
-      errBox.style.display = 'none';
-      // 按住说话同样开回声消除/降噪;MediaRecorder 按设备默认采样率录(opus 内部 48k),不设 sampleRate
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
-      chunks = [];
-      const mimeType = pickMimeType();
-      mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
-      mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
-      mediaRecorder.onstop = sendAudio;
-      recStartTime = Date.now();
-      mediaRecorder.start();
-      recording = true;
-      recordBtn.classList.add('recording');
-      status.textContent = '正在录音,松开停止…';
-    }
-
-    function stopRecording() {
-      if (!recording) return;
-      recording = false;
-      recordBtn.classList.remove('recording');
-      const duration = Date.now() - recStartTime;
-      if (duration < MIN_DURATION) {
-        shouldSend = false;
-        status.textContent = '录音太短,请按住按钮说话';
-        mediaRecorder.stop();
-        mediaRecorder.stream.getTracks().forEach((t) => t.stop());
-        chunks = [];
-        return;
-      }
-      shouldSend = true;
-      status.textContent = '正在识别,请稍候…';
-      mediaRecorder.stop();
-      mediaRecorder.stream.getTracks().forEach((t) => t.stop());
-    }
-
-    async function sendAudio() {
-      if (!shouldSend) return;
-      const seq = ++reqSeq; // 打断式播放(3):本次为最新请求
-      const blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'audio/webm' });
-      if (blob.size < 1000) {
-        status.textContent = '';
-        showError('录音内容为空,请重试');
-        return;
-      }
-      const form = new FormData();
-      form.append('audio', blob, 'recording');
-      form.append('sessionId', sessionId);
-      try {
-        const res = await fetch('/api/chat', { method: 'POST', body: form });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
-        if (seq !== reqSeq) return; // 已有更新的提问,丢弃旧响应
-        addMsg('user', data.userText);
-        addMsg('reply', data.replyText);
-        ttsPlayer.play(data.replyText);
+    const agent = new VoiceAgent({
+      autoWake: true,
+      onUserText: (text) => addMsg('user', text),
+      onReply: (text) => {
+        addMsg('reply', text);
         status.textContent = '回答完毕,可以继续提问';
-      } catch (err) {
-        if (seq === reqSeq) { status.textContent = ''; showError('出错了:' + err.message); }
+        if (timerId) startCountdown(wakeTotalSec); // 窗口内每次回答重置倒计时
+      },
+      onWake: (word, timeoutSeconds) => { if (timeoutSeconds) startCountdown(timeoutSeconds); },
+      onSleep: (idleSeconds) => { idleSec = idleSeconds || 0; stopCountdown(); },
+      onStateChange: updateUI,
+      onError: showError,
+    });
+
+    function updateUI(s) {
+      wakeDot.classList.toggle('active', agent.wakeActive);
+      wakeBtn.textContent = agent.wakeActive ? '停止监听' : '开始监听';
+      recordBtn.classList.toggle('recording', s === 'recording');
+      if (s === 'idle') stopCountdown();
+      switch (s) {
+        case 'starting': wakeHint.textContent = '正在请求麦克风权限…'; break;
+        case 'waiting-activation': wakeHint.textContent = '已授权,点击页面任意处以开始监听'; break;
+        case 'listening': wakeHint.textContent = '待唤醒,说「你好小智 + 问题」'; break;
+        case 'wake-active': wakeHint.textContent = '已唤醒,窗口内可直接说话'; break;
+        case 'sleep': wakeHint.textContent = idleSec
+          ? '已静默 ' + idleSec + ' 秒后休眠,说「你好小智」重新唤醒'
+          : '已休眠,说「你好小智」重新唤醒'; break;
+        case 'recording': status.textContent = '正在录音,松开停止…'; break;
+        case 'speaking': status.textContent = '正在回答…'; break;
+        case 'idle': wakeHint.textContent = '已停止,点击「开始监听」'; break;
       }
     }
 
-    recordBtn.addEventListener('mousedown', () => {
-      startRecording().catch((e) => { status.textContent = ''; showError('无法录音:' + e.message); });
+    // 唤醒监听开关
+    wakeBtn.addEventListener('click', () => {
+      if (agent.wakeActive) {
+        agent.stopWake();
+        stopCountdown();
+      } else {
+        agent.startWake().catch((e) => showError('无法监听:' + e.message));
+      }
     });
-    recordBtn.addEventListener('mouseup', stopRecording);
+
+    // 按住说话
+    recordBtn.addEventListener('mousedown', () => {
+      agent.startRecording().catch((e) => showError('无法录音:' + e.message));
+    });
+    recordBtn.addEventListener('mouseup', () => agent.stopRecording());
     recordBtn.addEventListener('touchstart', (e) => {
       e.preventDefault();
-      startRecording().catch((e) => { status.textContent = ''; showError('无法录音:' + e.message); });
+      agent.startRecording().catch((e) => showError('无法录音:' + e.message));
     });
-    recordBtn.addEventListener('touchend', stopRecording);
+    recordBtn.addEventListener('touchend', () => agent.stopRecording());
 
-    // ================= ③ 文字问答(POST /api/chat_text, JSON) =================
-    // 用法:fetch('/api/chat_text', {method:'POST', headers:{'Content-Type':'application/json'},
-    //        body: JSON.stringify({text, sessionId})})
-    const textInput = document.getElementById('textInput');
-    const sendBtn = document.getElementById('sendBtn');
-
-    async function sendText() {
-      const text = textInput.value.trim();
-      if (!text) return;
+    // 文字问答
+    function sendText() {
+      agent.askText(textInput.value).catch(() => {}); // 错误已由 onError 上报
       textInput.value = '';
-      const seq = ++reqSeq; // 打断式播放(3):文字提问同样抢占最新请求
-      ttsPlayer.stop(); // 开口即打断
-      status.textContent = '正在回复…';
-      try {
-        const res = await fetch('/api/chat_text', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text, sessionId }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
-        if (seq !== reqSeq) return;
-        addMsg('user', text);
-        addMsg('reply', data.replyText);
-        ttsPlayer.play(data.replyText);
-        status.textContent = '回答完毕,可以继续提问';
-      } catch (err) {
-        if (seq === reqSeq) { status.textContent = ''; showError('出错了:' + err.message); }
-      }
     }
     sendBtn.addEventListener('click', sendText);
     textInput.addEventListener('keydown', (e) => {

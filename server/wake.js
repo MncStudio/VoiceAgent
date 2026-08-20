@@ -193,9 +193,10 @@ class WakeDetector {
         const now = Date.now();
 
         // 唤醒窗口超时 → 休眠,需重新说唤醒词。在下一个开口段识别后判定。
+        // 回 idleSeconds=实际静默秒数(≈窗口阈值,ASR 延迟会略大),供前端画休眠/倒计时样式。
         if (this.armed && now - this.lastActiveAt > this.wakeTimeoutMs) {
           this.armed = false;
-          this.onEvent('sleep');
+          this.onEvent('sleep', { idleSeconds: Math.round((now - this.lastActiveAt) / 1000) });
         }
 
         if (this.armed) {
@@ -215,7 +216,7 @@ class WakeDetector {
         }
         this.armed = true;
         this.lastActiveAt = now;
-        this.onEvent('wake', { word: m.word });
+        this.onEvent('wake', { word: m.word, timeoutSeconds: Math.round(this.wakeTimeoutMs / 1000) });
         this.answer(m.rest, m.word);
       })
       .catch((e) => console.error(`[wake] 唤醒段识别失败: ${e.message}`))
