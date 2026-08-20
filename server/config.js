@@ -9,7 +9,7 @@ const profile = process.env.VA_PROFILE || 'local';
 const configPath = path.join(__dirname, 'config', `${profile}.json`);
 
 if (!fs.existsSync(configPath)) {
-  throw new Error(`未找到配置 ${configPath},请复制 server/config.example.json 并填写`);
+  throw new Error(`未找到配置 ${configPath},请参考 server/config/README.md 创建`);
 }
 
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));

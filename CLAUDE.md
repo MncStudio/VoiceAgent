@@ -12,7 +12,7 @@ VA_PROFILE=online npm start# 全线上(百炼 + DeepSeek,按量计费)
 
 ## 配置
 
-- 模板 `server/config.example.json`（可入库）；真实值放 `server/config/local.json` / `online.json`，已被 gitignore 排除（含 API key），不要提交。
+- 字段说明见 `server/config/README.md`；真实值放 `server/config/local.json` / `online.json`，已被 gitignore 排除（含 API key），不要提交。
 - 通过 `VA_PROFILE` 环境变量切换后端服务；唤醒词在配置 `wakeWords`（可配多个）、唤醒窗口 `wakeTimeout`（秒，窗口内免唤醒词直接问答）。
 
 ## 代码结构（server/）
