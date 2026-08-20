@@ -81,7 +81,8 @@ class WakeDetector {
     this.onEvent = onEvent; // 回调(type, payload):answer=回答、wake=命中唤醒词、sleep=已休眠
     this.wakeTimeoutMs = wakeTimeoutMs || 300000; // 唤醒窗口时长,默认 5 分钟
     this.armed = false; // 唤醒窗口内 true:说话免唤醒词直接回答
-    this.lastActiveAt = 0; // 上次唤醒/回答时间,超时判定依据
+    this.lastActiveAt = 0; // 上次唤醒/回答时间,每次回答刷新,休眠倒计时按它重新计时
+    this.sleepTimer = null; // 唤醒窗口休眠定时器(准点触发,主动推 sleep)
     this.ring = new Ring(PAD_SAMPLES);
     this.vadStream = null;
     this.state = 'idle'; // idle | speaking
@@ -192,17 +193,11 @@ class WakeDetector {
         t.log();
         const now = Date.now();
 
-        // 唤醒窗口超时 → 休眠,需重新说唤醒词。在下一个开口段识别后判定。
-        // 回 idleSeconds=实际静默秒数(≈窗口阈值,ASR 延迟会略大),供前端画休眠/倒计时样式。
-        if (this.armed && now - this.lastActiveAt > this.wakeTimeoutMs) {
-          this.armed = false;
-          this.onEvent('sleep', { idleSeconds: Math.round((now - this.lastActiveAt) / 1000) });
-        }
-
         if (this.armed) {
           // 已唤醒:整句直接送 LLM,不用再带唤醒词。
           // 若还带着唤醒词(习惯性带上),剥掉再送(字符/拼音匹配均可)。
           this.lastActiveAt = now;
+          this._scheduleSleep(); // 窗口内每次说话刷新休眠倒计时
           const m = this.match(text);
           this.answer(m ? m.rest : text.trim(), m ? m.word : undefined);
           return;
@@ -216,6 +211,7 @@ class WakeDetector {
         }
         this.armed = true;
         this.lastActiveAt = now;
+        this._scheduleSleep();
         this.onEvent('wake', { word: m.word, timeoutSeconds: Math.round(this.wakeTimeoutMs / 1000) });
         this.answer(m.rest, m.word);
       })
@@ -223,6 +219,26 @@ class WakeDetector {
       .finally(() => {
         this.classifying = false;
       });
+  }
+
+  // 唤醒窗口休眠倒计时:命中唤醒词或窗口内每次回答都会重置。到点主动推 sleep,
+  // 不用等用户下一句开口才判超时(旧行为:静默超时后前端已显示休眠,后端却还没真正睡)。
+  _scheduleSleep() {
+    if (this.sleepTimer) clearTimeout(this.sleepTimer);
+    this.sleepTimer = setTimeout(() => {
+      this.sleepTimer = null;
+      if (!this.armed) return;
+      this.armed = false;
+      this.onEvent('sleep', { idleSeconds: Math.round((Date.now() - this.lastActiveAt) / 1000) });
+    }, this.wakeTimeoutMs);
+  }
+
+  // 连接关闭时清掉休眠定时器,避免残留回调。
+  close() {
+    if (this.sleepTimer) {
+      clearTimeout(this.sleepTimer);
+      this.sleepTimer = null;
+    }
   }
 
   // 只说唤醒词、没带问题:直接回固定问候,不走 LLM,避免把「我在，请讲」当用户消息写进多轮历史。
@@ -251,6 +267,7 @@ function attach(wss, wakeWords, wakeTimeoutSec) {
     // 前端连 /api/wake 时带 sessionId,唤醒自动回答与语音/文字共享多轮记忆
     const sessionId = url.searchParams.get('sessionId') || undefined;
     const detector = new WakeDetector(words, sessionId, (type, payload) => {
+      if (ws.readyState !== ws.OPEN) return;
       ws.send(JSON.stringify({ type, ...payload }));
     }, timeoutMs);
     // init 异步加载 ONNX 模型(数百 ms),消息到达时等它就绪再喂,避免丢帧
@@ -262,6 +279,7 @@ function attach(wss, wakeWords, wakeTimeoutSec) {
     // feed 串行化:并发喂帧会互相覆盖共享的 state/pending,导致检测错乱。
     // chain 从 ready 开始,消息按到达顺序排队处理。
     let chain = ready;
+    ws.on('close', () => detector.close()); // 断开时清休眠定时器,避免残留回调
     ws.on('message', (data, isBinary) => {
       if (!isBinary) return;
       // Buffer → Int16Array(16k mono s16le)
