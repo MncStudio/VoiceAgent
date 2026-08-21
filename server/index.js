@@ -85,9 +85,21 @@ app.post('/api/chat_text', (req, res) => {
 
 // 唤醒词检测:WebSocket,前端常驻推 16k int16 PCM 块,命中唤醒词回 {"type":"wake","word":...}
 const server = http.createServer(app);
+// 端口占用/监听失败:友好提示,避免 Node 裸崩。ws 会把 server 的 error 转发到
+// WebSocketServer 实例,所以 server 和 wss 都挂同一 handler,并先于 new WSS 注册。
+const onListenError = (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`端口 ${config.server.port} 已被占用,请先停掉旧进程或改 server.port`);
+  } else {
+    console.error('服务启动失败:', err.message);
+  }
+  process.exit(1);
+};
+server.on('error', onListenError);
 // 共享一个 WebSocketServer(不带 path):wake 与 tts 的 path 各自在 connection 里过滤。
 // 若分别用两个带 path 的 WSS 挂同一 server,先注册的会把不匹配请求直接回 400。
 const wss = new WebSocketServer({ server });
+wss.on('error', onListenError);
 wake.attach(wss, config.wakeWords || [], config.wakeTimeout, config.vad);
 
 // 流式 TTS:前端拿 replyText 后连 /api/tts 发 {type:'synthesize', text},
