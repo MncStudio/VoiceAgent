@@ -54,6 +54,7 @@
     #errBox { color: #e74c3c; font-size: 0.88rem; margin-top: 0.8rem; display: none; max-width: 620px; text-align: center; }
     .wake-dot { width: 10px; height: 10px; border-radius: 50%; background: #b2bec3; display: inline-block; }
     .wake-dot.active { background: #27ae60; box-shadow: 0 0 0 4px rgba(39, 174, 96, 0.15); }
+    #ttsMeter { width: 100%; max-width: 560px; background: #f0f1f5; border-radius: 8px; }
   </style>
 </head>
 <body>
@@ -73,6 +74,7 @@
       </div>
       <div class="row">
         <button id="wakeBtn" class="secondary">开始监听</button>
+        <button id="wakeManualBtn" class="secondary" style="display:none">👆 手动唤醒</button>
         <span class="wake-dot" id="wakeDot"></span>
         <span id="wakeTimer" style="display:none;font-weight:600;color:#6c5ce7;"></span>
         <span id="wakeHint" style="color:#95a5a6;font-size:0.85rem">正在请求麦克风权限…</span>
@@ -106,6 +108,16 @@
         <button id="sendBtn">发送</button>
       </div>
     </div>
+
+    <!-- ④ TTS 音频流(口型同步源) -->
+    <div class="api">
+      <div class="api-head"><span class="api-badge">音频流</span> TTS 播放流 · 口型同步源</div>
+      <div class="api-desc">
+        SDK 把 TTS 播放音频汇流成 <code>MediaStream</code>,经 <code>agent.audioStream</code>
+        / <code>onAudioStream</code> 暴露,供 Live2D 等做口型同步。下方是对该流的实时音量可视化。
+      </div>
+      <canvas id="ttsMeter" width="560" height="36"></canvas>
+    </div>
   </div>
 
   <div class="status" id="status">按住按钮说话,或打字提问</div>
@@ -119,6 +131,8 @@
     const panel = document.getElementById('panel');
     const errBox = document.getElementById('errBox');
     const wakeBtn = document.getElementById('wakeBtn');
+    const wakeManualBtn = document.getElementById('wakeManualBtn');
+    const ttsCanvas = document.getElementById('ttsMeter');
     const wakeDot = document.getElementById('wakeDot');
     const wakeHint = document.getElementById('wakeHint');
     const wakeTimer = document.getElementById('wakeTimer');
@@ -176,6 +190,7 @@
       },
       onWake: (word, timeoutSeconds) => { if (timeoutSeconds) startCountdown(timeoutSeconds); },
       onSleep: (idleSeconds) => { idleSec = idleSeconds || 0; stopCountdown(); },
+      onAudioStream: initTtsMeter,
       onStateChange: updateUI,
       onError: showError,
     });
@@ -183,6 +198,7 @@
     function updateUI(s) {
       wakeDot.classList.toggle('active', agent.wakeActive);
       wakeBtn.textContent = agent.wakeActive ? '停止监听' : '开始监听';
+      wakeManualBtn.style.display = agent.wakeActive ? '' : 'none';
       recordBtn.classList.toggle('recording', s === 'recording');
       if (s === 'idle') stopCountdown();
       switch (s) {
@@ -208,6 +224,43 @@
         agent.startWake().catch((e) => showError('无法监听:' + e.message));
       }
     });
+
+    // 手动唤醒:免唤醒词直接进入唤醒窗口(唤醒词一直检测不到时的兜底)
+    wakeManualBtn.addEventListener('click', () => {
+      if (!agent.wakeManual()) showError('请先「开始监听」再手动唤醒');
+    });
+
+    // ================= TTS 音频流可视化(口型同步源验证) =================
+    // 接 onAudioStream 拿 TTS 播放汇流,Analyser 实时画音量条(播放时跳动)。
+    const ttsCtx = ttsCanvas.getContext('2d');
+    let ttsAnalyser = null;
+    let ttsData = null;
+
+    function initTtsMeter(stream) {
+      const actx = new (window.AudioContext || window.webkitAudioContext)();
+      actx.resume().catch(() => {}); // autoplay 策略下首次可能挂起,尽量恢复
+      const src = actx.createMediaStreamSource(stream);
+      const analyser = actx.createAnalyser();
+      analyser.fftSize = 128;
+      src.connect(analyser);
+      ttsAnalyser = analyser;
+      ttsData = new Uint8Array(analyser.frequencyBinCount);
+      requestAnimationFrame(drawTtsMeter);
+    }
+    function drawTtsMeter() {
+      requestAnimationFrame(drawTtsMeter);
+      if (!ttsAnalyser) return;
+      ttsAnalyser.getByteFrequencyData(ttsData);
+      const w = ttsCanvas.width, h = ttsCanvas.height;
+      ttsCtx.clearRect(0, 0, w, h);
+      const n = 28, bw = w / n;
+      for (let i = 0; i < n; i++) {
+        const v = ttsData[Math.floor((i + 0.5) * ttsData.length / n)] / 255;
+        const bh = Math.max(2, Math.round(v * h));
+        ttsCtx.fillStyle = i % 2 === 0 ? '#6c5ce7' : '#a29bfe';
+        ttsCtx.fillRect(i * bw + 1, h - bh, bw - 2, bh);
+      }
+    }
 
     // 按住说话
     recordBtn.addEventListener('mousedown', () => {

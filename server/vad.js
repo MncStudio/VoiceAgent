@@ -17,7 +17,7 @@ const SAMPLE_RATE = 16000;
 const WINDOW = 512; // 每帧样本数(约 32ms)
 const STATE_SIZE = 128; // GRU 隐藏层宽度
 const THRESHOLD = 0.5; // 概率高于此判为语音
-const PAD_MS = 100; // 语音段前后各保留的静音,防止掐头去尾
+const PAD_MS = 300; // 语音段前后各保留的静音,防止掐头去尾(VAD 判语音有滞后,100ms 不够,开头短促音易被切)
 
 let sessionPromise = null;
 function getSession() {

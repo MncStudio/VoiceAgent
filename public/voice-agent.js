@@ -43,12 +43,17 @@
       this._nextTime = 0;           // 下个音块的预定播放时刻
       this._activeSources = new Set();
       this._playing = false;
+      this._out = null;             // 播放汇流 Gain(扬声器 + MediaStreamAudioDestination)
+      this._dest = null;            // 播放输出流,暴露给外部驱动口型同步等
       this.onStateChange = null;    // (playing:boolean) 可选,播放开始/结束回调
       this.onError = null;          // (msg:string) TTS 失败/连接异常
       this.onDone = null;           // () 可选,合成完成回调
+      this.onAudioStream = null;    // (stream:MediaStream) 可选,播放流创建后回调
     }
 
     get playing() { return this._playing; }
+
+    get audioStream() { return this._dest ? this._dest.stream : null; }
 
     async _ensureAudioCtx() {
       if (!this._audioCtx) {
@@ -59,6 +64,15 @@
         } catch {
           this._audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         }
+      }
+      // 播放汇流:同一 AudioContext 只建一次,stream 稳定;每块源都连 _out,
+      // 经 _dest 出流供外部消费(Live2D 口型同步等),不影响扬声器输出与排队计时。
+      if (!this._out || !this._dest) {
+        this._out = this._audioCtx.createGain();
+        this._dest = this._audioCtx.createMediaStreamDestination();
+        this._out.connect(this._audioCtx.destination);
+        this._out.connect(this._dest);
+        if (this.onAudioStream) this.onAudioStream(this._dest.stream);
       }
       // 必须等 resume 完成:ctx 挂起时 currentTime 冻结,拿冻结值算调度时间会排错队。
       if (this._audioCtx.state === 'suspended') await this._audioCtx.resume();
@@ -113,7 +127,7 @@
         buf.copyToChannel(f32, 0);
         const src = ctx.createBufferSource();
         src.buffer = buf;
-        src.connect(ctx.destination);
+        src.connect(this._out);
         this._activeSources.add(src);
         src.onended = () => {
           this._activeSources.delete(src);
@@ -147,11 +161,13 @@
         interrupt: opts.onInterrupt,
         stateChange: opts.onStateChange,
         error: opts.onError,
+        audioStream: opts.onAudioStream,
       };
 
       this._tts = new TtsPlayer(this.baseUrl);
       this._tts.onError = (msg) => this._emit('error', 'TTS 失败:' + msg);
       this._tts.onStateChange = () => this._refreshState();
+      this._tts.onAudioStream = (stream) => this._emit('audioStream', stream);
 
       // 状态:派生于 _recording/_tts.playing/_wakeOn/_armed/_ctxRunning,见 _refreshState
       this._state = 'idle';
@@ -189,6 +205,9 @@
     }
 
     get wakeActive() { return this._wakeOn; }
+
+    // TTS 播放输出流(创建后即稳定存在;无播放时音频静音,供 Live2D 口型同步等消费)
+    get audioStream() { return this._tts.audioStream; }
 
     // 接口地址:传了 baseUrl 就指向后端(HTTP 拼前缀,WS 把 http→ws);
     // 没传则用同源相对路径(默认同源部署)。
@@ -320,6 +339,16 @@
       this._wakeWs = null; this._wakeCtx = null; this._srcNode = null; this._procNode = null; this._micStream = null;
       this._ctxRunning = false;
       this._refreshState();
+    }
+
+    // 手动唤醒:免唤醒词直接进入唤醒窗口(后端 /api/wake 收到 wake_manual 后武装检测器)。
+    // 用于唤醒词一直检测不到时兜底:点一下=说了唤醒词,窗口内直接说话即可回答。
+    // 返回是否已发送(唤醒 WS 未连接时返回 false,需先 startWake)。
+    wakeManual() {
+      const ws = this._wakeWs;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+      ws.send(JSON.stringify({ type: 'wake_manual' }));
+      return true;
     }
 
     _onWakeMessage(msg) {

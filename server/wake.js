@@ -14,7 +14,7 @@ const { pinyin } = require('pinyin-pro'); // 拼音模糊匹配,兼容 ASR 同�
 // 唤醒词来自 server/config/{profile}.json 的 wakeWords,可配置多个、可改。
 
 // VAD 开口/静音判定参数(threshold/startFrames/endFrames)由 config.vad 配置,默认见构造函数。
-const PAD_SAMPLES = 1600; // 段前后各保留 100ms 静音,防止掐头去尾
+const PAD_SAMPLES = 4800; // 段前后各保留 300ms 静音,防止掐头去尾(VAD 判开口有滞后,100ms 不够,开头的短促音易被切)
 const MAX_SEG_SAMPLES = 5 * 16000; // 单段上限 5s,超时强制截断
 const WAKE_REPLY = '我在，请讲'; // 只说唤醒词、没带问题时的固定问候回复(不走 LLM,不写进多轮历史)
 
@@ -78,9 +78,10 @@ class WakeDetector {
     this.sessionId = sessionId; // 唤醒自动回答与语音/文字共享多轮记忆
     this.onEvent = onEvent; // 回调(type, payload):answer=回答、wake=命中唤醒词、sleep=已休眠
     this.wakeTimeoutMs = wakeTimeoutMs || 300000; // 唤醒窗口时长,默认 5 分钟
-    // VAD 开口/静音判定(config.vad 可覆盖;默认已比 Silero 0.5 偏严,减少环境噪音误判开口)
-    this.threshold = vad.threshold ?? 0.6; // 语音概率阈值,越高判语音越严格
-    this.startFrames = vad.startFrames ?? 6; // 连续语音帧数判开口,约 192ms(挡短促噪音)
+    // VAD 开口/静音判定(config.vad 可覆盖)。门槛太低环境噪音误触发多,
+    // 门槛太高开口判定滞后、开头第一个字易被切,默认取折中。
+    this.threshold = vad.threshold ?? 0.55; // 语音概率阈值,越高判语音越严格
+    this.startFrames = vad.startFrames ?? 3; // 连续语音帧数判开口,约 96ms
     this.endFrames = vad.endFrames ?? 15; // 连续静音帧数判段结束,约 480ms
     this.armed = false; // 唤醒窗口内 true:说话免唤醒词直接回答
     this.lastActiveAt = 0; // 上次唤醒/回答时间,每次回答刷新,休眠倒计时按它重新计时
@@ -283,7 +284,28 @@ function attach(wss, wakeWords, wakeTimeoutSec, vad = {}) {
     let chain = ready;
     ws.on('close', () => detector.close()); // 断开时清休眠定时器,避免残留回调
     ws.on('message', (data, isBinary) => {
-      if (!isBinary) return;
+      if (!isBinary) {
+        // 手动唤醒:前端点按钮发 {"type":"wake_manual"},免唤醒词直接进入唤醒窗口。
+        // 用于唤醒词一直检测不到时兜底:点一下=说了唤醒词,窗口内直接说话即可回答。
+        try {
+          const msg = JSON.parse(data.toString());
+          if (msg && msg.type === 'wake_manual') {
+            detector.armed = true;
+            detector.lastActiveAt = Date.now();
+            detector._scheduleSleep(); // 重置窗口倒计时
+            if (ws.readyState === ws.OPEN) {
+              ws.send(JSON.stringify({
+                type: 'wake',
+                word: '(手动唤醒)',
+                timeoutSeconds: Math.round(timeoutMs / 1000)
+              }));
+            }
+          }
+        } catch (e) {
+          console.warn('[wake] 非法消息:', e.message);
+        }
+        return;
+      }
       // Buffer → Int16Array(16k mono s16le)
       const int16 = new Int16Array(data.buffer, data.byteOffset, Math.floor(data.byteLength / 2));
       chain = chain

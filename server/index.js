@@ -14,6 +14,17 @@ const turn = require('./turn');
 const wake = require('./wake');
 const tts = require('./tts');
 const { Timing } = require('./timing');
+const os = require('os');
+
+// 取本机局域网 IPv4(非回环),用于启动日志提示局域网访问地址;取不到返回 null。
+function getLanAddress() {
+  for (const ifaces of Object.values(os.networkInterfaces())) {
+    for (const it of ifaces || []) {
+      if (it.family === 'IPv4' && !it.internal) return it.address;
+    }
+  }
+  return null;
+}
 
 const app = express();
 
@@ -152,4 +163,6 @@ wss.on('connection', (ws, req) => {
 
 server.listen(config.server.port, () => {
   console.log(`VoiceAgent 已启动: http://localhost:${config.server.port}`);
+  const lan = getLanAddress();
+  if (lan) console.log(`局域网访问:    http://${lan}:${config.server.port}`);
 });

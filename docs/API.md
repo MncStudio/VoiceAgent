@@ -21,6 +21,7 @@
   agent.askText('你好');      // 文字问答
   agent.startWake();          // 手动开始唤醒监听(只有 autoWake:false 时需要)
   agent.stopWake();           // 停止唤醒监听
+  agent.wakeManual();         // 手动唤醒:免唤醒词进入唤醒窗口(唤醒词检测不到时兜底)
   agent.startRecording();     // 按住说话:开始录音
   agent.stopRecording();      // 按住说话:松开发送,返回 {replyText,userText} 或 null
   agent.stopPlay();           // 打断播放
@@ -44,6 +45,7 @@
 | `onWake(word, timeoutSeconds)` | 命中唤醒词；`timeoutSeconds` = 唤醒窗口总秒数（可画倒计时） |
 | `onSleep(idleSeconds)` | 唤醒窗口超时休眠；`idleSeconds` = 实际静默秒数 |
 | `onInterrupt()` | 开口打断正在播的回答 |
+| `onAudioStream(stream)` | TTS 播放流创建后回调（`MediaStream`，供 Live2D 口型同步等消费）；另有 getter `agent.audioStream` |
 | `onStateChange(state)` | 状态：`idle / starting / waiting-activation / listening / wake-active / sleep / recording / speaking` |
 | `onError(msg)` | 错误 |
 
@@ -85,6 +87,8 @@
 | `answer` | `{ userText, replyText }` | 自动回答 |
 | `interrupt` | — | 检测到你开口，打断正在播的回答 |
 | `sleep` | `{ idleSeconds }` | 唤醒窗口超时休眠 |
+
+前端也可发 `{"type":"wake_manual"}` 手动唤醒（免唤醒词直接进入窗口，`agent.wakeManual()` 即此协议），用于唤醒词检测不到时兜底。
 
 唤醒词与窗口时长由后端配置：`server/config/{profile}.json` 的 `wakeWords` / `wakeTimeout`。
 
