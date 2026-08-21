@@ -32,6 +32,7 @@ VA_PROFILE=online npm start   # 全线上（百炼 + DeepSeek，按量计费）
 | `profile` | string | 仅作标识，与文件名保持一致便于人读；不影响加载逻辑（加载看 `VA_PROFILE`）。 |
 | `wakeWords` | string[] | 唤醒词列表，可配多个，命中任意一个即唤醒，支持同音容错。 |
 | `wakeTimeout` | number（秒） | 唤醒窗口总秒数：命中唤醒词后这段时间内免唤醒词连续问答；随 `/api/wake` 的 `wake` 事件 `timeoutSeconds` 下发给前端。 |
+| `vad` | object | 唤醒检测的 VAD 判定参数：`threshold`(语音概率阈值)、`startFrames`(连续语音帧数判开口)、`endFrames`(连续静音帧数判段结束)。缺省 0.6/6/15。调严可减少环境噪音误判开口、降低无谓 ASR 调用。 |
 
 ## server
 
@@ -68,22 +69,19 @@ VA_PROFILE=online npm start   # 全线上（百炼 + DeepSeek，按量计费）
 
 | provider | 实现 | 多轮记忆上下文 |
 |---|---|---|
-| `yuxi` | 内网语析 agent/runs（异步三步：建线程→发 run→轮询） | `threadId` |
+| `yuxi-chat` | 语析 openapi chat：POST `{url}/yuxi/openapi/v1/agents/{agentId}/chat`，SSE 流式（`stream:true`），累加 `message_delta` 成完整回复 | `thread_id` |
 | `openai-compatible` | DeepSeek 等 OpenAI 兼容接口 | 消息历史数组 |
 
 | 字段 | 类型 | 适用 provider | 说明 |
 |---|---|---|---|
 | `provider` | string | — | 枚举值见上表。 |
-| `url` | string | yuxi | 语析服务根地址。 |
+| `url` | string | yuxi-chat | 语析服务根地址。 |
 | `baseUrl` | string | openai | 会拼 `/chat/completions`，如 `https://api.deepseek.com/v1`。 |
 | `model` | string | openai | 模型名，如 `deepseek-chat`。 |
-| `apiKey` | string | 两个都 | yuxi 档是语析鉴权 token；openai 档是 DeepSeek key。 |
-| `agentSlug` | string | yuxi | agent 的 slug。 |
-| `agentId` | string | yuxi | agent 的 id（建线程用）。 |
-| `pollIntervalMs` | number | yuxi | 轮询 run 状态的间隔（ms）。 |
-| `pollTimeoutMs` | number | yuxi | 轮询 run 状态的总超时（ms）。 |
-| `requestTimeoutMs` | number | yuxi | 单次 HTTP 请求超时（ms）。 |
-| `timeoutMs` | number | openai | 单次 chat 请求超时（ms）。 |
+| `apiKey` | string | 两个都 | yuxi-chat 档是语析鉴权 token；openai 档是 DeepSeek key。 |
+| `agentId` | string | yuxi-chat | agent 的 id，拼进 chat URL。 |
+| `userId` | string | yuxi-chat | chat 请求里的 `user` 字段（端侧用户标识），缺省用 `external-user-001`。 |
+| `timeoutMs` | number | openai / yuxi-chat | 单次 chat 请求超时（ms）。 |
 
 ## tts（语音合成：文字 → PCM）
 
@@ -122,6 +120,7 @@ VA_PROFILE=online npm start   # 全线上（百炼 + DeepSeek，按量计费）
   "profile": "local",
   "wakeWords": ["你好小智", "小智小智"],
   "wakeTimeout": 10,
+  "vad": { "threshold": 0.6, "startFrames": 6, "endFrames": 15 },
   "server": { "port": 3000, "tmpDir": "/tmp/voiceagent" },
   "asr": {
     "provider": "paraformer-http",
@@ -130,14 +129,12 @@ VA_PROFILE=online npm start   # 全线上（百炼 + DeepSeek，按量计费）
     "timeoutMs": 30000
   },
   "llm": {
-    "provider": "yuxi",
-    "url": "http://<llm-host>:5050",
+    "provider": "yuxi-chat",
+    "url": "http://<yuxi-host>:8080",
     "apiKey": "<token>",
-    "agentSlug": "default-chatbot",
-    "agentId": "default-chatbot",
-    "pollIntervalMs": 1000,
-    "pollTimeoutMs": 90000,
-    "requestTimeoutMs": 30000
+    "agentId": "<agent-id>",
+    "userId": "external-user-001",
+    "timeoutMs": 120000
   },
   "tts": {
     "provider": "cosyvoice-http",
@@ -159,6 +156,7 @@ VA_PROFILE=online npm start   # 全线上（百炼 + DeepSeek，按量计费）
   "profile": "online",
   "wakeWords": ["你好小智", "小智小智"],
   "wakeTimeout": 10,
+  "vad": { "threshold": 0.6, "startFrames": 6, "endFrames": 15 },
   "server": { "port": 30002, "tmpDir": "/tmp/voiceagent" },
   "asr": {
     "provider": "paraformer-ws",

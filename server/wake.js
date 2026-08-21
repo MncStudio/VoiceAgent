@@ -13,9 +13,7 @@ const { pinyin } = require('pinyin-pro'); // 拼音模糊匹配,兼容 ASR 同�
 // 直接回答;窗口超时自动休眠,需重新说唤醒词。
 // 唤醒词来自 server/config/{profile}.json 的 wakeWords,可配置多个、可改。
 
-const THRESHOLD = 0.5; // VAD 语音概率阈值
-const START_FRAMES = 3; // 连续语音帧数 → 判开口(约 96ms)
-const END_FRAMES = 15; // 连续静音帧数 → 判段结束(约 480ms)
+// VAD 开口/静音判定参数(threshold/startFrames/endFrames)由 config.vad 配置,默认见构造函数。
 const PAD_SAMPLES = 1600; // 段前后各保留 100ms 静音,防止掐头去尾
 const MAX_SEG_SAMPLES = 5 * 16000; // 单段上限 5s,超时强制截断
 const WAKE_REPLY = '我在，请讲'; // 只说唤醒词、没带问题时的固定问候回复(不走 LLM,不写进多轮历史)
@@ -74,12 +72,16 @@ class Ring {
 }
 
 class WakeDetector {
-  constructor(wakeWords, sessionId, onEvent, wakeTimeoutMs) {
+  constructor(wakeWords, sessionId, onEvent, wakeTimeoutMs, vad = {}) {
     this.wakeWords = wakeWords.map(normalize).filter(Boolean);
     this.wakeSyllables = this.wakeWords.map(toSyllables); // 拼音匹配用,构造时预计算一次
     this.sessionId = sessionId; // 唤醒自动回答与语音/文字共享多轮记忆
     this.onEvent = onEvent; // 回调(type, payload):answer=回答、wake=命中唤醒词、sleep=已休眠
     this.wakeTimeoutMs = wakeTimeoutMs || 300000; // 唤醒窗口时长,默认 5 分钟
+    // VAD 开口/静音判定(config.vad 可覆盖;默认已比 Silero 0.5 偏严,减少环境噪音误判开口)
+    this.threshold = vad.threshold ?? 0.6; // 语音概率阈值,越高判语音越严格
+    this.startFrames = vad.startFrames ?? 6; // 连续语音帧数判开口,约 192ms(挡短促噪音)
+    this.endFrames = vad.endFrames ?? 15; // 连续静音帧数判段结束,约 480ms
     this.armed = false; // 唤醒窗口内 true:说话免唤醒词直接回答
     this.lastActiveAt = 0; // 上次唤醒/回答时间,每次回答刷新,休眠倒计时按它重新计时
     this.sleepTimer = null; // 唤醒窗口休眠定时器(准点触发,主动推 sleep)
@@ -121,12 +123,12 @@ class WakeDetector {
 
   onFrame(prob, samples) {
     this.ring.push(samples);
-    const isSpeech = prob > THRESHOLD;
+    const isSpeech = prob > this.threshold;
 
     if (this.state === 'idle') {
       if (isSpeech) {
         this.speechStreak++;
-        if (this.speechStreak >= START_FRAMES) {
+        if (this.speechStreak >= this.startFrames) {
           // 判到开口(约 96ms)立即通知前端打断正在播的回答,不等整句识别完。
           // 检测由后端 VAD 统一做(前端不判音量):开口即打断,前端收到 interrupt 停播放。
           this.onEvent('interrupt');
@@ -148,7 +150,7 @@ class WakeDetector {
       this.silentStreak = 0;
     } else {
       this.silentStreak++;
-      if (this.silentStreak >= END_FRAMES || this.speechSamples >= MAX_SEG_SAMPLES) {
+      if (this.silentStreak >= this.endFrames || this.speechSamples >= MAX_SEG_SAMPLES) {
         this.finalize();
       }
     }
@@ -258,7 +260,7 @@ class WakeDetector {
 }
 
 // 挂到共享 WebSocketServer(无 path,这里过滤 /api/wake)。前端连上后持续发二进制 int16 块。
-function attach(wss, wakeWords, wakeTimeoutSec) {
+function attach(wss, wakeWords, wakeTimeoutSec, vad = {}) {
   const words = Array.isArray(wakeWords) ? wakeWords : [];
   const timeoutMs = (wakeTimeoutSec && wakeTimeoutSec > 0 ? wakeTimeoutSec : 300) * 1000;
   wss.on('connection', (ws, req) => {
@@ -269,7 +271,7 @@ function attach(wss, wakeWords, wakeTimeoutSec) {
     const detector = new WakeDetector(words, sessionId, (type, payload) => {
       if (ws.readyState !== ws.OPEN) return;
       ws.send(JSON.stringify({ type, ...payload }));
-    }, timeoutMs);
+    }, timeoutMs, vad);
     // init 异步加载 ONNX 模型(数百 ms),消息到达时等它就绪再喂,避免丢帧
     const ready = detector.init().catch((e) => {
       console.error('[wake] 初始化失败:', e.message);

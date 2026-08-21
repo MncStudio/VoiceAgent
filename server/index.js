@@ -16,6 +16,17 @@ const tts = require('./tts');
 const { Timing } = require('./timing');
 
 const app = express();
+
+// CORS:跨域部署时(别的项目经 baseUrl 独立域名/端口调用)浏览器需要后端放行。
+// 默认放开所有来源;要收紧就改成具体域名列表。
+app.use((req, res, next) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.sendStatus(204); // 预检请求直接放行
+  next();
+});
+
 const upload = multer({ storage: multer.memoryStorage() });
 app.use(express.json());
 
@@ -77,7 +88,7 @@ const server = http.createServer(app);
 // 共享一个 WebSocketServer(不带 path):wake 与 tts 的 path 各自在 connection 里过滤。
 // 若分别用两个带 path 的 WSS 挂同一 server,先注册的会把不匹配请求直接回 400。
 const wss = new WebSocketServer({ server });
-wake.attach(wss, config.wakeWords || [], config.wakeTimeout);
+wake.attach(wss, config.wakeWords || [], config.wakeTimeout, config.vad);
 
 // 流式 TTS:前端拿 replyText 后连 /api/tts 发 {type:'synthesize', text},
 // 后端先回 {type:'meta', sampleRate, channels, bitsPerSample},再逐个透传 PCM 二进制块(裸 s16le),

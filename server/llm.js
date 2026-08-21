@@ -1,17 +1,18 @@
 'use strict';
 
 const config = require('./config');
+const { Timing } = require('./timing');
 
-// LLM:文字 → 回复。根据 profile 分流:
-// - local  : 语析 agent/runs(异步三步,context 是 threadId)
-// - online : DeepSeek(OpenAI 兼容,context 是消息历史数组)
+// LLM:文字 → 回复。根据 provider 分流:
+// - openai-compatible: DeepSeek(OpenAI 兼容,context 是消息历史数组)
+// - yuxi-chat        : 语析 openapi chat(SSE 流式累加,context 是 thread_id)
 // context 由 index.js 在会话表中维护,实现多轮记忆。
 
 async function ask(query, context) {
   if (config.llm.provider === 'openai-compatible') {
     return askOpenAI(query, context);
   }
-  return askYuxi(query, context);
+  return askYuxiChat(query, context);
 }
 
 // ---------- DeepSeek / OpenAI 兼容 ----------
@@ -51,86 +52,89 @@ async function askOpenAI(query, messages) {
   return { text, context: nextMessages };
 }
 
-// ---------- 语析 agent/runs ----------
-function authHeaders() {
-  return { Authorization: `Bearer ${config.llm.apiKey}`, 'Content-Type': 'application/json' };
-}
+// ---------- 语析 openapi chat(SSE 流式)----------
+// POST {url}/yuxi/openapi/v1/agents/{agentId}/chat,body { input, user, stream:true }。
+// 返回 SSE:每行 data: 是独立 JSON,payload.items[].stream_event.type=message_delta
+// 的 content 是增量文本,逐条累加成完整回复;thread_id 由事件带出,存作多轮上下文。
+async function askYuxiChat(query, threadId) {
+  const t = new Timing('yuxi-chat');
+  const res = await fetch(
+    `${config.llm.url}/yuxi/openapi/v1/agents/${config.llm.agentId}/chat`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.llm.apiKey}` },
+      body: JSON.stringify({
+        input: query,
+        user: config.llm.userId || 'external-user-001',
+        stream: true,
+        ...(threadId ? { thread_id: threadId } : {}),
+      }),
+      signal: AbortSignal.timeout(config.llm.timeoutMs || 90000),
+    },
+  );
 
-async function createThread() {
-  const res = await fetch(`${config.llm.url}/api/chat/thread`, {
-    method: 'POST',
-    headers: authHeaders(),
-    body: JSON.stringify({ agent_id: config.llm.agentId }),
-    signal: AbortSignal.timeout(config.llm.requestTimeoutMs),
-  });
   if (!res.ok) {
-    throw new Error(`创建线程失败: HTTP ${res.status}`);
+    const detail = await res.text().catch(() => '');
+    throw new Error(`语析 chat 请求失败: HTTP ${res.status} ${detail.slice(0, 300)}`);
   }
-  const data = await res.json();
-  return data.id;
+
+  const { text, threadId: nextThread } = await readYuxiSse(res.body, () => t.mark('首块'));
+  t.mark('完成');
+  t.log();
+  const reply = text.trim();
+  if (!reply) {
+    throw new Error('语析 chat 流式返回无内容');
+  }
+  return { text: reply, context: nextThread || threadId };
 }
 
-async function startRun(query, threadId) {
-  const res = await fetch(`${config.llm.url}/api/agent/runs`, {
-    method: 'POST',
-    headers: authHeaders(),
-    body: JSON.stringify({ query, agent_slug: config.llm.agentSlug, thread_id: threadId }),
-    signal: AbortSignal.timeout(config.llm.requestTimeoutMs),
-  });
-  if (!res.ok) {
-    throw new Error(`发起 agent run 失败: HTTP ${res.status}`);
-  }
-  const data = await res.json();
-  return data.run_id;
-}
+// 逐行读 SSE:data: 行是独立 JSON,取 message_delta 增量累加,并抓 thread_id。
+async function readYuxiSse(body, onFirstDelta) {
+  const decoder = new TextDecoder();
+  const reader = body.getReader();
+  let buffer = '';
+  let text = '';
+  let threadId = null;
+  let firstDelta = true;
 
-async function pollRun(runId) {
-  const deadline = Date.now() + config.llm.pollTimeoutMs;
-  while (Date.now() < deadline) {
-    const res = await fetch(`${config.llm.url}/api/agent/runs/${runId}`, {
-      headers: authHeaders(),
-      signal: AbortSignal.timeout(config.llm.requestTimeoutMs),
-    });
-    if (!res.ok) {
-      throw new Error(`查询 run 状态失败: HTTP ${res.status}`);
+  function handleLine(line) {
+    if (!line.startsWith('data:')) return;
+    const raw = line.slice(5).trim();
+    if (!raw || raw === '[DONE]') return;
+    let evt;
+    try { evt = JSON.parse(raw); } catch { return; }
+    if (!threadId && evt.thread_id) threadId = evt.thread_id;
+    const items = evt.payload?.items;
+    if (!Array.isArray(items)) return;
+    for (const it of items) {
+      const se = it.stream_event;
+      if (se?.type === 'message_delta' && typeof se.content === 'string') {
+        if (firstDelta) { firstDelta = false; onFirstDelta?.(); }
+        text += se.content;
+      }
     }
-    const data = await res.json();
-    const status = data.run?.status;
-    if (status === 'completed') {
-      return;
-    }
-    if (status === 'failed' || status === 'error' || status === 'cancelled') {
-      throw new Error(`agent run 结束于异常状态: ${status}`);
-    }
-    await new Promise((r) => setTimeout(r, config.llm.pollIntervalMs));
   }
-  throw new Error(`agent run 轮询超时(${config.llm.pollTimeoutMs}ms)`);
-}
 
-async function getResult(runId) {
-  const res = await fetch(`${config.llm.url}/api/agent/runs/${runId}/result`, {
-    headers: authHeaders(),
-    signal: AbortSignal.timeout(config.llm.requestTimeoutMs),
-  });
-  if (!res.ok) {
-    throw new Error(`获取 run 结果失败: HTTP ${res.status}`);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 1);
+        handleLine(line);
+      }
+    }
+  } catch (err) {
+    // 超时/中断:已攒到部分文本就返回,否则抛错
+    if (text.trim()) return { text, threadId };
+    throw err;
   }
-  const data = await res.json();
-  const text = (data.output || '').trim();
-  if (!text) {
-    throw new Error('agent 返回内容为空');
-  }
-  return text;
-}
+  if (buffer.startsWith('data:')) handleLine(buffer);
 
-async function askYuxi(query, threadId) {
-  if (!threadId) {
-    threadId = await createThread();
-  }
-  const runId = await startRun(query, threadId);
-  await pollRun(runId);
-  const text = await getResult(runId);
-  return { text, context: threadId };
+  return { text, threadId };
 }
 
 module.exports = { ask };

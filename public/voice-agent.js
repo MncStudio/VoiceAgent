@@ -7,7 +7,8 @@
 //
 // 用法:
 //   const agent = new VoiceAgent({
-//     sessionId: '…',        // 可选;不传自动生成 + localStorage 持久化(多轮记忆)
+//     sessionId: '…',        // 可选;会话 id,同一次对话内连续问答共享上下文;不传则本次实例随机生成,不跨会话持久化
+//     baseUrl: '…',          // 可选;后端地址(如 http://192.168.1.5:3000),跨域/独立部署时填;缺省同源相对路径
 //     autoWake: true,        // 可选;true 则构造后自动开始唤醒监听
 //     onUserText(text),      // 识别到用户说的话(三路都触发)
 //     onReply(text),         // 得到回复文本(已自动 TTS 播放)
@@ -33,7 +34,8 @@
   // 若在 play() 开始时预设起点,TTS 首块要等 ~800ms 才到,start() 拿到的是过期时间戳,
   // 会被浏览器立即播,前几块互相重叠,开头听感变快/发糊(曾踩过)。
   class TtsPlayer {
-    constructor() {
+    constructor(baseUrl = '') {
+      this._baseUrl = String(baseUrl).replace(/\/+$/, ''); // 跨域部署时后端地址;空则同源
       this._playGen = 0;            // 每次新播放递增;旧 gen 的音块/音频全部失效
       this._audioCtx = null;        // 播放用 AudioContext(24000Hz,与后端 PCM 一致)
       this._ttsWs = null;           // 当前 /api/tts 连接
@@ -85,7 +87,9 @@
       if (gen !== this._playGen) return;        // await 期间被打断,丢弃
       this._setPlaying(true);                   // 播放会话开始
       let pcmN = 0;
-      const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/api/tts';
+      const url = this._baseUrl
+        ? this._baseUrl.replace(/^http/, 'ws') + '/api/tts'
+        : (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/api/tts';
       const ws = new WebSocket(url);
       ws.binaryType = 'arraybuffer';
       this._ttsWs = ws;
@@ -128,12 +132,12 @@
   }
 
   // ============ VoiceAgent:三路问答统一入口 ============
-  const SESSION_KEY = 'voiceagent_session';
   const MIN_DURATION = 400; // 按住说话最短时长(ms),太短不发
 
   class VoiceAgent {
     constructor(opts = {}) {
       this.sessionId = opts.sessionId || this._loadSessionId();
+      this.baseUrl = String(opts.baseUrl || '').replace(/\/+$/, ''); // 跨域部署:后端地址(如 http://host:port)
 
       this._on = {
         userText: opts.onUserText,
@@ -145,7 +149,7 @@
         error: opts.onError,
       };
 
-      this._tts = new TtsPlayer();
+      this._tts = new TtsPlayer(this.baseUrl);
       this._tts.onError = (msg) => this._emit('error', 'TTS 失败:' + msg);
       this._tts.onStateChange = () => this._refreshState();
 
@@ -186,17 +190,23 @@
 
     get wakeActive() { return this._wakeOn; }
 
+    // 接口地址:传了 baseUrl 就指向后端(HTTP 拼前缀,WS 把 http→ws);
+    // 没传则用同源相对路径(默认同源部署)。
+    _apiUrl(path) { return this.baseUrl + path; }
+    _wsUrl(path) {
+      if (this.baseUrl) return this.baseUrl.replace(/^http/, 'ws') + path;
+      return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + path;
+    }
+
     _emit(name, ...args) {
       const fn = this._on[name];
       if (typeof fn === 'function') fn(...args);
     }
 
     _loadSessionId() {
-      try {
-        let id = localStorage.getItem(SESSION_KEY);
-        if (!id) { id = crypto.randomUUID(); localStorage.setItem(SESSION_KEY, id); }
-        return id;
-      } catch { return crypto.randomUUID(); }
+      // 单次对话记忆:不持久化,每次 new VoiceAgent 都是新会话(同一次对话内连续问答共享上下文)。
+      // 需要跨会话/跨页面共享记忆时,接入方自行传固定 sessionId。
+      return crypto.randomUUID();
     }
 
     _setState(s) {
@@ -263,8 +273,7 @@
       this._wakeCtx = ctx;
       this._ctxRunning = ctx.state === 'running';
 
-      const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://')
-        + location.host + '/api/wake?sessionId=' + encodeURIComponent(this.sessionId);
+      const wsUrl = this._wsUrl('/api/wake?sessionId=' + encodeURIComponent(this.sessionId));
       const ws = new WebSocket(wsUrl);
       this._wakeWs = ws;
 
@@ -390,7 +399,7 @@
       form.append('audio', blob, 'recording');
       form.append('sessionId', this.sessionId);
       try {
-        const res = await fetch('/api/chat', { method: 'POST', body: form });
+        const res = await fetch(this._apiUrl('/api/chat'), { method: 'POST', body: form });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
         if (seq !== this._reqSeq) return data; // 已有更新的提问,丢弃旧响应
@@ -415,7 +424,7 @@
       this._emit('userText', t);
       this._refreshState();
       try {
-        const res = await fetch('/api/chat_text', {
+        const res = await fetch(this._apiUrl('/api/chat_text'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text: t, sessionId: this.sessionId }),

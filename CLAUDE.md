@@ -7,7 +7,7 @@
 ```bash
 npm install                # 只装一次
 VA_PROFILE=local npm start # 内网后端(默认,不设也走 local)
-VA_PROFILE=online npm start# 全线上(百炼 + DeepSeek,按量计费)
+VA_PROFILE=online npm start# 全线上(百炼 + 语析,按量计费)
 ```
 
 ## 配置
@@ -18,7 +18,7 @@ VA_PROFILE=online npm start# 全线上(百炼 + DeepSeek,按量计费)
 ## 代码结构（server/）
 
 - `index.js` 路由 + 共享 WebSocketServer 入口。
-- `asr.js` / `tts.js` / `llm.js` 各 provider 双实现（local 内网 HTTP，online 百炼/DeepSeek）。
+- `asr.js` / `tts.js` / `llm.js` 各 provider 分流（asr/tts: local 内网 HTTP vs online 百炼 WS；llm: `yuxi-chat` 语析 vs `openai-compatible`）。
 - `vad.js` Silero VAD（ONNX，模型在 `server/models/`）；`audio.js` 转码 webm→wav。
 - `wake.js` 流式开口段检测 + 唤醒词匹配 + 自动回答；`turn.js` 会话表（多轮记忆）；`timing.js` 链路耗时打点。
 
@@ -26,6 +26,7 @@ VA_PROFILE=online npm start# 全线上(百炼 + DeepSeek,按量计费)
 
 - `voice-agent.js` 前端 SDK（自包含，单 `<script>` 引入）：`VoiceAgent` 类一个入口封装三路问答（唤醒监听/按住说话/文字问答）+ 自动 TTS 播放，内联了 TtsPlayer；接入方 `new VoiceAgent({...})` 即可，不必碰 getUserMedia/WebSocket/MediaRecorder 样板。
 - `index.html` 接口演示页，只调 SDK 的 UI 示例（`autoWake:true` 加载即自动开始监听）。
+- 其他项目接入：接口协议与 SDK 用法（含 `baseUrl` 跨域部署）见 `docs/API.md`。
 
 ## 约定
 
