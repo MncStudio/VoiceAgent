@@ -66,7 +66,7 @@
     <div class="api">
       <div class="api-head"><span class="api-badge">WebSocket</span> 唤醒词监听</div>
       <div class="api-desc">
-        连接 <code>/api/wake?sessionId=…</code>,持续发送 16k mono int16 PCM 块(二进制)。
+        连接 <code>/api/wake</code>,持续发送 16k mono int16 PCM 块(二进制)。
         后端用 VAD+ASR 检测唤醒词(可改 <code>server/config/*.json</code> 的 <code>wakeWords</code>),
         命中后去掉唤醒词、剩余文本送 LLM,自动回答并经 <code>/api/tts</code> 流式播放。
         命中即进入唤醒窗口(<code>wakeTimeout</code> 秒):窗口内说话<b>免唤醒词</b>直接回答,
@@ -85,7 +85,7 @@
     <div class="api">
       <div class="api-head"><span class="api-badge">POST</span> 语音问答 /api/chat</div>
       <div class="api-desc">
-        <code>multipart/form-data</code>:<code>audio</code>(webm/mp4 录音)+ <code>sessionId</code> →
+        <code>multipart/form-data</code>:<code>audio</code>(webm/mp4 录音) →
         后端转码→VAD 裁静音→ASR→LLM,返回 <code>{replyText, userText}</code>;
         音频由前端经 <code>/api/tts</code> 流式合成播放(边生成边播,无需等整段)。
       </div>

@@ -1,6 +1,5 @@
 'use strict';
 
-const crypto = require('crypto');
 const config = require('./config');
 const tts = require('./tts');
 const turn = require('./turn');
@@ -10,7 +9,7 @@ const { Timing } = require('./timing');
 const SENTENCE_GAP_MS = 120; // 句间停顿,避免连续句子连珠炮式播放(前端此时无新块,自然衔接)
 
 // 流式问答管线 + /api/chat_stream 连接处理。
-// 前端连 /api/chat_stream?sessionId=xxx,发 {type:'chat', text},后端一条龙:
+// 前端连 /api/chat_stream,发 {type:'chat', text},后端一条龙:
 // 用户文本 → llm.askStream 增量 → 断句器切句 → 逐句串行 TTS(一次一句) → 顺序推裸 s16le PCM 给前端。
 // 前端打断直接 close(或主动停止),后端取消 LLM 请求、停当前合成、清队列。
 //
@@ -24,11 +23,7 @@ function attach(wss) {
   wss.on('connection', (ws, req) => {
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname !== '/api/chat_stream') return; // 非流式问答,交给其他 handler
-    // sessionId 可选:接入方传了就用它做多轮记忆(须传稳定值,如固定字符串,yuxi 的 thread 才能串回);
-    // 不传则本连接一个独立随机会话,每次问答各自独立(无多轮记忆),也避免不同客户端共用 undefined 槽互相串话。
-    const sessionId = url.searchParams.get('sessionId') || crypto.randomUUID();
-
-    const pipeline = new StreamPipeline(ws, sessionId);
+    const pipeline = new StreamPipeline(ws);
     ws.on('close', () => pipeline.cancel());
     ws.on('message', (data, isBinary) => {
       if (isBinary) return;
@@ -42,9 +37,8 @@ function attach(wss) {
 }
 
 class StreamPipeline {
-  constructor(ws, sessionId) {
+  constructor(ws) {
     this.ws = ws;
-    this.sessionId = sessionId;
     this.splitter = new SentenceBuffer({
       maxLen: config.llm?.maxSentenceLen || 80,
       minLen: config.llm?.minSentenceLen || 5, // 短于此的句暂缓合并,减少碎句/请求数(防限流)
@@ -83,7 +77,7 @@ class StreamPipeline {
     this._sentCount = 0;
     this.llmController = new AbortController();
     turn
-      .askStream(text, this.sessionId, (delta) => this._onDelta(gen, delta), this.llmController.signal)
+      .askStream(text, (delta) => this._onDelta(gen, delta), this.llmController.signal)
       .then(({ replyText }) => {
         if (gen !== this.gen) return; // 已被打断,丢弃
         t.mark('LLM完成');

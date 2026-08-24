@@ -76,11 +76,13 @@ class Ring {
 }
 
 class WakeDetector {
-  constructor(wakeWords, sessionId, onEvent, wakeTimeoutMs, vad = {}) {
+  constructor(wakeWords, onEvent, wakeTimeoutMs, vad = {}, stopWords, stopMaxLen) {
     this.wakeWords = wakeWords.map(normalize).filter(Boolean);
     this.wakeSyllables = this.wakeWords.map(toSyllables); // 拼音匹配用,构造时预计算一次
-    this.stopSyllables = STOP_WORDS.map(toSyllables); // 打断词拼音序列,同唤醒词,用于同音字容错
-    this.sessionId = sessionId; // 唤醒自动回答与语音/文字共享多轮记忆
+    // 打断词可配(config.wakeStopWords 覆盖默认),每个归一化 + 拼音预处理,供 matchStop 用。
+    this.stopWords = (Array.isArray(stopWords) && stopWords.length ? stopWords : STOP_WORDS).map(normalize).filter(Boolean);
+    this.stopMaxLen = stopMaxLen || STOP_MAX_LEN;
+    this.stopSyllables = this.stopWords.map(toSyllables); // 打断词拼音序列,同唤醒词,用于同音字容错
     this.onEvent = onEvent; // 回调(type, payload):answer=回答、wake=命中唤醒词、sleep=已休眠
     this.wakeTimeoutMs = wakeTimeoutMs || 300000; // 唤醒窗口时长,默认 5 分钟
     // VAD 开口/静音判定(config.vad 可覆盖)。门槛太低环境噪音误触发多,
@@ -123,12 +125,12 @@ class WakeDetector {
     return null;
   }
 
-  // 语义化打断判定:归一化后文本长度 ≤ STOP_MAX_LEN 且含任一打断词(字符精确/拼音模糊)→ 判为打断。
+  // 语义化打断判定:归一化后文本长度 ≤ stopMaxLen 且含任一打断词(字符精确/拼音模糊)→ 判为打断。
   // 用长度上限挡住正常问句(如"为什么停止播放"),避免误伤;词表用明确词(停下/停止回答),不含过宽单字(停)。
   matchStop(text) {
     const n = normalize(text);
-    if (!n || n.length > STOP_MAX_LEN) return false;
-    if (STOP_WORDS.some((w) => n.includes(w))) return true;
+    if (!n || n.length > this.stopMaxLen) return false;
+    if (this.stopWords.some((w) => n.includes(w))) return true;
     // 拼音模糊:打断词音节序列是文本音节序列的连续子序列(兼容 ASR 同音字,如 部说了/别说了)
     const syl = toSyllables(n);
     return this.stopSyllables.some((sub) => sub.length && findSubseq(syl, sub) >= 0);
@@ -203,7 +205,7 @@ class WakeDetector {
   classify(wav) {
     if (this.classifying) return;
     this.classifying = true;
-    const t = new Timing(`wake[${this.sessionId || '-'}]`);
+    const t = new Timing('wake');
     asr
       .recognizeBuffer(wav)
       .then((text) => {
@@ -284,18 +286,16 @@ class WakeDetector {
 }
 
 // 挂到共享 WebSocketServer(无 path,这里过滤 /api/wake)。前端连上后持续发二进制 int16 块。
-function attach(wss, wakeWords, wakeTimeoutSec, vad = {}) {
+function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen) {
   const words = Array.isArray(wakeWords) ? wakeWords : [];
   const timeoutMs = (wakeTimeoutSec && wakeTimeoutSec > 0 ? wakeTimeoutSec : 300) * 1000;
   wss.on('connection', (ws, req) => {
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname !== '/api/wake') return; // 非唤醒连接,交给其他 handler(如 /api/tts)
-    // 前端连 /api/wake 时带 sessionId,唤醒自动回答与语音/文字共享多轮记忆
-    const sessionId = url.searchParams.get('sessionId') || undefined;
-    const detector = new WakeDetector(words, sessionId, (type, payload) => {
+    const detector = new WakeDetector(words, (type, payload) => {
       if (ws.readyState !== ws.OPEN) return;
       ws.send(JSON.stringify({ type, ...payload }));
-    }, timeoutMs, vad);
+    }, timeoutMs, vad, stopWords, stopMaxLen);
     // init 异步加载 ONNX 模型(数百 ms),消息到达时等它就绪再喂,避免丢帧
     const ready = detector.init().catch((e) => {
       console.error('[wake] 初始化失败:', e.message);
@@ -338,4 +338,5 @@ function attach(wss, wakeWords, wakeTimeoutSec, vad = {}) {
   });
 }
 
-module.exports = { attach };
+// 导出 attach 供 index.js 挂载;WakeDetector 与纯文本匹配函数导出供测试(test/)用,无副作用。
+module.exports = { attach, WakeDetector, _test: { normalize, toSyllables, findSubseq } };

@@ -98,7 +98,7 @@ server.on('error', onListenError);
 // 若分别用两个带 path 的 WSS 挂同一 server,先注册的会把不匹配请求直接回 400。
 const wss = new WebSocketServer({ server });
 wss.on('error', onListenError);
-wake.attach(wss, config.wakeWords || [], config.wakeTimeout, config.vad);
+wake.attach(wss, config.wakeWords || [], config.wakeTimeout, config.vad, config.wakeStopWords, config.wakeStopMaxLen);
 // 流式问答:LLM 增量 → 断句 → 逐句 TTS → 顺序推 PCM。与 /api/wake、/api/tts 共用一个 WSS。
 stream.attach(wss);
 

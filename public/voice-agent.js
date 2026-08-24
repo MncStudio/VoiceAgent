@@ -7,8 +7,6 @@
 //
 // 用法:
 //   const agent = new VoiceAgent({
-//     sessionId: '…',        // 可选;多轮记忆的会话 id(如 yuxi 的 thread 要靠它串回)。需要多轮记忆时传固定值;
-//                            不传则每次问答独立、无多轮记忆(后端为无 id 的连接各自隔离,互不串话)
 //     baseUrl: '…',          // 可选;后端地址(如 http://192.168.1.5:3000),跨域/独立部署时填;缺省同源相对路径
 //     autoWake: true,        // 可选;true 则构造后自动开始唤醒监听
 //     onUserText(text),      // 识别到用户说的话(三路都触发)
@@ -208,7 +206,6 @@
 
   class VoiceAgent {
     constructor(opts = {}) {
-      this.sessionId = opts.sessionId;
       this.baseUrl = String(opts.baseUrl || '').replace(/\/+$/, ''); // 跨域部署:后端地址(如 http://host:port)
 
       this._on = {
@@ -344,7 +341,7 @@
       this._wakeCtx = ctx;
       this._ctxRunning = ctx.state === 'running';
 
-      const wsUrl = this._wsUrl('/api/wake' + (this.sessionId ? '?sessionId=' + encodeURIComponent(this.sessionId) : ''));
+      const wsUrl = this._wsUrl('/api/wake');
       const ws = new WebSocket(wsUrl);
       this._wakeWs = ws;
 
@@ -485,7 +482,6 @@
       if (blob.size < 1000) { this._emit('error', '录音内容为空,请重试'); return null; }
       const form = new FormData();
       form.append('audio', blob, 'recording');
-      if (this.sessionId) form.append('sessionId', this.sessionId);
       try {
         // 语音两跳第一跳:后端只做转码+VAD+ASR 回 userText(不调 LLM),由前端再连 /api/chat_stream 流式问答。
         const res = await fetch(this._apiUrl('/api/chat'), { method: 'POST', body: form });
@@ -514,7 +510,7 @@
         if (seq !== this._reqSeq) return;
         if (replyText) this._emit('reply', replyText);
       };
-      const url = this._wsUrl('/api/chat_stream' + (this.sessionId ? '?sessionId=' + encodeURIComponent(this.sessionId) : ''));
+      const url = this._wsUrl('/api/chat_stream');
       this._tts.playStream(url, { type: 'chat', text: q }).catch((e) => {
         if (seq === this._reqSeq) this._emit('error', '出错了:' + e.message);
       });
