@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 小头像 · Shantou</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+    background: linear-gradient(160deg, #eef1ff, #f5f6fa);
+    min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  }
+  .stage { display: flex; flex-direction: column; align-items: center; }
+  #avatarImg { display: block; max-width: 200px; height: auto; }
+  .baseWrap { position: relative; width: 200px; margin-top: -26px; }
+  #baseImg { display: block; max-width: 200px; height: auto; }
+  /* 底座光圈:未唤醒微弱灰紫,已唤醒时亮起(用户唤醒状态提示) */
+  #baseGlow {
+    position: absolute; left: 8%; right: 8%; bottom: 0; height: 62px; border-radius: 50%;
+    background: radial-gradient(ellipse, rgba(162,155,254,.55), transparent 70%);
+    filter: blur(10px); opacity: .12; transition: opacity .35s; pointer-events: none;
+  }
+  .baseWrap.awake #baseGlow { opacity: .75; }
+  /* 状态提示 */
+  .hint { margin-top: .5rem; font-size: .84rem; color: #95a5a6; min-height: 1.2em; transition: color .2s; }
+  .hint.hi { color: #6c5ce7; font-weight: 600; }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <img id="avatarImg" src="ai-avatar.svg" alt="AI 头像">
+    <div class="baseWrap" id="baseWrap">
+      <div id="baseGlow"></div>
+      <img id="baseImg" src="base.svg" alt="底座">
+    </div>
+  </div>
+  <div class="hint" id="hint">说「你好小能」唤醒</div>
+
+  <script src="voice-agent.js"></script>
+  <script>
+    const baseUrl = 'http://172.20.10.3:30002';
+    const hintEl = document.getElementById('hint');
+    const baseWrap = document.getElementById('baseWrap');
+
+    // 更新提示 + 底座光圈唤醒态
+    function setHint(text, on) {
+      hintEl.textContent = text;
+      hintEl.classList.toggle('hi', !!on);
+      baseWrap.classList.toggle('awake', !!on);
+    }
+
+    // ============ 说话时底座光圈闪烁(在唤醒常亮基础上叠加) ============
+    function initGlow(stream) {
+      let ctx;
+      try { ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch { return; }
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+      const src = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      src.connect(analyser);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      const baseImg = document.getElementById('baseImg');
+      (function glow() {
+        requestAnimationFrame(glow);
+        analyser.getByteFrequencyData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) sum += data[i];
+        const v = Math.min(1, (sum / (data.length * 255)) * 4);
+        if (baseImg) {
+          const blur = 4 + v * 10;
+          const alpha = 0.25 + v * 0.7;
+          baseImg.style.filter = 'drop-shadow(0 0 ' + blur + 'px rgba(162,155,254,' + alpha + '))';
+        }
+      })();
+    }
+
+    // 状态只打印到控制台
+    const log = (...a) => console.log('[AI头像]', ...a);
+
+    // ============ VoiceAgent(加载即自动监听,仅唤醒词免按键) ============
+    const agent = new VoiceAgent({
+      baseUrl,
+      autoWake: true,
+      onUserText: (t) => log('用户说:', t),
+      onReply: (t) => log('回复:', t),
+      onWake: (w, sec) => { log('已唤醒:', w, sec + 's'); setHint('已唤醒,请讲', true); },
+      onSleep: (idle) => { log('已休眠,静默', idle, 's'); setHint('已休眠,说「你好小能」唤醒', false); },
+      onStateChange: (s) => {
+        log('状态:', s);
+        if (s === 'wake-active') setHint('已唤醒,请讲', true);
+        else if (s === 'speaking') setHint('正在回答…', true);
+        else if (s === 'listening') setHint('说「你好小能」唤醒', false);
+        else if (s === 'sleep') setHint('已休眠,说「你好小能」唤醒', false);
+        else if (s === 'waiting-activation') setHint('点击页面任意处激活监听', false);
+        else if (s === 'idle') setHint('未启动', false);
+      },
+      onError: (m) => console.error('[AI头像] 错误:', m),
+      onAudioStream: initGlow,
+    });
+  </script>
+</body>
+</html>
