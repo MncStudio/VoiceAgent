@@ -51,6 +51,10 @@ class StreamPipeline {
     this.gen = 0;          // 管线世代:打断/新请求都 +1,旧异步续体全部失效
     this.llmController = null;
     this.replyText = '';
+    this._t = null;        // 本轮 Timing(chat_stream),用于链路耗时打点
+    this._firstDelta = false;
+    this._firstChunk = false;
+    this._sentCount = 0;   // 已合成句数
   }
 
   // 开始一轮流式问答。
@@ -70,20 +74,23 @@ class StreamPipeline {
     });
 
     const t = new Timing('chat_stream');
+    this._t = t;
+    this._firstDelta = false;
+    this._firstChunk = false;
+    this._sentCount = 0;
     this.llmController = new AbortController();
     turn
       .askStream(text, this.sessionId, (delta) => this._onDelta(gen, delta), this.llmController.signal)
       .then(({ replyText }) => {
         if (gen !== this.gen) return; // 已被打断,丢弃
-        t.mark('LLM');
-        t.log();
+        t.mark('LLM完成');
         this.replyText = replyText || '';
         this._flushTail(gen);
         this._waitDrain(gen, this.replyText);
       })
       .catch((e) => {
         if (gen !== this.gen) return; // 打断导致的 reject,不报错
-        t.mark('LLM');
+        t.mark('LLM失败');
         t.log();
         this._finish('error', { message: e.message });
       });
@@ -91,6 +98,7 @@ class StreamPipeline {
 
   _onDelta(gen, delta) {
     if (gen !== this.gen) return;
+    if (!this._firstDelta) { this._firstDelta = true; this._t.mark('LLM首字'); }
     this._sendJson({ type: 'delta', text: delta }); // 流式字幕(可选)
     const sentences = this.splitter.push(delta);
     for (const s of sentences) this._enqueue(gen, s);
@@ -116,8 +124,10 @@ class StreamPipeline {
     const next = this.queue.shift();
     if (!next) return;
     const ws = this.ws;
+    const s0 = Date.now();
     this.active = tts.synthesizeStream(next, (chunk) => {
       if (gen !== this.gen) return;
+      if (!this._firstChunk) { this._firstChunk = true; this._t.mark('TTS首块'); }
       if (ws.readyState === ws.OPEN) ws.send(chunk);
     });
     this.active.promise
@@ -125,6 +135,8 @@ class StreamPipeline {
       .finally(() => {
         if (gen !== this.gen) return; // ★ await 之后必须再校验,防取消竞态
         this.active = null;
+        this._sentCount++;
+        console.log(`[chat_stream] 第${this._sentCount}句「${next.slice(0, 20)}」合成 ${Date.now() - s0}ms`);
         // 句间小停顿:合成下一句前留档,让前端音频自然衔接(也防 _nextTime 超前连播)
         setTimeout(() => this._pump(gen), SENTENCE_GAP_MS);
       });
@@ -134,6 +146,8 @@ class StreamPipeline {
   _waitDrain(gen, replyText) {
     if (gen !== this.gen) return;
     if (this.queue.length === 0 && !this.active) {
+      this._t.mark('全部合成完');
+      this._t.log();
       this._finish('done', { replyText });
       return;
     }
