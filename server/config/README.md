@@ -91,7 +91,7 @@ VA_PROFILE=online npm start   # 全线上（百炼 + DeepSeek，按量计费）
 
 | provider | 实现 | 流式 |
 |---|---|---|
-| `cosyvoice-http` | 内网 CosyVoice | 一次性返回整段 PCM（前端仍按流式播放，单块回调） |
+| `cosyvoice-http` | 内网 CosyVoice | 流式：服务端 chunked 推裸 s16le PCM，逐块回调（前端按流式播放） |
 | `cosyvoice-ws` | 百炼 CosyVoice | 真流式，每收到一块回调 |
 
 | 字段 | 类型 | 适用 provider | 说明 |
@@ -103,7 +103,9 @@ VA_PROFILE=online npm start   # 全线上（百炼 + DeepSeek，按量计费）
 | `model` | string | ws | 百炼 TTS 模型名，如 `cosyvoice-v3-flash`。 |
 | `voice` | string | ws | 音色名，如 `longxiaochun_v3`。 |
 | `format` | string | ws | 输出音频格式，如 `pcm`。 |
-| `spkId` | string | http | 说话人 id。本地档需先用 `scripts/tts-admin.html` 页面（或直接 `POST /v1/speakers/register`）把参考音频注册到 TTS 服务，再配这里。 |
+| `spkId` | string | http | 说话人 id（仅 `endpoint` 用 `/inference_sft` 时）。需先用 `scripts/tts-admin.html` 或 `POST /v1/speakers/register` 注册音色。 |
+| `promptWav` | string | http | 参考音频路径（`/inference_zero_shot`、`/inference_cross_lingual` 用）。每次合成上传它做音色克隆，如 `server/config/prompt_wav.wav`。 |
+| `promptText` | string | http | 参考音频对应的文字（零样本/跨语种克隆用）。CosyVoice3 文本需带 `endofprompt` 标记（token 151646）前缀，缺失会触发模型断言报错。 |
 | `sampleRate` | number | 两个都 | 输出 PCM 采样率。 |
 | `channels` | number | 两个都 | 输出声道数（1）。 |
 | `bitsPerSample` | number | 两个都 | 输出位深（16）。 |
@@ -131,18 +133,18 @@ VA_PROFILE=online npm start   # 全线上（百炼 + DeepSeek，按量计费）
     "timeoutMs": 30000
   },
   "llm": {
-    "provider": "yuxi-chat",
-    "url": "http://<yuxi-host>:8080",
+    "provider": "yuxi-runs",
+    "url": "http://<yuxi-host>:4902",
     "apiKey": "<token>",
-    "agentId": "<agent-id>",
-    "userId": "external-user-001",
+    "agentSlug": "<agent-slug>",
     "timeoutMs": 120000
   },
   "tts": {
     "provider": "cosyvoice-http",
     "url": "http://<tts-host>:50002",
-    "endpoint": "/inference_sft",
-    "spkId": "xiaoneng",
+    "endpoint": "/inference_zero_shot",
+    "promptWav": "server/config/prompt_wav.wav",
+    "promptText": "You are a helpful assistant.<|endofprompt|>…(参考音频文字)",
     "sampleRate": 24000,
     "channels": 1,
     "bitsPerSample": 16,
