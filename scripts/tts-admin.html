@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TTS 音色管理</title>
+<style>
+  :root {
+    --bg: #f5f7fa;
+    --card: #ffffff;
+    --border: #e5e7eb;
+    --text: #1f2937;
+    --muted: #6b7280;
+    --primary: #2563eb;
+    --primary-hover: #1d4ed8;
+    --danger: #dc2626;
+    --ok: #16a34a;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text); padding: 24px; max-width: 860px; margin: 0 auto;
+  }
+  header { margin-bottom: 20px; }
+  h1 { font-size: 22px; font-weight: 700; }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 18px 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.05);
+  }
+  .card h2 { font-size: 15px; font-weight: 600; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+  .row:last-child { margin-bottom: 0; }
+  label { font-size: 13px; color: var(--muted); flex-shrink: 0; width: 90px; }
+  input[type=text], textarea {
+    flex: 1; min-width: 160px; padding: 8px 10px; font-size: 14px;
+    border: 1px solid var(--border); border-radius: 8px; outline: none; font-family: inherit;
+  }
+  input[type=text]:focus, textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(37,99,235,.12); }
+  textarea { resize: vertical; min-height: 52px; }
+  input[type=file] { font-size: 13px; flex: 1; min-width: 200px; }
+
+  button {
+    padding: 8px 16px; font-size: 14px; border: none; border-radius: 8px; cursor: pointer;
+    background: var(--primary); color: #fff; transition: background .15s;
+  }
+  button:hover { background: var(--primary-hover); }
+  button.secondary { background: #fff; color: var(--primary); border: 1px solid var(--primary); }
+  button.secondary:hover { background: #eff6ff; }
+  button.danger { background: #fff; color: var(--danger); border: 1px solid var(--danger); }
+  button.danger:hover { background: #fef2f2; }
+  button.sm { padding: 4px 12px; font-size: 13px; }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); }
+  th { font-weight: 600; color: var(--muted); font-size: 13px; }
+  td .ops { display: flex; gap: 8px; }
+  .empty { color: var(--muted); text-align: center; padding: 24px 0; font-size: 14px; }
+
+  #toast {
+    position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
+    padding: 10px 18px; border-radius: 10px; font-size: 14px; color: #fff; z-index: 99;
+    opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 80%;
+  }
+  #toast.show { opacity: 1; }
+  #toast.ok { background: var(--ok); }
+  #toast.err { background: var(--danger); }
+
+  .tag { display: inline-block; font-size: 12px; color: var(--muted); background: var(--bg);
+         border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; margin-left: 6px; }
+  .playing { color: var(--primary); font-size: 13px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🔊 TTS 音色管理</h1>
+  <div class="sub">Fun-CosyVoice3 · 注册 / 试听 / 删除。参考音频只在注册时上传一次，之后用 spk_id 合成。</div>
+</header>
+
+<div id="toast"></div>
+
+<div class="card">
+  <h2>服务地址</h2>
+  <div class="row">
+    <input type="text" id="baseUrl" value="http://10.10.40.23:50002" spellcheck="false">
+    <button onclick="loadList()">连接 / 刷新</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>注册音色</h2>
+  <div class="row">
+    <label>声音名</label>
+    <input type="text" id="spkId" placeholder="如 xiaoneng（字母数字下划线）" spellcheck="false">
+  </div>
+  <div class="row">
+    <label>参考音频</label>
+    <input type="file" id="wavFile" accept="audio/wav,.wav">
+  </div>
+  <div class="row">
+    <label>参考文本</label>
+    <textarea id="promptText" placeholder="可选：参考音频里说的话，利于音色提取"></textarea>
+  </div>
+  <div class="row" style="justify-content:flex-end;">
+    <button onclick="doRegister()">注册</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>已注册音色</h2>
+  <div class="row">
+    <label>试听文本</label>
+    <input type="text" id="testText" value="你好，我是小能，请问有什么可以帮助您？" spellcheck="false">
+  </div>
+  <div id="listBox"><div class="empty">点「连接 / 刷新」加载</div></div>
+</div>
+
+<script>
+'use strict';
+
+// 自包含管理页:直接调 TTS 服务(CORS 已开),不走 VoiceAgent 后端。
+const DEFAULTS = { ttsText: '你好，我是小能，请问有什么可以帮助您？' };
+
+let audioCtx = null;   // Web Audio 上下文,懒加载
+let curSource = null;  // 当前播放源,试听前先停旧的
+const $ = (id) => document.getElementById(id);
+
+function toast(msg, type) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = `show ${type || 'ok'}`;
+  setTimeout(() => { t.className = ''; }, 3200);
+}
+
+function base() { return ($('baseUrl').value || '').replace(/\/+$/, ''); }
+
+// 统一请求:非 2xx 抛错(尽量带出服务端 detail)。
+async function api(path, opts = {}) {
+  const res = await fetch(base() + path, {
+    ...opts,
+    signal: opts.signal || AbortSignal.timeout(120000),
+  });
+  if (!res.ok) {
+    let detail = '';
+    try { detail = await res.text(); } catch {}
+    const err = new Error(`HTTP ${res.status}${detail ? ' — ' + detail.slice(0, 200) : ''}`);
+    err.status = res.status;
+    throw err;
+  }
+  return res;
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ---------- 列表 ----------
+async function loadList() {
+  const box = $('listBox');
+  box.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const res = await api('/v1/speakers');
+    const data = await res.json();
+    const speakers = data.speakers || [];
+    const aliases = data.aliases || {};
+
+    if (!speakers.length) {
+      box.innerHTML = '<div class="empty">还没有注册任何音色</div>';
+      return;
+    }
+    const rows = speakers.map((id) => `
+      <tr>
+        <td>${escapeHtml(id)}
+          ${aliases[id] ? `<span class="tag">别名 → ${escapeHtml(aliases[id])}</span>` : ''}
+        </td>
+        <td><div class="ops">
+          <button class="secondary sm" onclick="doTest('${escapeHtml(id)}', this)">▶ 试听</button>
+          <button class="danger sm" onclick="doDelete('${escapeHtml(id)}')">🗑 删除</button>
+        </div></td>
+      </tr>`).join('');
+    box.innerHTML = `<table><thead><tr><th>spk_id</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>`;
+    toast('已刷新', 'ok');
+  } catch (err) {
+    box.innerHTML = `<div class="empty">加载失败:${escapeHtml(err.message)}<br><small>若用 file:// 打开失败,请改用:<code>cd scripts && python3 -m http.server 8080</code> 后访问</small></div>`;
+    toast('加载失败: ' + err.message, 'err');
+  }
+}
+
+// ---------- 注册 ----------
+async function doRegister() {
+  const spkId = $('spkId').value.trim();
+  const file = $('wavFile').files[0];
+  if (!spkId) { toast('请填写声音名 spk_id', 'err'); return; }
+  if (!/^[\w-]+$/.test(spkId)) { toast('spk_id 只允许字母数字下划线', 'err'); return; }
+  if (!file) { toast('请选择参考音频 wav', 'err'); return; }
+
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = '注册中…';
+  try {
+    const form = new FormData();
+    form.append('spk_id', spkId);
+    form.append('prompt_wav', file, file.name);
+    const pt = $('promptText').value.trim();
+    if (pt) form.append('prompt_text', pt);
+
+    const res = await api('/v1/speakers/register', { method: 'POST', body: form });
+    const data = await res.json().catch(() => ({}));
+    toast(data.message || `注册成功:${spkId}`, 'ok');
+    $('spkId').value = ''; $('wavFile').value = ''; $('promptText').value = '';
+    await loadList();
+  } catch (err) {
+    toast('注册失败: ' + err.message, 'err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '注册';
+  }
+}
+
+// ---------- 删除 ----------
+async function doDelete(spkId) {
+  if (!confirm(`确认删除音色「${spkId}」？删除后不可恢复。`)) return;
+  try {
+    const res = await api(`/v1/speakers/${encodeURIComponent(spkId)}`, { method: 'DELETE' });
+    const data = await res.json().catch(() => ({}));
+    toast(data.message || `已删除:${spkId}`, 'ok');
+    loadList();
+  } catch (err) {
+    toast('删除失败: ' + err.message, 'err');
+  }
+}
+
+// ---------- 试听 ----------
+async function doTest(spkId, btn) {
+  const text = $('testText').value.trim() || DEFAULTS.ttsText;
+  btn.disabled = true;
+  try {
+    const body = new URLSearchParams({ tts_text: text, spk_id: spkId });
+    const res = await api('/inference_sft', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+    });
+    const buf = await res.arrayBuffer();
+    if (!buf.byteLength) throw new Error('返回空音频');
+    await playPcm(buf);
+    toast(`试听完成:${spkId}（${(buf.byteLength / 48000).toFixed(1)}s）`, 'ok');
+  } catch (err) {
+    toast('试听失败: ' + err.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// 裸 PCM(s16le 24000Hz mono) → Web Audio 播放
+async function playPcm(buffer) {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') await audioCtx.resume();
+  if (curSource) { try { curSource.stop(); } catch {} }
+
+  const pcm = new Int16Array(buffer);
+  const out = audioCtx.createBuffer(1, pcm.length, 24000);
+  const ch = out.getChannelData(0);
+  for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+
+  const src = audioCtx.createBufferSource();
+  src.buffer = out;
+  src.connect(audioCtx.destination);
+  curSource = src;
+  src.start();
+  await new Promise((r) => { src.onended = r; });
+}
+
+// 回车快速操作
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.target.id === 'spkId') doRegister();
+  if (e.key === 'Enter' && e.target.id === 'baseUrl') loadList();
+});
+
+loadList();
+</script>
+</body>
+</html>

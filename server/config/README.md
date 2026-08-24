@@ -101,7 +101,7 @@ VA_PROFILE=online npm start   # 全线上（百炼 + DeepSeek，按量计费）
 | `model` | string | ws | 百炼 TTS 模型名，如 `cosyvoice-v3-flash`。 |
 | `voice` | string | ws | 音色名，如 `longxiaochun_v3`。 |
 | `format` | string | ws | 输出音频格式，如 `pcm`。 |
-| `spkId` | string | http | 说话人 id。 |
+| `spkId` | string | http | 说话人 id。本地档需先用 `scripts/tts-admin.html` 页面（或直接 `POST /v1/speakers/register`）把参考音频注册到 TTS 服务，再配这里。 |
 | `sampleRate` | number | 两个都 | 输出 PCM 采样率。 |
 | `channels` | number | 两个都 | 输出声道数（1）。 |
 | `bitsPerSample` | number | 两个都 | 输出位深（16）。 |
@@ -139,12 +139,12 @@ VA_PROFILE=online npm start   # 全线上（百炼 + DeepSeek，按量计费）
   "tts": {
     "provider": "cosyvoice-http",
     "url": "http://<tts-host>:50002",
-    "endpoint": "/inference_zero_shot",
-    "spkId": "assistant_voice",
+    "endpoint": "/inference_sft",
+    "spkId": "xiaoneng",
     "sampleRate": 24000,
     "channels": 1,
     "bitsPerSample": 16,
-    "timeoutMs": 60000
+    "timeoutMs": 120000
   }
 }
 ```

@@ -41,6 +41,7 @@
       this._ttsWs = null;           // 当前 /api/tts 连接
       this._ttsSampleRate = 24000;  // 收 meta 后更新为 config.tts.sampleRate
       this._nextTime = 0;           // 下个音块的预定播放时刻
+      this._pending = null;         // 流式块累积缓冲:服务端块不保证 2 字节对齐,跨块拼整采样
       this._activeSources = new Set();
       this._playing = false;
       this._out = null;             // 播放汇流 Gain(扬声器 + MediaStreamAudioDestination)
@@ -91,6 +92,7 @@
       this._activeSources.forEach((s) => { try { s.stop(); } catch {} });
       this._activeSources.clear();
       this._nextTime = 0;
+      this._pending = null; // 清残留累积字节
       this._setPlaying(false);
     }
 
@@ -117,10 +119,22 @@
           else if (msg.type === 'done') { ws.close(); if (this.onDone) this.onDone(); }
           return;
         }
-        // 二进制 = 裸 s16le PCM。播放起点在首块到达时才定:此刻 currentTime 才是真实时钟,
+        // 二进制 = 裸 s16le PCM。服务端流式块不保证 2 字节对齐(实测有奇数块),
+        // 直接 new Int16Array 会 RangeError;先跨块累积成整采样再播放。
+        const raw = e.data;
+        const prevLen = this._pending ? this._pending.length : 0;
+        const merged = new Uint8Array(prevLen + raw.byteLength);
+        if (this._pending) merged.set(this._pending, 0);
+        merged.set(new Uint8Array(raw), prevLen);
+        this._pending = merged;
+        const usable = this._pending.length & ~1; // 对齐到偶数(每采样 2 字节)
+        if (usable === 0) return;
+        const int16 = new Int16Array(this._pending.buffer, 0, usable / 2);
+        this._pending = this._pending.slice(usable);
+
+        // 播放起点在首块到达时才定:此刻 currentTime 才是真实时钟,
         // +150ms 给后续排队留余量(理由见类头注释)。
         if (pcmN === 0) this._nextTime = Math.max(this._nextTime, ctx.currentTime + 0.15);
-        const int16 = new Int16Array(e.data);
         const f32 = new Float32Array(int16.length);
         for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768;
         const buf = ctx.createBuffer(1, f32.length, this._ttsSampleRate);

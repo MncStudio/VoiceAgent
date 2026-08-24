@@ -2,50 +2,73 @@
 
 浏览器录音 → ASR 识别 → LLM 生成回复 → TTS 合成 → 浏览器播放,一个完整的语音问答闭环。后端在 ASR 之前用 Silero VAD 裁掉首尾静音,只把有效语音送识别。
 
-## 两套配置:local / online
+支持**三路问答**,共享同一份多轮记忆(同一 `sessionId` 内连续问答带上下文):
 
-同一套代码,通过 `VA_PROFILE` 环境变量切换后端服务(默认 `local`,不设也走 local)。
+| 方式 | 接口 | 说明 |
+| --- | --- | --- |
+| 语音问答 | `POST /api/chat` | 按住说话,发 webm/mp4 录音 |
+| 文字问答 | `POST /api/chat_text` | 直接发文本,跳过 VAD/ASR |
+| 唤醒词免按键 | `WS /api/wake` | 前端常驻推 16k int16 PCM,命中唤醒词自动回答 |
 
-| | `local`(本地 192) | `online`(全线上) |
-|---|---|---|
-| **ASR 识别** | 内网 Paraformer HTTP<br>`192.168.110.247:50001` | 阿里云百炼 WebSocket<br>`paraformer-realtime-v2` |
-| **LLM 对话** | 语析 Yuxi openapi chat<br>`192.168.110.109:8080` | DeepSeek(OpenAI 兼容)<br>`deepseek-chat` |
-| **TTS 合成** | 内网 CosyVoice HTTP<br>`192.168.110.247:50002`,音色 `assistant_voice` | 百炼 WebSocket<br>`cosyvoice-v3-flash`,音色 `longxiaochun_v3` |
-| **网络依赖** | 仅内网可达,不出公网 | 需要连阿里云 + DeepSeek |
-| **费用** | 自建服务,免费 | 按量计费 |
-| **多人设** | 有(语析 agent,可配人设) | 无(DeepSeek 是通用助手) |
+**TTS 与主链路解耦**:后端接口只回 `{replyText, userText}`,不返回音频;前端拿到回复文本后另连 `WS /api/tts` 流式合成播放(边生成边播、可打断)。
 
-**怎么选:**
-- 内网服务在、人设重要 → `VA_PROFILE=local npm start`
-- 想用 DeepSeek、不怕连云 → `VA_PROFILE=online npm start`(默认不设也走 local)
-
-两套多轮记忆都支持(local 用语析 thread_id,online 用 DeepSeek 消息历史),代码完全一致,只换配置。
-
-## 启动
+## 快速启动
 
 ```bash
-npm install
-VA_PROFILE=local npm start    # 或 VA_PROFILE=online
+npm install                 # 只装一次
+VA_PROFILE=local npm start  
+VA_PROFILE=online npm start 
 ```
 
-然后浏览器打开 http://localhost:3000,按住录音按钮提问。
+浏览器打开 `http://localhost:3000`(port 取配置 `server.port`,默认 local=3000 / online=30002)。演示页 [public/index.html](public/index.html) 基于 SDK、`autoWake:true` 加载即监听,首次需点击页面授权麦克风(浏览器 autoplay 限制)。
+
+**环境要求**:Node >= 18;系统装有 `ffmpeg`(`audio.js` 转码用)。
+
+**首次 clone 需两步**(均已被 gitignore,仓库里没有):
+
+1. 按 [server/config/README.md](server/config/README.md) 创建 `server/config/{profile}.json`(含 API key,别提交)。
+2. 准备 `server/models/silero_vad.onnx`(v5 分发版,官方 snakers4 版局部推理异常)。
+
+无测试/无 lint/无构建,前端 SDK 是无打包的 IIFE。
+
+## 两档配置:local / online
+
+同一套代码,靠 `VA_PROFILE` 环境变量加载 `server/config/{profile}.json`(默认 `local`)。**每个环节(asr/llm/tts)各自用 `provider` 字段选实现,不强绑档位**,可随意混搭。
+
+| 环节 | `local` | `online` |
+| --- | --- | --- |
+| **ASR** | 内网 Paraformer HTTP | 阿里云百炼 Paraformer WS |
+| **TTS** | 内网 CosyVoice HTTP(`spkId` 引用音色) | 百炼 CosyVoice WS(`voice` 音色) |
+| **LLM** | DeepSeek(OpenAI 兼容) | DeepSeek(OpenAI 兼容) |
+| **网络** | ASR/TTS 走内网,LLM 连 DeepSeek | 全走阿里云百炼 + DeepSeek |
+| **费用** | ASR/TTS 自建免费,LLM 按量 | 全部按量计费 |
+
+> 上表为当前两档默认值。真实端点 / 音色 / 密钥在 gitignore 的 `server/config/local.json` / `online.json`;想用人设 Agent 就把 `llm.provider` 设为 `yuxi-chat`(语析 openapi chat)。字段说明见 [server/config/README.md](server/config/README.md)。
 
 ## 目录结构
 
-```
+```text
 server/
-├── index.js     # Express 入口 + POST /api/chat + 静态托管 + 会话表
-├── config.js    # 加载 server/config/{profile}.json
-├── config/      # 两套配置(含 key,已 gitignore 不入库)
-├── audio.js     # ffmpeg 转码(webm → wav)、临时文件清理
-├── vad.js       # Silero VAD 静音裁剪(onnxruntime-node 推理)
+├── index.js     # Express 入口 + /api/chat + /api/chat_text + 共享 WebSocketServer(/api/wake、/api/tts)
+├── config.js    # 按 VA_PROFILE 加载 server/config/{profile}.json,缺文件直接抛错
+├── config/      # 两套配置(含 key,gitignore 不入库;字段说明见 config/README.md)
+├── audio.js     # ffmpeg 转码(webm → 16k mono wav)、临时文件清理
+├── vad.js       # Silero VAD 静音裁剪(onnxruntime-node 推理)+ 流式 VAD
 ├── models/      # silero_vad.onnx 模型文件
-├── asr.js       # 音频 → 文字(本地 HTTP / 百炼 WS 分流)
-├── llm.js       # 文字 → 回复(语析 openapi chat / DeepSeek 分流,多轮记忆)
-├── tts.js       # 回复 → wav 音频(本地 HTTP / 百炼 WS 分流)
+├── asr.js       # 音频 → 文字(local HTTP / 百炼 WS 分流)
+├── llm.js       # 文字 → 回复(openai-compatible / yuxi-chat 分流,多轮记忆)
+├── tts.js       # 回复 → PCM 流(local HTTP / 百炼 WS 分流)
+├── wake.js      # 流式开口段检测 + 唤醒词匹配(拼音模糊)+ 自动回答
+├── turn.js      # 会话表(sessionId → 多轮上下文,三路共用)
+├── timing.js    # 链路耗时打点(Timing→mark→log)
 └── bailian.js   # 阿里云百炼 WebSocket 客户端(ASR + TTS)
+
+public/
+├── voice-agent.js  # 前端 SDK(VoiceAgent 类,一个入口封装三路问答 + 自动 TTS 播放)
+└── index.html      # 接口演示页(只调 SDK 的 UI 示例)
 ```
 
 ## 相关文档
 
-- [docs/API.md](docs/API.md) — 接入文档(SDK 用法 + 后端接口协议)
+- [docs/API.md](docs/API.md) — 接入文档(SDK 用法 + 后端接口协议 + 跨域部署)
+- [server/config/README.md](server/config/README.md) — 配置字段说明(local / online 两档完整示例)
