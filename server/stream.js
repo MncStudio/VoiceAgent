@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const config = require('./config');
 const tts = require('./tts');
 const turn = require('./turn');
@@ -23,7 +24,9 @@ function attach(wss) {
   wss.on('connection', (ws, req) => {
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname !== '/api/chat_stream') return; // 非流式问答,交给其他 handler
-    const sessionId = url.searchParams.get('sessionId') || undefined;
+    // sessionId 可选:接入方传了就用它做多轮记忆(须传稳定值,如固定字符串,yuxi 的 thread 才能串回);
+    // 不传则本连接一个独立随机会话,每次问答各自独立(无多轮记忆),也避免不同客户端共用 undefined 槽互相串话。
+    const sessionId = url.searchParams.get('sessionId') || crypto.randomUUID();
 
     const pipeline = new StreamPipeline(ws, sessionId);
     ws.on('close', () => pipeline.cancel());
