@@ -65,23 +65,25 @@ VA_PROFILE=online npm start   # 全线上（百炼 + DeepSeek，按量计费）
 
 ## llm（大模型：文字 → 回复）
 
-`provider` 二选一：
+`provider` 三选一：
 
 | provider | 实现 | 多轮记忆上下文 |
 |---|---|---|
 | `yuxi-chat` | 语析 openapi chat：POST `{url}/yuxi/openapi/v1/agents/{agentId}/chat`，SSE 流式（`stream:true`），累加 `message_delta` 成完整回复 | `thread_id` |
+| `yuxi-runs` | yuxi agent runs：先 POST `/api/chat/thread` 建线程拿 id，再 POST `/api/agent/runs` 建 run，最后 GET `/api/agent/runs/{run_id}/events` 拉 SSE | `thread_id`（首次自动建线程） |
 | `openai-compatible` | DeepSeek 等 OpenAI 兼容接口 | 消息历史数组 |
 
 | 字段 | 类型 | 适用 provider | 说明 |
 |---|---|---|---|
 | `provider` | string | — | 枚举值见上表。 |
-| `url` | string | yuxi-chat | 语析服务根地址。 |
+| `url` | string | yuxi-chat / yuxi-runs | 服务根地址（yuxi-runs 如 `http://10.10.40.26:4902`）。 |
 | `baseUrl` | string | openai | 会拼 `/chat/completions`，如 `https://api.deepseek.com/v1`。 |
 | `model` | string | openai | 模型名，如 `deepseek-chat`。 |
-| `apiKey` | string | 两个都 | yuxi-chat 档是语析鉴权 token；openai 档是 DeepSeek key。 |
+| `apiKey` | string | 三个都 | yuxi-chat / yuxi-runs 是鉴权 Bearer token；openai 是 DeepSeek key。 |
 | `agentId` | string | yuxi-chat | agent 的 id，拼进 chat URL。 |
+| `agentSlug` | string | yuxi-runs | agent 的 slug（如 `agent-45f8f3bdbcf8`）；建线程 body 的 `agent_id` 与 run body 的 `agent_slug` 都用它。 |
 | `userId` | string | yuxi-chat | chat 请求里的 `user` 字段（端侧用户标识），缺省用 `external-user-001`。 |
-| `timeoutMs` | number | openai / yuxi-chat | 单次 chat 请求超时（ms）。 |
+| `timeoutMs` | number | 三个都 | 单次请求超时（ms）。 |
 
 ## tts（语音合成：文字 → PCM）
 

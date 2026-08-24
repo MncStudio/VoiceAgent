@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const config = require('./config');
 const { Timing } = require('./timing');
 
@@ -12,9 +13,8 @@ const { Timing } = require('./timing');
 // 超时但已有部分文本仍 resolve(视为已生成)。供 /api/chat_stream 用。
 
 async function askStream(query, context, onDelta, signal) {
-  if (config.llm.provider === 'openai-compatible') {
-    return askOpenAIStream(query, context, onDelta, signal);
-  }
+  if (config.llm.provider === 'openai-compatible') return askOpenAIStream(query, context, onDelta, signal);
+  if (config.llm.provider === 'yuxi-runs') return askYuxiRunsStream(query, context, onDelta, signal);
   return askYuxiChatStream(query, context, onDelta, signal);
 }
 
@@ -137,6 +137,94 @@ async function readOpenAIStream(body, onDelta) {
     // 流被中断,返回已攒的 text(有部分则上层按已生成处理)
   }
   return { text, raw };
+}
+
+// ---------- yuxi agent runs(建线程 → 建 run → 拉事件流)----------
+// 流程:首次无 thread 时先 POST {url}/api/chat/thread 建对话线程拿 id(多轮记忆);
+// 再 POST /api/agent/runs 创建 run(拿 run_id),GET /api/agent/runs/{run_id}/events 拉 SSE。
+// SSE 里增量是 payload.items[].stream_event.type==='message_delta' 的 content,与 readYuxiSse 解析一致。
+// context 存 thread_id(多轮记忆),首次由建线程生成,后续沿用。
+async function askYuxiRunsStream(query, threadId, onDelta, signal) {
+  const t = new Timing('yuxi-runs');
+  const combined = combineSignals(signal, config.llm.timeoutMs || 120000);
+
+  // 首次无 thread_id:先建对话线程拿 id
+  let tid = threadId;
+  if (!tid) {
+    try {
+      const cRes = await fetch(`${config.llm.url}/api/chat/thread`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.llm.apiKey}` },
+        body: JSON.stringify({ agent_id: config.llm.agentSlug, title: 'voiceagent' }),
+        signal: combined.signal,
+      });
+      if (!cRes.ok) {
+        const d = await cRes.text().catch(() => '');
+        throw new Error(`yuxi 建线程失败: HTTP ${cRes.status} ${d.slice(0, 200)}`);
+      }
+      const c = await cRes.json();
+      tid = c.id;
+    } catch (e) {
+      combined.cleanup();
+      throw e;
+    }
+  }
+
+  let res;
+  try {
+    res = await fetch(`${config.llm.url}/api/agent/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.llm.apiKey}` },
+      body: JSON.stringify({
+        query,
+        agent_slug: config.llm.agentSlug,
+        thread_id: tid,
+        meta: { request_id: 'req-' + crypto.randomUUID(), attachment_file_ids: [] },
+        image_content: null,
+        model_spec: null,
+        resume: null,
+        created_by_run_id: null,
+      }),
+      signal: combined.signal,
+    });
+  } catch (e) {
+    combined.cleanup();
+    throw e;
+  }
+  if (!res.ok) {
+    combined.cleanup();
+    const detail = await res.text().catch(() => '');
+    throw new Error(`yuxi runs 创建失败: HTTP ${res.status} ${detail.slice(0, 200)}`);
+  }
+  const run = await res.json();
+  const runId = run.run_id;
+  const nextThread = run.thread_id || tid;
+  if (!runId) {
+    combined.cleanup();
+    throw new Error('yuxi runs 未返回 run_id');
+  }
+
+  let result;
+  try {
+    const evRes = await fetch(`${config.llm.url}/api/agent/runs/${runId}/events?verbose=false`, {
+      headers: { Accept: 'text/event-stream', Authorization: `Bearer ${config.llm.apiKey}` },
+      signal: combined.signal,
+    });
+    if (!evRes.ok) {
+      combined.cleanup();
+      const d = await evRes.text().catch(() => '');
+      throw new Error(`yuxi runs 事件流失败: HTTP ${evRes.status} ${d.slice(0, 200)}`);
+    }
+    result = await readYuxiSse(evRes.body, onDelta);
+  } finally {
+    combined.cleanup();
+  }
+  if (signal?.aborted) throw new Error('已打断');
+  t.mark('完成');
+  t.log();
+  const reply = result.text.trim();
+  if (!reply) throw new Error('yuxi runs 流式返回无内容');
+  return { text: reply, context: nextThread };
 }
 
 // ---------- 语析 openapi chat(SSE 流式)----------
