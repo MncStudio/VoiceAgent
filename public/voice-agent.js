@@ -181,7 +181,9 @@
       const int16 = new Int16Array(this._pending.buffer, 0, usable / 2);
       this._pending = this._pending.slice(usable);
 
-      if (this._pcmCount === 0) this._nextTime = Math.max(this._nextTime, ctx.currentTime + 0.15);
+      // 每块都把调度起点夹到「不低于当前+余量」:只有首块 clamp 的话,若后端某段空窗后连送块,
+      // _nextTime 落后于 current 会"追播"过去,导致攒了几块突然一起播。
+      this._nextTime = Math.max(this._nextTime, ctx.currentTime + 0.15);
       const f32 = new Float32Array(int16.length);
       for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768;
       const buf = ctx.createBuffer(1, f32.length, this._ttsSampleRate);

@@ -6,6 +6,8 @@ const turn = require('./turn');
 const { SentenceBuffer } = require('./sentence');
 const { Timing } = require('./timing');
 
+const SENTENCE_GAP_MS = 120; // 句间停顿,避免连续句子连珠炮式播放(前端此时无新块,自然衔接)
+
 // 流式问答管线 + /api/chat_stream 连接处理。
 // 前端连 /api/chat_stream?sessionId=xxx,发 {type:'chat', text},后端一条龙:
 // 用户文本 → llm.askStream 增量 → 断句器切句 → 逐句串行 TTS(一次一句) → 顺序推裸 s16le PCM 给前端。
@@ -123,7 +125,8 @@ class StreamPipeline {
       .finally(() => {
         if (gen !== this.gen) return; // ★ await 之后必须再校验,防取消竞态
         this.active = null;
-        this._pump(gen);
+        // 句间小停顿:合成下一句前留档,让前端音频自然衔接(也防 _nextTime 超前连播)
+        setTimeout(() => this._pump(gen), SENTENCE_GAP_MS);
       });
   }
 
