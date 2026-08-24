@@ -1,12 +1,14 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
 const config = require('./config');
 const { ttsWsStream } = require('./bailian');
 
 // 本地 CosyVoice HTTP:文本 → onChunk 流式回调 PCM 块(裸 s16le,参数见 config.tts)。
-// 声音用 spk_id 引用——用 scripts/tts-admin.html 页面把参考音频注册到 TTS 服务,
-// 再把 spk_id 配进 config.tts.spkId,主链路只发 tts_text + spk_id(不碰参考文件)。
-// 服务端 stream=true 按 chunked 流式推 PCM,这里读响应体流逐块透传。
+// 走「参考音频克隆」:每次带 prompt_wav(音色参考音频)+ prompt_text(参考文字)+ tts_text。
+// 参考音频路径/文字配在 config.tts.promptWav / config.tts.promptText(见 server/config/local.json)。
+// 服务端默认按 chunked 流式推 PCM(无需 stream 参数),这里读响应体流逐块透传。
 // 返回 { promise, cancel }:cancel 供打断时中止请求,停止合成。
 function localHttpTts(text, onChunk) {
   const controller = new AbortController();
@@ -15,8 +17,11 @@ function localHttpTts(text, onChunk) {
   const promise = (async () => {
     const body = new FormData();
     body.append('tts_text', text);
-    body.append('spk_id', config.tts.spkId);
-    body.append('stream', 'true');
+    if (config.tts.promptText) body.append('prompt_text', config.tts.promptText);
+    if (config.tts.promptWav) {
+      const p = path.resolve(__dirname, '..', config.tts.promptWav);
+      body.append('prompt_wav', new Blob([fs.readFileSync(p)], { type: 'audio/wav' }), path.basename(p));
+    }
 
     const res = await fetch(`${config.tts.url}${config.tts.endpoint}`, {
       method: 'POST',
