@@ -17,6 +17,11 @@ const PAD_SAMPLES = 4800; // 段前后各保留 300ms 静音,防止掐头去尾(
 const MAX_SEG_SAMPLES = 5 * 16000; // 单段上限 5s,超时强制截断
 const WAKE_REPLY = '我在，请讲'; // 只说唤醒词、没带问题时的固定问候回复(不走 LLM,不写进多轮历史)
 
+// 语义化打断词:VAD 攒段 → ASR 识别后,文本命中这些词(且整段够短)才发 interrupt,
+// 让"别说了/暂停"这类指令能停播,而环境噪音/无关音不再打断。
+const STOP_WORDS = ['暂停', '停一下', '停下', '停止回答', '别说了', '别讲了', '不用说了', '不要再说了', '住口', '闭嘴', '安静'];
+const STOP_MAX_LEN = 6; // 命中打断词前,归一化文本长度上限,挡住正常长句问题
+
 // 归一化:去空白/全半角标点/转小写,ASR 结果和唤醒词统一后再做包含匹配。
 function normalize(s) {
   return s.replace(
@@ -74,6 +79,7 @@ class WakeDetector {
   constructor(wakeWords, sessionId, onEvent, wakeTimeoutMs, vad = {}) {
     this.wakeWords = wakeWords.map(normalize).filter(Boolean);
     this.wakeSyllables = this.wakeWords.map(toSyllables); // 拼音匹配用,构造时预计算一次
+    this.stopSyllables = STOP_WORDS.map(toSyllables); // 打断词拼音序列,同唤醒词,用于同音字容错
     this.sessionId = sessionId; // 唤醒自动回答与语音/文字共享多轮记忆
     this.onEvent = onEvent; // 回调(type, payload):answer=回答、wake=命中唤醒词、sleep=已休眠
     this.wakeTimeoutMs = wakeTimeoutMs || 300000; // 唤醒窗口时长,默认 5 分钟
@@ -117,6 +123,17 @@ class WakeDetector {
     return null;
   }
 
+  // 语义化打断判定:归一化后文本长度 ≤ STOP_MAX_LEN 且含任一打断词(字符精确/拼音模糊)→ 判为打断。
+  // 用长度上限挡住正常问句(如"为什么停止播放"),避免误伤;词表用明确词(停下/停止回答),不含过宽单字(停)。
+  matchStop(text) {
+    const n = normalize(text);
+    if (!n || n.length > STOP_MAX_LEN) return false;
+    if (STOP_WORDS.some((w) => n.includes(w))) return true;
+    // 拼音模糊:打断词音节序列是文本音节序列的连续子序列(兼容 ASR 同音字,如 部说了/别说了)
+    const syl = toSyllables(n);
+    return this.stopSyllables.some((sub) => sub.length && findSubseq(syl, sub) >= 0);
+  }
+
   async init() {
     this.vadStream = await vad.createVadStream((prob, samples) => this.onFrame(prob, samples));
   }
@@ -129,9 +146,8 @@ class WakeDetector {
       if (isSpeech) {
         this.speechStreak++;
         if (this.speechStreak >= this.startFrames) {
-          // 判到开口(约 96ms)立即通知前端打断正在播的回答,不等整句识别完。
-          // 检测由后端 VAD 统一做(前端不判音量):开口即打断,前端收到 interrupt 停播放。
-          this.onEvent('interrupt');
+          // 判到开口(约 96ms)即进入攒段;不再"开口即断"——打断改为语义化:
+          // 段结束 ASR 识别出打断词(见 matchStop)才发 interrupt,避免环境噪音误断。
           this.state = 'speaking';
           // 段头 padding = 已缓存的最近 100ms
           this.speechFrames = [this.ring.toArray()];
@@ -195,13 +211,26 @@ class WakeDetector {
         t.log();
         const now = Date.now();
 
+        // 语义化打断:识别到打断词(如"别说了")即发 interrupt,不再"任意声音即断"。
+        // 命中打断词不回 answer——否则会把"暂停"当新问题送 LLM,反而自问自答。
+        if (this.matchStop(text)) {
+          console.log(`[wake] 检测到打断词,识别为:「${text}」`);
+          // 静默停播:命中打断词即发 interrupt(不播报"已暂停",避免想安静时又多一声、
+          // 以及那声被麦克风采回识别成用户输入而自问自答)。
+          this.onEvent('interrupt');
+          return;
+        }
+
         if (this.armed) {
+          const trimmed = text.trim();
+          // 过短(<2 字)视为语气词/噪音乱码,不当新问题问答(避免环境噪音被喂给 LLM)
+          if (normalize(trimmed).length < 2) return;
           // 已唤醒:整句直接送 LLM,不用再带唤醒词。
           // 若还带着唤醒词(习惯性带上),剥掉再送(字符/拼音匹配均可)。
           this.lastActiveAt = now;
           this._scheduleSleep(); // 窗口内每次说话刷新休眠倒计时
-          const m = this.match(text);
-          this.answer(m ? m.rest : text.trim(), m ? m.word : undefined);
+          const m = this.match(trimmed);
+          this.answer(m ? m.rest : trimmed, m ? m.word : undefined);
           return;
         }
 

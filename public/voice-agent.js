@@ -416,9 +416,11 @@
             this._streamReply(msg.userText); // 带问题:流式问答,完整回复经 onDone → onReply 回
           }
           break;
-        case 'interrupt': // 后端 VAD 判到你开口:立即打断正在播的回答
-          this._tts.stop();
-          this._emit('interrupt');
+        case 'interrupt': // 后端识别到打断词(如"别说了"):停止正在播的回答;没在播则忽略,不误报 onInterrupt
+          if (this._tts.playing) {
+            this._tts.stop();
+            this._emit('interrupt');
+          }
           break;
         case 'wake': // 命中唤醒词,进入唤醒窗口;timeoutSeconds=窗口总秒数
           this._armed = true;
