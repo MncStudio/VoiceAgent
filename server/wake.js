@@ -2,7 +2,6 @@
 
 const vad = require('./vad');
 const asr = require('./asr');
-const turn = require('./turn');
 const { Timing } = require('./timing');
 const { pinyin } = require('pinyin-pro'); // 拼音模糊匹配,兼容 ASR 同音字误识别
 
@@ -244,19 +243,14 @@ class WakeDetector {
     }
   }
 
-  // 只说唤醒词、没带问题:直接回固定问候,不走 LLM,避免把「我在，请讲」当用户消息写进多轮历史。
-  // 带问题才走 turn.ask(与语音/文字共享多轮记忆)。音频由前端经 /api/tts 流式合成播放,这里只回文本。
+  // 只说唤醒词、没带问题:直接回固定问候(带 replyText),不走 LLM,避免把「我在，请讲」当用户消息写进多轮历史。
+  // 带问题:不再整段调 LLM,只回 userText,由前端连 /api/chat_stream 流式问答(与语音路一致,共享多轮记忆)。
   answer(question, word) {
     if (!question) {
       this.onEvent('answer', { userText: word || WAKE_REPLY, replyText: WAKE_REPLY });
       return;
     }
-    turn
-      .ask(question, this.sessionId)
-      .then(({ replyText }) => {
-        this.onEvent('answer', { userText: question, replyText });
-      })
-      .catch((e) => console.error(`[wake] 回答失败: ${e.message}`));
+    this.onEvent('answer', { userText: question });
   }
 }
 

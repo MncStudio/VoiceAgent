@@ -10,7 +10,6 @@ const config = require('./config');
 const audio = require('./audio');
 const asr = require('./asr');
 const vad = require('./vad');
-const turn = require('./turn');
 const wake = require('./wake');
 const tts = require('./tts');
 const stream = require('./stream');
@@ -69,14 +68,8 @@ app.post('/api/chat', upload.single('audio'), async (req, res) => {
     const userText = await asr.recognize(vadOut);
     t.mark('ASR');
 
-    // 3. LLM 出文本。stream=1 时只回识别文本,由前端连 /api/chat_stream 做 LLM→TTS 流式;
-    //    否则回完整 replyText(兼容旧消费方,且避免这里调 LLM 与流式通道重复、污染多轮记忆)。
-    if (req.query.stream === '1') {
-      res.json({ userText });
-    } else {
-      res.json(await turn.ask(userText, req.body.sessionId));
-    }
-    t.mark('LLM');
+    // 3. 语音两跳第一跳:只回识别文本,由前端连 /api/chat_stream 做 LLM→TTS 流式(不在这调 LLM)。
+    res.json({ userText });
     t.log();
   } catch (err) {
     console.error('[chat]', err.message);
@@ -86,19 +79,7 @@ app.post('/api/chat', upload.single('audio'), async (req, res) => {
   }
 });
 
-// 文字接口:跳过转码/VAD/ASR,直接 LLM。请求体 JSON { text, sessionId }。
-app.post('/api/chat_text', (req, res) => {
-  (async () => {
-    const text = String(req.body?.text || '').trim();
-    if (!text) {
-      return res.status(400).json({ error: '缺少 text' });
-    }
-    res.json(await turn.ask(text, req.body?.sessionId));
-  })().catch((err) => {
-    console.error('[chat_text]', err.message);
-    res.status(500).json({ error: err.message });
-  });
-});
+// 文字问答走 /api/chat_stream(WS 流式),不再有独立的非流式端点。
 
 // 唤醒词检测:WebSocket,前端常驻推 16k int16 PCM 块,命中唤醒词回 {"type":"wake","word":...}
 const server = http.createServer(app);

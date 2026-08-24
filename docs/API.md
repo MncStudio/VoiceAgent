@@ -60,24 +60,14 @@
 | `audio` | webm/mp4 录音文件 |
 | `sessionId` | 可选，会话 id；同一次对话内连续问答共享上下文 |
 
-后端处理：转码 → VAD 裁静音 → ASR。默认再走 LLM 返回 `{replyText, userText}`；加 `?stream=1` 时**只做 ASR 回 `{userText}`**（不调 LLM），由前端把识别文本送去 `/api/chat_stream` 流式问答（避免 LLM 重复、污染多轮记忆）。
+后端处理：转码 → VAD 裁静音 → ASR，只回识别文本 `{userText}`（不调 LLM）；由前端把识别文本送去 `/api/chat_stream` 流式问答（语音两跳第一跳）。
 
-响应 `200`：默认 `{ "replyText": "...", "userText": "..." }`；`?stream=1` 时 `{ "userText": "..." }`
+响应 `200`：`{ "userText": "..." }`
 错误：非 2xx + `{ "error": "原因" }`
-
-### POST /api/chat_text — 文字问答
-
-请求 `application/json`：
-
-```json
-{ "text": "你好", "sessionId": "user-001" }
-```
-
-跳过 ASR 直接 LLM，响应同上 `{replyText, userText}`。
 
 ### WS /api/wake — 唤醒词监听
 
-前端连上后**持续发送二进制 PCM 块**：16kHz、单声道、s16le（裸 int16）。后端用 VAD + ASR 检测唤醒词，命中自动回答（去掉唤醒词，剩余文本走 LLM）。URL 参数 `?sessionId=xxx` 可选（会话 id，同一会话内连续问答共享上下文）。
+前端连上后**持续发送二进制 PCM 块**：16kHz、单声道、s16le（裸 int16）。后端用 VAD + ASR 检测唤醒词，命中自动回答（去掉唤醒词，剩余文本走 `/api/chat_stream` 流式问答；只说唤醒词回固定问候）。URL 参数 `?sessionId=xxx` 可选（会话 id，同一会话内连续问答共享上下文）。
 
 后端回 JSON 文本帧：
 
@@ -112,7 +102,7 @@
 打断：直接 `ws.close()`；后端取消 LLM 请求（abort SSE）、停当前合成、清空队列并复位断句器。
 
 > 断句：LLM 增量 token 不能直接喂 TTS（无断句、语音断续），后端用断句器按句末标点（。！？…、换行）或长度上限切句。歌词/逗号不硬切（软切默认关）。
-> 前端 SDK 已内置（`askText`/`_sendAudio` 自动改走本通道）；`/api/chat_text` 端点仍保留给非流式旧消费方，与 `chat_stream` 互斥使用。
+> 前端 SDK 已内置（`askText`/`_sendAudio` 自动改走本通道，语音/文字/唤醒带问题都汇聚到它）。
 
 ### WS /api/tts — 流式 TTS 合成
 

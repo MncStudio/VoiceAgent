@@ -4,13 +4,22 @@
 // 关键:LLM 的增量 token 不能直接喂 TTS(单 token 无断句、合成出来语音断续、停顿乱),
 // 这里攒到句子边界才切一句;切出的句子含句末标点一起送 TTS(CosyVoice 用标点调韵律)。
 // 纯逻辑无 IO,可单测。
+//
+// 两条切句约束:
+// - minLen:句子不足 minLen 时暂缓(标点留句内继续攒),减少碎句→降低逐句 TTS 请求数(防限流)。
+// - 有内容性过滤:切出的句子若纯标点/空白(如单独一个「！」),丢弃,不送 TTS(防 InvalidParameter)。
 
 const TERMINATORS = new Set(['。', '！', '？', '…']);
 
+// 是否含「非标点、非空白」的内容字符(中文/字母/数字/假名/韩文)。纯标点或空段返回 false。
+function hasContent(s) {
+  return /[0-9A-Za-z一-龥぀-ヿ가-힯]/.test(s);
+}
+
 class SentenceBuffer {
   constructor(opts = {}) {
-    // 无终止符时按长度强制切,避免一直攒不出句(低延迟兜底;越短句越多、句间空档越大)。
-    this.maxLen = opts.maxLen || 50;
+    this.maxLen = opts.maxLen || 80;   // 无终止符时按长度强制切,避免一直攒不出句(低延迟兜底)
+    this.minLen = opts.minLen || 5;    // 句子短于此则暂缓合并,减少碎句
     this.buf = '';
   }
 
@@ -23,19 +32,27 @@ class SentenceBuffer {
     let start = 0;
     for (let i = 0; i < b.length; i++) {
       const ch = b[i];
-      if (TERMINATORS.has(ch) || ch === '\n') {
-        // 句末标点保留进句子;换行是边界,不留进正文。
-        let sent = ch === '\n' ? b.slice(start, i) : b.slice(start, i) + ch;
-        sent = sent.replace(/\s+$/, '').trim();
-        if (sent) out.push(sent);
+      if (ch === '\n') {
+        // 换行是强边界:切句,但不把换行留进正文。
+        const sent = b.slice(start, i).replace(/\s+$/, '').trim();
+        if (sent && hasContent(sent)) out.push(sent);
         start = i + 1;
-        // 跳过连续终止符(……、!!!、换行),避免切出空句。
         while (start < b.length && (TERMINATORS.has(b[start]) || b[start] === '\n')) start++;
         i = start - 1;
+      } else if (TERMINATORS.has(ch)) {
+        if (i - start + 1 < this.minLen) {
+          // 太短:先不切,标点留句内继续攒,直到长度够或遇换行/长度上限——减少碎句。
+        } else {
+          const sent = b.slice(start, i + 1).replace(/\s+$/, '').trim();
+          if (sent && hasContent(sent)) out.push(sent);
+          start = i + 1;
+          while (start < b.length && (TERMINATORS.has(b[start]) || b[start] === '\n')) start++;
+          i = start - 1;
+        }
       } else if (i - start + 1 >= this.maxLen) {
         // 无终止符但攒够了长度:强制切(可能切半句,为低延迟兜底)。
         const forced = b.slice(start, i + 1).trim();
-        if (forced) out.push(forced);
+        if (forced && hasContent(forced)) out.push(forced);
         start = i + 1;
       }
     }
@@ -43,17 +60,18 @@ class SentenceBuffer {
     return out;
   }
 
-  // LLM 流结束时,返回残余半句(若有),并把缓冲清空。之后应 reset。
+  // LLM 流结束:把残余(含暂缓的短句)作为尾句切出。返回数组(可能为空)。
   flush() {
-    const s = this.buf.trim();
+    const out = [];
+    const tail = this.buf.trim();
+    if (tail && hasContent(tail)) out.push(tail);
     this.buf = '';
-    return s || null;
+    return out;
   }
 
-  // 打断/复位。
   reset() {
     this.buf = '';
   }
 }
 
-module.exports = { SentenceBuffer };
+module.exports = { SentenceBuffer, hasContent };

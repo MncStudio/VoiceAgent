@@ -6,19 +6,10 @@ const { Timing } = require('./timing');
 // LLM:文字 → 回复。根据 provider 分流:
 // - openai-compatible: DeepSeek(OpenAI 兼容,context 是消息历史数组)
 // - yuxi-chat        : 语析 openapi chat(SSE 流式累加,context 是 thread_id)
-// context 由 index.js 在会话表中维护,实现多轮记忆。
+// context 由 /api/chat_stream 经 turn.js 在会话表中维护,实现多轮记忆。
 //
-// 两种调用形态:
-// - ask(query, context):同步形态,一次性返回完整回复(唤醒/兼容路径用)。
-// - askStream(query, context, onDelta, signal):流式形态,onDelta(增量文本)逐段回调,
-//   只在外部中断时 reject;超时但已有部分文本仍 resolve(视为已生成)。供 /api/chat_stream 用。
-
-async function ask(query, context) {
-  if (config.llm.provider === 'openai-compatible') {
-    return askOpenAI(query, context);
-  }
-  return askYuxiChat(query, context);
-}
+// 只有 askStream 一种调用形态:onDelta(增量文本)逐段回调,只在外部中断时 reject;
+// 超时但已有部分文本仍 resolve(视为已生成)。供 /api/chat_stream 用。
 
 async function askStream(query, context, onDelta, signal) {
   if (config.llm.provider === 'openai-compatible') {
@@ -49,42 +40,6 @@ function combineSignals(externalSignal, timeoutMs) {
 }
 
 // ---------- DeepSeek / OpenAI 兼容 ----------
-async function askOpenAI(query, messages) {
-  if (!config.llm.apiKey) {
-    throw new Error('DeepSeek API key 未配置(server/config/online.json 里 llm.apiKey 留空)');
-  }
-  const history = Array.isArray(messages) ? messages : [];
-  const nextMessages = [...history, { role: 'user', content: query }];
-
-  const res = await fetch(`${config.llm.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.llm.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: config.llm.model,
-      messages: nextMessages,
-    }),
-    signal: AbortSignal.timeout(config.llm.timeoutMs),
-  });
-
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    throw new Error(`DeepSeek 请求失败: HTTP ${res.status} ${detail.slice(0, 200)}`);
-  }
-
-  const data = await res.json();
-  const text = (data.choices?.[0]?.message?.content || '').trim();
-  if (!text) {
-    throw new Error('DeepSeek 返回内容为空');
-  }
-
-  // 追加本轮问答,保留上下文
-  nextMessages.push({ role: 'assistant', content: text });
-  return { text, context: nextMessages };
-}
-
 // 流式:SSE 逐 delta.content 回调,返回最终消息数组 context。
 async function askOpenAIStream(query, messages, onDelta, signal) {
   if (!config.llm.apiKey) {
@@ -188,41 +143,6 @@ async function readOpenAIStream(body, onDelta) {
 // POST {url}/yuxi/openapi/v1/agents/{agentId}/chat,body { input, user, stream:true }。
 // 返回 SSE:每行 data: 是独立 JSON,payload.items[].stream_event.type=message_delta
 // 的 content 是增量文本,逐条累加成完整回复;thread_id 由事件带出,存作多轮上下文。
-async function askYuxiChat(query, threadId) {
-  const t = new Timing('yuxi-chat');
-  const res = await fetch(
-    `${config.llm.url}/yuxi/openapi/v1/agents/${config.llm.agentId}/chat`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.llm.apiKey}` },
-      body: JSON.stringify({
-        input: query,
-        user: config.llm.userId || 'external-user-001',
-        stream: true,
-        ...(threadId ? { thread_id: threadId } : {}),
-      }),
-      signal: AbortSignal.timeout(config.llm.timeoutMs || 90000),
-    },
-  );
-
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    throw new Error(`语析 chat 请求失败: HTTP ${res.status} ${detail.slice(0, 300)}`);
-  }
-
-  let first = true;
-  const { text, threadId: nextThread } = await readYuxiSse(res.body, () => {
-    if (first) { t.mark('首块'); first = false; }
-  });
-  t.mark('完成');
-  t.log();
-  const reply = text.trim();
-  if (!reply) {
-    throw new Error('语析 chat 流式返回无内容');
-  }
-  return { text: reply, context: nextThread || threadId };
-}
-
 // 流式:onDelta(增量文本)逐段回调,返回 thread_id 当 context。
 async function askYuxiChatStream(query, threadId, onDelta, signal) {
   const t = new Timing('yuxi-chat');
@@ -317,4 +237,4 @@ async function readYuxiSse(body, onDelta) {
   return { text, threadId };
 }
 
-module.exports = { ask, askStream };
+module.exports = { askStream };

@@ -40,7 +40,10 @@ class StreamPipeline {
   constructor(ws, sessionId) {
     this.ws = ws;
     this.sessionId = sessionId;
-    this.splitter = new SentenceBuffer({ maxLen: config.llm?.maxSentenceLen || 50 });
+    this.splitter = new SentenceBuffer({
+      maxLen: config.llm?.maxSentenceLen || 80,
+      minLen: config.llm?.minSentenceLen || 5, // 短于此的句暂缓合并,减少碎句/请求数(防限流)
+    });
     this.queue = [];       // 待合成句子(FIFO,一次只合成一句)
     this.active = null;    // 当前 tts.synthesizeStream 的 {promise, cancel}
     this.gen = 0;          // 管线世代:打断/新请求都 +1,旧异步续体全部失效
@@ -93,8 +96,7 @@ class StreamPipeline {
 
   // LLM 流结束,把残余半句入队。
   _flushTail(gen) {
-    const tail = this.splitter.flush();
-    if (tail) this._enqueue(gen, tail);
+    for (const s of this.splitter.flush()) this._enqueue(gen, s);
   }
 
   _enqueue(gen, text) {

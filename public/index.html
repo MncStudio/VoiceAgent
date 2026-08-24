@@ -97,10 +97,10 @@
 
     <!-- ③ 文字对话 -->
     <div class="api">
-      <div class="api-head"><span class="api-badge">POST</span> 文字问答 /api/chat_text</div>
+      <div class="api-head"><span class="api-badge">WS</span> 文字问答 /api/chat_stream</div>
       <div class="api-desc">
-        <code>application/json</code>:<code>{"text":"…","sessionId":"…"}</code> →
-        跳过 ASR,直接 LLM,返回 <code>{replyText, userText}</code>;音频同样走 <code>/api/tts</code> 流式播放。
+        连 <code>/api/chat_stream</code> 发 <code>{type:'chat', text}</code>,后端一条龙流式
+        LLM 增量→断句→逐句 TTS→顺序推 PCM(边生成边播);完整回复经 <code>done</code> 事件回 <code>replyText</code>。
         与语音/唤醒共享同一份多轮记忆。
       </div>
       <div class="row">

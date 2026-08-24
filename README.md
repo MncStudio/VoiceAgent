@@ -7,10 +7,10 @@
 | 方式 | 接口 | 说明 |
 | --- | --- | --- |
 | 语音问答 | `POST /api/chat?stream=1` → `WS /api/chat_stream` | 先上传录音识别成文本,再连流式通道问答(两跳) |
-| 文字问答 | `WS /api/chat_stream` | 直接发文本,后端一条龙流式 LLM→TTS;`/api/chat_text` 保留给旧消费方 |
-| 唤醒词免按键 | `WS /api/wake` | 前端常驻推 16k int16 PCM,命中唤醒词自动回答 |
+| 文字问答 | `WS /api/chat_stream` | 直接发文本,后端一条龙流式 LLM→TTS |
+| 唤醒词免按键 | `WS /api/wake` | 前端常驻推 16k int16 PCM,命中唤醒词自动回答(带问题走 `/api/chat_stream` 流式) |
 
-**流式问答(文字/语音)**:经 `WS /api/chat_stream` 后端一条龙 `LLM 流式增量 → 断句器切句 → 逐句 TTS → 顺序推 PCM`,首句音频不必等整段回复生成完,降低首字延迟。唤醒路保持"回文本 → 前端连 `WS /api/tts` 全篇合成播放"。
+**流式问答(文字/语音)**:经 `WS /api/chat_stream` 后端一条龙 `LLM 流式增量 → 断句器切句 → 逐句 TTS → 顺序推 PCM`,首句音频不必等整段回复生成完,降低首字延迟。唤醒命中也走 `WS /api/chat_stream`(带问题时),只说唤醒词回固定问候仍走 `/api/tts`。
 
 ## 快速启动
 
@@ -49,7 +49,7 @@ VA_PROFILE=online npm start
 
 ```text
 server/
-├── index.js     # Express 入口 + /api/chat + /api/chat_text + 共享 WebSocketServer(/api/wake、/api/tts)
+├── index.js     # Express 入口 + /api/chat + 共享 WebSocketServer(/api/wake、/api/tts、/api/chat_stream)
 ├── config.js    # 按 VA_PROFILE 加载 server/config/{profile}.json,缺文件直接抛错
 ├── config/      # 两套配置(含 key,gitignore 不入库;字段说明见 config/README.md)
 ├── audio.js     # ffmpeg 转码(webm → 16k mono wav)、临时文件清理

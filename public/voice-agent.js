@@ -2,7 +2,7 @@
 
 // VoiceAgent 前端 SDK(自包含单文件,不依赖 tts-player.js)。
 // 接入方只需 <script src="/voice-agent.js"> + new VoiceAgent(...),即可使用三路问答:
-//   唤醒监听(/api/wake WS)、按住说话(/api/chat)、文字问答(/api/chat_text),
+//   唤醒监听(/api/wake WS)、按住说话(/api/chat)、文字问答(/api/chat_stream 流式),
 //   回复文本自动经 /api/tts WS 流式合成播放(边生成边播,重复调用自动打断)。
 //
 // 用法:
@@ -408,12 +408,16 @@
 
     _onWakeMessage(msg) {
       switch (msg.type) {
-        case 'answer': // 唤醒自动回答(本次保持非流式,仍经 /api/tts 全篇合成播放)
+        case 'answer': // 唤醒自动回答:只说唤醒词时 replyText=固定问候(走 /api/tts 全篇);带问题则走 /api/chat_stream 流式
           this._armed = true;
-          if (msg.userText) this._emit('userText', msg.userText);
-          this._emit('reply', msg.replyText);
-          this._tts.onDone = null; // 清掉流式残留的 onDone,避免唤醒 play() 结束时误触发
-          this._tts.play(msg.replyText);
+          this._tts.onDone = null;
+          if (msg.replyText) {
+            if (msg.userText) this._emit('userText', msg.userText);
+            this._emit('reply', msg.replyText);
+            this._tts.play(msg.replyText);
+          } else {
+            this._streamReply(msg.userText); // 带问题:流式问答,完整回复经 onDone → onReply 回
+          }
           break;
         case 'interrupt': // 后端 VAD 判到你开口:立即打断正在播的回答
           this._tts.stop();
@@ -484,8 +488,8 @@
       form.append('audio', blob, 'recording');
       form.append('sessionId', this.sessionId);
       try {
-        // stream=1:后端只做转码+VAD+ASR 回 userText(不调 LLM),避免与流式通道重复、污染多轮记忆。
-        const res = await fetch(this._apiUrl('/api/chat?stream=1'), { method: 'POST', body: form });
+        // 语音两跳第一跳:后端只做转码+VAD+ASR 回 userText(不调 LLM),由前端再连 /api/chat_stream 流式问答。
+        const res = await fetch(this._apiUrl('/api/chat'), { method: 'POST', body: form });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
         if (seq !== this._reqSeq) return data; // 已有更新的提问,丢弃旧响应
