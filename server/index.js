@@ -13,6 +13,7 @@ const vad = require('./vad');
 const turn = require('./turn');
 const wake = require('./wake');
 const tts = require('./tts');
+const stream = require('./stream');
 const { Timing } = require('./timing');
 const os = require('os');
 
@@ -68,8 +69,13 @@ app.post('/api/chat', upload.single('audio'), async (req, res) => {
     const userText = await asr.recognize(vadOut);
     t.mark('ASR');
 
-    // 3. LLM 出文本(音频由前端 /api/tts 流式合成,边生成边播)
-    res.json(await turn.ask(userText, req.body.sessionId));
+    // 3. LLM 出文本。stream=1 时只回识别文本,由前端连 /api/chat_stream 做 LLM→TTS 流式;
+    //    否则回完整 replyText(兼容旧消费方,且避免这里调 LLM 与流式通道重复、污染多轮记忆)。
+    if (req.query.stream === '1') {
+      res.json({ userText });
+    } else {
+      res.json(await turn.ask(userText, req.body.sessionId));
+    }
     t.mark('LLM');
     t.log();
   } catch (err) {
@@ -112,6 +118,8 @@ server.on('error', onListenError);
 const wss = new WebSocketServer({ server });
 wss.on('error', onListenError);
 wake.attach(wss, config.wakeWords || [], config.wakeTimeout, config.vad);
+// 流式问答:LLM 增量 → 断句 → 逐句 TTS → 顺序推 PCM。与 /api/wake、/api/tts 共用一个 WSS。
+stream.attach(wss);
 
 // 流式 TTS:前端拿 replyText 后连 /api/tts 发 {type:'synthesize', text},
 // 后端先回 {type:'meta', sampleRate, channels, bitsPerSample},再逐个透传 PCM 二进制块(裸 s16le),

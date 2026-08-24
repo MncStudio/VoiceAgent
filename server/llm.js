@@ -7,12 +7,45 @@ const { Timing } = require('./timing');
 // - openai-compatible: DeepSeek(OpenAI 兼容,context 是消息历史数组)
 // - yuxi-chat        : 语析 openapi chat(SSE 流式累加,context 是 thread_id)
 // context 由 index.js 在会话表中维护,实现多轮记忆。
+//
+// 两种调用形态:
+// - ask(query, context):同步形态,一次性返回完整回复(唤醒/兼容路径用)。
+// - askStream(query, context, onDelta, signal):流式形态,onDelta(增量文本)逐段回调,
+//   只在外部中断时 reject;超时但已有部分文本仍 resolve(视为已生成)。供 /api/chat_stream 用。
 
 async function ask(query, context) {
   if (config.llm.provider === 'openai-compatible') {
     return askOpenAI(query, context);
   }
   return askYuxiChat(query, context);
+}
+
+async function askStream(query, context, onDelta, signal) {
+  if (config.llm.provider === 'openai-compatible') {
+    return askOpenAIStream(query, context, onDelta, signal);
+  }
+  return askYuxiChatStream(query, context, onDelta, signal);
+}
+
+// 组合「外部打断信号」与「请求超时」到一个 AbortController。
+// Node engine 是 >=18,无 AbortSignal.any(Node 20),这里手动拼。
+// 打断来源靠外部 signal 是否 aborted 区分:外部打断 vs 超时。
+function combineSignals(externalSignal, timeoutMs) {
+  const ctrl = new AbortController();
+  let timeoutId;
+  const onAbort = () => ctrl.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) ctrl.abort();
+    else externalSignal.addEventListener('abort', onAbort, { once: true });
+  }
+  if (timeoutMs) timeoutId = setTimeout(() => ctrl.abort(), timeoutMs);
+  return {
+    signal: ctrl.signal,
+    cleanup: () => {
+      if (timeoutId) clearTimeout(timeoutId);
+      if (externalSignal) externalSignal.removeEventListener('abort', onAbort);
+    },
+  };
 }
 
 // ---------- DeepSeek / OpenAI 兼容 ----------
@@ -52,6 +85,105 @@ async function askOpenAI(query, messages) {
   return { text, context: nextMessages };
 }
 
+// 流式:SSE 逐 delta.content 回调,返回最终消息数组 context。
+async function askOpenAIStream(query, messages, onDelta, signal) {
+  if (!config.llm.apiKey) {
+    throw new Error('DeepSeek API key 未配置(server/config/online.json 里 llm.apiKey 留空)');
+  }
+  const history = Array.isArray(messages) ? messages : [];
+  const nextMessages = [...history, { role: 'user', content: query }];
+
+  const combined = combineSignals(signal, config.llm.timeoutMs);
+  let res;
+  try {
+    res = await fetch(`${config.llm.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.llm.apiKey}`,
+      },
+      body: JSON.stringify({ model: config.llm.model, messages: nextMessages, stream: true }),
+      signal: combined.signal,
+    });
+  } catch (e) {
+    combined.cleanup();
+    throw e;
+  }
+
+  if (!res.ok) {
+    combined.cleanup();
+    const detail = await res.text().catch(() => '');
+    throw new Error(`DeepSeek 请求失败: HTTP ${res.status} ${detail.slice(0, 200)}`);
+  }
+
+  let result;
+  try {
+    result = await readOpenAIStream(res.body, onDelta);
+  } finally {
+    combined.cleanup();
+  }
+
+  // 外部打断(用户关闭 WS):reject,不把半句当完整回复写回多轮记忆。
+  if (signal?.aborted) throw new Error('已打断');
+
+  if (!result.text.trim()) {
+    // 兜底:个别兼容端点没走 SSE,返回整包 JSON(无 data: 行),尝试整包解析。
+    const whole = result.raw.trim();
+    if (whole) {
+      try {
+        const j = JSON.parse(whole);
+        const c = j.choices?.[0]?.message?.content || '';
+        if (typeof c === 'string' && c.length) {
+          result.text = c;
+          onDelta?.(c);
+        }
+      } catch {}
+    }
+  }
+  if (!result.text.trim()) throw new Error('DeepSeek 返回内容为空');
+
+  nextMessages.push({ role: 'assistant', content: result.text });
+  return { text: result.text, context: nextMessages };
+}
+
+// 逐行读 OpenAI SSE:data: 行是 JSON,取 choices[].delta.content 增量。
+// 流被中断(超时/打断)时吞掉,返回已攒的 text 与原始串;是否算打断由调用方按 signal 区分。
+async function readOpenAIStream(body, onDelta) {
+  const decoder = new TextDecoder();
+  const reader = body.getReader();
+  let buffer = '';
+  let text = '';
+  let raw = '';
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const str = decoder.decode(value, { stream: true });
+      raw += str;
+      buffer += str;
+      let idx;
+      while ((idx = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 1);
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (!data || data === '[DONE]') continue;
+        let evt;
+        try { evt = JSON.parse(data); } catch { continue; }
+        const delta = evt.choices?.[0]?.delta;
+        // 首个 delta 常带 role 且 content 为空串,只回调非空 content(deepseek-chat 无 reasoning_content)。
+        if (typeof delta?.content === 'string' && delta.content.length) {
+          text += delta.content;
+          onDelta?.(delta.content);
+        }
+      }
+    }
+  } catch (e) {
+    // 流被中断,返回已攒的 text(有部分则上层按已生成处理)
+  }
+  return { text, raw };
+}
+
 // ---------- 语析 openapi chat(SSE 流式)----------
 // POST {url}/yuxi/openapi/v1/agents/{agentId}/chat,body { input, user, stream:true }。
 // 返回 SSE:每行 data: 是独立 JSON,payload.items[].stream_event.type=message_delta
@@ -78,7 +210,10 @@ async function askYuxiChat(query, threadId) {
     throw new Error(`语析 chat 请求失败: HTTP ${res.status} ${detail.slice(0, 300)}`);
   }
 
-  const { text, threadId: nextThread } = await readYuxiSse(res.body, () => t.mark('首块'));
+  let first = true;
+  const { text, threadId: nextThread } = await readYuxiSse(res.body, () => {
+    if (first) { t.mark('首块'); first = false; }
+  });
   t.mark('完成');
   t.log();
   const reply = text.trim();
@@ -88,14 +223,59 @@ async function askYuxiChat(query, threadId) {
   return { text: reply, context: nextThread || threadId };
 }
 
-// 逐行读 SSE:data: 行是独立 JSON,取 message_delta 增量累加,并抓 thread_id。
-async function readYuxiSse(body, onFirstDelta) {
+// 流式:onDelta(增量文本)逐段回调,返回 thread_id 当 context。
+async function askYuxiChatStream(query, threadId, onDelta, signal) {
+  const t = new Timing('yuxi-chat');
+  const combined = combineSignals(signal, config.llm.timeoutMs || 90000);
+  let res;
+  try {
+    res = await fetch(
+      `${config.llm.url}/yuxi/openapi/v1/agents/${config.llm.agentId}/chat`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.llm.apiKey}` },
+        body: JSON.stringify({
+          input: query,
+          user: config.llm.userId || 'external-user-001',
+          stream: true,
+          ...(threadId ? { thread_id: threadId } : {}),
+        }),
+        signal: combined.signal,
+      },
+    );
+  } catch (e) {
+    combined.cleanup();
+    throw e;
+  }
+
+  if (!res.ok) {
+    combined.cleanup();
+    const detail = await res.text().catch(() => '');
+    throw new Error(`语析 chat 请求失败: HTTP ${res.status} ${detail.slice(0, 300)}`);
+  }
+
+  let result;
+  try {
+    result = await readYuxiSse(res.body, onDelta);
+  } finally {
+    combined.cleanup();
+  }
+  if (signal?.aborted) throw new Error('已打断');
+  t.mark('完成');
+  t.log();
+  const reply = result.text.trim();
+  if (!reply) throw new Error('语析 chat 流式返回无内容');
+  return { text: reply, context: result.threadId || threadId };
+}
+
+// 逐行读 SSE:data: 行是独立 JSON,取 message_delta 增量累加(可 onDelta 回调),并抓 thread_id。
+// 超时/中断时已攒到部分文本就返回,否则抛错;是否算打断由调用方按 signal 区分。
+async function readYuxiSse(body, onDelta) {
   const decoder = new TextDecoder();
   const reader = body.getReader();
   let buffer = '';
   let text = '';
   let threadId = null;
-  let firstDelta = true;
 
   function handleLine(line) {
     if (!line.startsWith('data:')) return;
@@ -109,8 +289,8 @@ async function readYuxiSse(body, onFirstDelta) {
     for (const it of items) {
       const se = it.stream_event;
       if (se?.type === 'message_delta' && typeof se.content === 'string') {
-        if (firstDelta) { firstDelta = false; onFirstDelta?.(); }
         text += se.content;
+        onDelta?.(se.content);
       }
     }
   }
@@ -137,4 +317,4 @@ async function readYuxiSse(body, onFirstDelta) {
   return { text, threadId };
 }
 
-module.exports = { ask };
+module.exports = { ask, askStream };

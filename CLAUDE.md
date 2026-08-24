@@ -2,7 +2,7 @@
 
 浏览器录音 → ASR → LLM → TTS → 播放的语音问答闭环。后端在 ASR 前用 Silero VAD 裁掉首尾静音，只把有效语音送识别。支持三路多轮对话，记忆互通：语音（`POST /api/chat`）、文字（`POST /api/chat_text`）、唤醒词免按键（WS `/api/wake`，前端常驻推 16k int16 PCM）。
 
-**TTS 与主链路解耦**：后端接口（chat / chat_text / wake 回答）只回 `{replyText, userText}`，不返回音频；前端拿到 replyText 后另连 WS `/api/tts` 流式合成播放（边生成边播、可打断）。改后端时别在主链路里加音频返回，音频永远走 `/api/tts`。
+**音频经独立通道流式下发**：文字/语音走 WS `/api/chat_stream`（后端一条龙 LLM 增量→断句→逐句 TTS→顺序推 PCM），唤醒路仍"回 replyText → 前端连 WS `/api/tts` 全篇合成"。HTTP 主链路（/api/chat、/api/chat_text）不返回音频；改后端时别在主链路里塞音频字节，音频走独立 WS 通道。
 
 ## 常用命令
 
@@ -33,6 +33,7 @@ node --check 文件.js       # 唯一语法检查手段
 - `asr.js` / `tts.js` / `llm.js` 各 provider 分流（asr/tts: local 内网 HTTP vs online 百炼 WS；llm: `yuxi-chat` 语析 vs `openai-compatible`）。
 - `vad.js` Silero VAD（ONNX，模型在 `server/models/`）；`audio.js` 转码 webm→wav。
 - `wake.js` 流式开口段检测 + 唤醒词匹配 + 自动回答；`turn.js` 会话表（多轮记忆）；`timing.js` 链路耗时打点。
+- `stream.js` 流式问答管线 + `/api/chat_stream`（LLM 增量→断句→逐句 TTS→顺序推 PCM）；`sentence.js` 断句器 `SentenceBuffer`。
 - `bailian.js` 阿里云百炼 WebSocket 客户端（ASR + TTS 共用握手/task 协议）。
 
 ## 代码结构（public/）
@@ -47,6 +48,7 @@ node --check 文件.js       # 唯一语法检查手段
 - **多轮记忆**在 `turn.js` 的 sessions Map（单实例内存够用），语音/文字/唤醒三路共用；多实例部署需换 redis/数据库。注意 llm 返回的 context 语义随 provider 变（yuxi-chat 存 `thread_id`，openai-compatible 存消息数组），turn.js 只当不透明值存。
 - **链路耗时**用 `Timing` 打点：`new Timing('chat')` → `t.mark('步骤')` → `t.log()`，统一输出排查慢在哪一步。
 - **TTS 边生成边播**：后端 `synthesizeStream` 返回 { promise, cancel }，先发 `meta` 再透传 PCM 块最后 `done`；前端拿 replyText 后连 `/api/tts` 流式合成，打断直接 close，后端 cancel。
+- **流式问答 `/api/chat_stream`**：文字/语音走它，后端一条龙 `llm.askStream` 增量 → `SentenceBuffer`(server/sentence.js)按标点/长度断句 → 逐句 `tts.synthesizeStream` 串行(一次一句)推 PCM。`meta` 必须在首个 PCM 字节前发；`/api/chat?stream=1` 只回 `userText`，由前端再连流式通道(避免 LLM 跑两遍污染多轮记忆)；唤醒路仍走 `/api/tts` 全篇,未改。
 - **16k mono s16le 是唤醒/ASR 的音频契约**；TTS 输出按 `config.tts.sampleRate`（默认 24k）的 s16le。服务端（tts.js）与前端（TtsPlayer）都做**跨块 2 字节对齐**：流式块不保证偶数长度，直接 `new Int16Array(odd)` 会 RangeError/崩，务必 `usable & ~1` 取整后再转。`sampleRate/channels/bitsPerSample` 由 `/api/tts` 的 `meta` 下发，前后端需一致。
 - **唤醒回答**去掉唤醒词后走 `turn.ask`，复用多轮记忆；ASR 异步且串行（classifying 标志防堆积）。
 - **唤醒窗口休眠时间**：WS `/api/wake` 的 `wake` 事件带 `timeoutSeconds`（窗口总秒数，来自配置 `wakeTimeout`），`sleep` 事件带 `idleSeconds`（实际静默秒数）。前端 SDK 透传为 `onWake(word, timeoutSeconds)` / `onSleep(idleSeconds)`，接入方可据此自行画倒计时/进度条。

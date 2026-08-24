@@ -6,11 +6,11 @@
 
 | 方式 | 接口 | 说明 |
 | --- | --- | --- |
-| 语音问答 | `POST /api/chat` | 按住说话,发 webm/mp4 录音 |
-| 文字问答 | `POST /api/chat_text` | 直接发文本,跳过 VAD/ASR |
+| 语音问答 | `POST /api/chat?stream=1` → `WS /api/chat_stream` | 先上传录音识别成文本,再连流式通道问答(两跳) |
+| 文字问答 | `WS /api/chat_stream` | 直接发文本,后端一条龙流式 LLM→TTS;`/api/chat_text` 保留给旧消费方 |
 | 唤醒词免按键 | `WS /api/wake` | 前端常驻推 16k int16 PCM,命中唤醒词自动回答 |
 
-**TTS 与主链路解耦**:后端接口只回 `{replyText, userText}`,不返回音频;前端拿到回复文本后另连 `WS /api/tts` 流式合成播放(边生成边播、可打断)。
+**流式问答(文字/语音)**:经 `WS /api/chat_stream` 后端一条龙 `LLM 流式增量 → 断句器切句 → 逐句 TTS → 顺序推 PCM`,首句音频不必等整段回复生成完,降低首字延迟。唤醒路保持"回文本 → 前端连 `WS /api/tts` 全篇合成播放"。
 
 ## 快速启动
 

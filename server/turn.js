@@ -22,4 +22,19 @@ async function ask(userText, sessionId) {
   return { replyText, userText };
 }
 
-module.exports = { ask };
+// 流式版本:调 llm.askStream,onDelta(增量文本)透传,供 /api/chat_stream 逐句喂 TTS。
+// 仅当 llm.askStream 正常 resolve(未被外部打断)时写回多轮记忆——被打断的半句不污染历史;
+// 超时但已有部分文本(外部 signal 未 abort)仍算正常生成,会写回(与 yuxi 旧语义一致)。
+async function askStream(userText, sessionId, onDelta, signal) {
+  const t = new Timing(`turnStream[${sessionId || '-'}]`);
+  const context = sessions.get(sessionId);
+  const { text: replyText, context: newContext } = await llm.askStream(userText, context, onDelta, signal);
+  t.mark('LLM');
+  t.log();
+  if (sessionId) {
+    sessions.set(sessionId, newContext);
+  }
+  return { replyText, userText };
+}
+
+module.exports = { ask, askStream };

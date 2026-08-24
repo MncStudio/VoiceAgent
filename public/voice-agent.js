@@ -42,13 +42,15 @@
       this._ttsSampleRate = 24000;  // 收 meta 后更新为 config.tts.sampleRate
       this._nextTime = 0;           // 下个音块的预定播放时刻
       this._pending = null;         // 流式块累积缓冲:服务端块不保证 2 字节对齐,跨块拼整采样
+      this._pcmCount = 0;           // 累计已调度块数,首块到达时才定播放起点
       this._activeSources = new Set();
       this._playing = false;
       this._out = null;             // 播放汇流 Gain(扬声器 + MediaStreamAudioDestination)
       this._dest = null;            // 播放输出流,暴露给外部驱动口型同步等
       this.onStateChange = null;    // (playing:boolean) 可选,播放开始/结束回调
       this.onError = null;          // (msg:string) TTS 失败/连接异常
-      this.onDone = null;           // () 可选,合成完成回调
+      this.onDone = null;           // () 可选,合成完成回调(playStream 下带 replyText)
+      this.onReplyDelta = null;     // (text) 可选,流式字幕增量
       this.onAudioStream = null;    // (stream:MediaStream) 可选,播放流创建后回调
     }
 
@@ -93,6 +95,7 @@
       this._activeSources.clear();
       this._nextTime = 0;
       this._pending = null; // 清残留累积字节
+      this._pcmCount = 0;
       this._setPlaying(false);
     }
 
@@ -102,7 +105,6 @@
       const ctx = await this._ensureAudioCtx(); // await resume,确保 currentTime 是真实时钟
       if (gen !== this._playGen) return;        // await 期间被打断,丢弃
       this._setPlaying(true);                   // 播放会话开始
-      let pcmN = 0;
       const url = this._baseUrl
         ? this._baseUrl.replace(/^http/, 'ws') + '/api/tts'
         : (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/api/tts';
@@ -114,48 +116,87 @@
         if (gen !== this._playGen) return; // 已打断,丢弃旧合成
         if (typeof e.data === 'string') {
           const msg = JSON.parse(e.data);
-          if (msg.type === 'meta') this._ttsSampleRate = msg.sampleRate || this._ttsSampleRate;
+          if (msg.type === 'meta') this._applyMeta(msg);
           else if (msg.type === 'error') { if (this.onError) this.onError(msg.message); }
           else if (msg.type === 'done') { ws.close(); if (this.onDone) this.onDone(); }
           return;
         }
-        // 二进制 = 裸 s16le PCM。服务端流式块不保证 2 字节对齐(实测有奇数块),
-        // 直接 new Int16Array 会 RangeError;先跨块累积成整采样再播放。
-        const raw = e.data;
-        const prevLen = this._pending ? this._pending.length : 0;
-        const merged = new Uint8Array(prevLen + raw.byteLength);
-        if (this._pending) merged.set(this._pending, 0);
-        merged.set(new Uint8Array(raw), prevLen);
-        this._pending = merged;
-        const usable = this._pending.length & ~1; // 对齐到偶数(每采样 2 字节)
-        if (usable === 0) return;
-        const int16 = new Int16Array(this._pending.buffer, 0, usable / 2);
-        this._pending = this._pending.slice(usable);
-
-        // 播放起点在首块到达时才定:此刻 currentTime 才是真实时钟,
-        // +150ms 给后续排队留余量(理由见类头注释)。
-        if (pcmN === 0) this._nextTime = Math.max(this._nextTime, ctx.currentTime + 0.15);
-        const f32 = new Float32Array(int16.length);
-        for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768;
-        const buf = ctx.createBuffer(1, f32.length, this._ttsSampleRate);
-        buf.copyToChannel(f32, 0);
-        const src = ctx.createBufferSource();
-        src.buffer = buf;
-        src.connect(this._out);
-        this._activeSources.add(src);
-        src.onended = () => {
-          this._activeSources.delete(src);
-          if (this._activeSources.size === 0 && gen === this._playGen) this._setPlaying(false);
-        };
-        src.start(this._nextTime);
-        pcmN++;
-        this._nextTime += buf.duration;
+        this._consumePcm(gen, ctx, e.data);
       };
       ws.onclose = () => {
         if (this._ttsWs === ws) this._ttsWs = null;
         if (this._activeSources.size === 0 && gen === this._playGen) this._setPlaying(false);
       };
       ws.onerror = () => { if (gen === this._playGen && this.onError) this.onError('TTS 连接异常'); };
+    }
+
+    // 流式问答:连 /api/chat_stream,后端一条龙(LLM 增量→断句→逐句 TTS→顺序推 PCM),这里只播。
+    // onopen 发 initialMessage(如 {type:'chat', text});done 事件回带完整 replyText,回调 onDone(replyText)。
+    async playStream(wsUrl, initialMessage) {
+      this.stop();
+      const gen = this._playGen;
+      const ctx = await this._ensureAudioCtx(); // await resume,确保 currentTime 是真实时钟
+      if (gen !== this._playGen) return;        // await 期间被打断,丢弃
+      this._setPlaying(true);
+      const ws = new WebSocket(wsUrl);
+      ws.binaryType = 'arraybuffer';
+      this._ttsWs = ws;
+      ws.onopen = () => ws.send(JSON.stringify(initialMessage));
+      ws.onmessage = (e) => {
+        if (gen !== this._playGen) return;
+        if (typeof e.data === 'string') {
+          const msg = JSON.parse(e.data);
+          if (msg.type === 'start') return;
+          if (msg.type === 'meta') this._applyMeta(msg);
+          else if (msg.type === 'delta') { if (this.onReplyDelta) this.onReplyDelta(msg.text); }
+          else if (msg.type === 'error') { if (this.onError) this.onError(msg.message); }
+          else if (msg.type === 'done') { ws.close(); if (this.onDone) this.onDone(msg.replyText); }
+          return;
+        }
+        this._consumePcm(gen, ctx, e.data);
+      };
+      ws.onclose = () => {
+        if (this._ttsWs === ws) this._ttsWs = null;
+        if (this._activeSources.size === 0 && gen === this._playGen) this._setPlaying(false);
+      };
+      ws.onerror = () => { if (gen === this._playGen && this.onError) this.onError('TTS 连接异常'); };
+    }
+
+    _applyMeta(msg) {
+      this._ttsSampleRate = msg.sampleRate || this._ttsSampleRate;
+    }
+
+    // 裸 s16le PCM 块 → 跨块 2 字节对齐 → Web Audio 按序调度播放。
+    // 服务端流式块不保证 2 字节对齐(实测有奇数块),直接 new Int16Array 会 RangeError;
+    // 先跨块累积成整采样再播。播放起点在首块到达时才定:此刻 currentTime 才是真实时钟,
+    // +150ms 给后续排队留余量(理由见类头注释);后续块沿用递增的 _nextTime。
+    _consumePcm(gen, ctx, raw) {
+      const prevLen = this._pending ? this._pending.length : 0;
+      const merged = new Uint8Array(prevLen + raw.byteLength);
+      if (this._pending) merged.set(this._pending, 0);
+      merged.set(new Uint8Array(raw), prevLen);
+      this._pending = merged;
+      const usable = this._pending.length & ~1; // 对齐到偶数(每采样 2 字节)
+      if (usable === 0) return;
+      const int16 = new Int16Array(this._pending.buffer, 0, usable / 2);
+      this._pending = this._pending.slice(usable);
+
+      if (this._pcmCount === 0) this._nextTime = Math.max(this._nextTime, ctx.currentTime + 0.15);
+      const f32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768;
+      const buf = ctx.createBuffer(1, f32.length, this._ttsSampleRate);
+      buf.copyToChannel(f32, 0);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(this._out);
+      this._activeSources.add(src);
+      src.onended = () => {
+        this._activeSources.delete(src);
+        if (this._activeSources.size === 0 && gen === this._playGen) this._setPlaying(false);
+      };
+      src.start(this._nextTime);
+      this._pcmCount++;
+      this._nextTime += buf.duration;
     }
   }
 
@@ -367,10 +408,11 @@
 
     _onWakeMessage(msg) {
       switch (msg.type) {
-        case 'answer': // 唤醒自动回答:userText 为去掉唤醒词后的提问(只说唤醒词时为唤醒词本身)
+        case 'answer': // 唤醒自动回答(本次保持非流式,仍经 /api/tts 全篇合成播放)
           this._armed = true;
           if (msg.userText) this._emit('userText', msg.userText);
           this._emit('reply', msg.replyText);
+          this._tts.onDone = null; // 清掉流式残留的 onDone,避免唤醒 play() 结束时误触发
           this._tts.play(msg.replyText);
           break;
         case 'interrupt': // 后端 VAD 判到你开口:立即打断正在播的回答
@@ -442,13 +484,12 @@
       form.append('audio', blob, 'recording');
       form.append('sessionId', this.sessionId);
       try {
-        const res = await fetch(this._apiUrl('/api/chat'), { method: 'POST', body: form });
+        // stream=1:后端只做转码+VAD+ASR 回 userText(不调 LLM),避免与流式通道重复、污染多轮记忆。
+        const res = await fetch(this._apiUrl('/api/chat?stream=1'), { method: 'POST', body: form });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
         if (seq !== this._reqSeq) return data; // 已有更新的提问,丢弃旧响应
-        this._emit('userText', data.userText);
-        this._emit('reply', data.replyText);
-        this._tts.play(data.replyText);
+        if (data.userText) this._streamReply(data.userText); // 识别文本交给 /api/chat_stream 流式问答
         return data;
       } catch (err) {
         if (seq === this._reqSeq) this._emit('error', '出错了:' + err.message);
@@ -458,32 +499,30 @@
       }
     }
 
-    // ============ ③ 文字问答(POST /api/chat_text, JSON) ============
+    // ============ ③ 文字问答(流式:改走 /api/chat_stream) ============
+    // 流式问答:连 /api/chat_stream,由后端一条龙做 LLM 增量→逐句 TTS→顺序推 PCM。
+    // 完整回复经 onDone(replyText) → onReply 回调;打断直接 _tts.stop() 关连接,服务端中止。
+    _streamReply(text) {
+      const q = String(text || '').trim();
+      if (!q) return;
+      const seq = ++this._reqSeq; // 抢占:只让最后一次提问生效
+      this._tts.onReplyDelta = null;
+      this._tts.onDone = (replyText) => {
+        if (seq !== this._reqSeq) return;
+        if (replyText) this._emit('reply', replyText);
+      };
+      const url = this._wsUrl('/api/chat_stream?sessionId=' + encodeURIComponent(this.sessionId));
+      this._tts.playStream(url, { type: 'chat', text: q }).catch((e) => {
+        if (seq === this._reqSeq) this._emit('error', '出错了:' + e.message);
+      });
+      this._emit('userText', q);
+      this._refreshState();
+    }
+
     async askText(text) {
       const t = String(text || '').trim();
       if (!t) return null;
-      const seq = ++this._reqSeq; // 文字提问同样抢占最新请求
-      this._tts.stop();           // 开口即打断
-      this._emit('userText', t);
-      this._refreshState();
-      try {
-        const res = await fetch(this._apiUrl('/api/chat_text'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: t, sessionId: this.sessionId }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
-        if (seq !== this._reqSeq) return data;
-        this._emit('reply', data.replyText);
-        this._tts.play(data.replyText);
-        return data;
-      } catch (err) {
-        if (seq === this._reqSeq) this._emit('error', '出错了:' + err.message);
-        throw err;
-      } finally {
-        this._refreshState();
-      }
+      this._streamReply(t);
     }
 
     // 手动打断播放

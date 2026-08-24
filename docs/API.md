@@ -60,9 +60,9 @@
 | `audio` | webm/mp4 录音文件 |
 | `sessionId` | 可选，会话 id；同一次对话内连续问答共享上下文 |
 
-后端处理：转码 → VAD 裁静音 → ASR → LLM。音频合成不在本接口返回，由前端连 `/api/tts` 流式播放。
+后端处理：转码 → VAD 裁静音 → ASR。默认再走 LLM 返回 `{replyText, userText}`；加 `?stream=1` 时**只做 ASR 回 `{userText}`**（不调 LLM），由前端把识别文本送去 `/api/chat_stream` 流式问答（避免 LLM 重复、污染多轮记忆）。
 
-响应 `200`：`{ "replyText": "...", "userText": "..." }`
+响应 `200`：默认 `{ "replyText": "...", "userText": "..." }`；`?stream=1` 时 `{ "userText": "..." }`
 错误：非 2xx + `{ "error": "原因" }`
 
 ### POST /api/chat_text — 文字问答
@@ -91,6 +91,28 @@
 前端也可发 `{"type":"wake_manual"}` 手动唤醒（免唤醒词直接进入窗口，`agent.wakeManual()` 即此协议），用于唤醒词检测不到时兜底。
 
 唤醒词与窗口时长由后端配置：`server/config/{profile}.json` 的 `wakeWords` / `wakeTimeout`。
+
+### WS /api/chat_stream — 流式问答（LLM 增量 → 断句 → 逐句 TTS → 顺序播放）
+
+语音/文字问答的**流式通道**：后端一条龙 `LLM 流式增量 → 断句器切句 → 逐句串行 TTS → 顺序推 PCM`，首句音频不用等整段回复生成完。前端连 `WS /api/chat_stream?sessionId=xxx`（sessionId 用于多轮记忆）。
+
+请求（JSON 文本帧，open 后发一条）：
+
+```json
+{ "type": "chat", "text": "你的问题" }
+```
+
+响应（严格按序）：
+
+1. `{ "type": "start", "userText": "..." }` — 回显问题。
+2. `{ "type": "meta", "sampleRate": 24000, "channels": 1, "bitsPerSample": 16 }` — **必须先于首个二进制字节**，前端解码依它。
+3. `{ "type": "delta", "text": "..." }`（LLM 增量，供流式字幕）与 一个或多个**二进制帧**（裸 s16le PCM）交错推送。
+4. `{ "type": "done", "replyText": "完整回复" }`（TTS 队列全部合成完才发），或 `{ "type": "error", "message": "..." }`。
+
+打断：直接 `ws.close()`；后端取消 LLM 请求（abort SSE）、停当前合成、清空队列并复位断句器。
+
+> 断句：LLM 增量 token 不能直接喂 TTS（无断句、语音断续），后端用断句器按句末标点（。！？…、换行）或长度上限切句。歌词/逗号不硬切（软切默认关）。
+> 前端 SDK 已内置（`askText`/`_sendAudio` 自动改走本通道）；`/api/chat_text` 端点仍保留给非流式旧消费方，与 `chat_stream` 互斥使用。
 
 ### WS /api/tts — 流式 TTS 合成
 
