@@ -33,6 +33,16 @@ assert.strictEqual(det.matchStop('停下'), true);
 assert.strictEqual(det.matchStop('嗯'), false);
 // 超长(正常问句)不判打断
 assert.strictEqual(det.matchStop('为什么停止播放这个功能'), false);
+// 请求句(含打断词但剥词后剩实词)不判打断 —— 外部声音/句子不误断的关键
+assert.strictEqual(det.matchStop('帮我暂停一下'), false);
+// 带主语/语气的祈使句仍判打断
+assert.strictEqual(det.matchStop('你别说了'), true);
+assert.strictEqual(det.matchStop('停一下好吗'), true);
+assert.strictEqual(det.matchStop('安静点'), true);
+// 拼音同音容错(硕/说同音)仍判打断
+assert.strictEqual(det.matchStop('别硕了'), true);
+// 含打断词音节的请求句不判打断(字符分支剥词后含实词)
+assert.strictEqual(det.matchStop('帮我暂停一下'), false);
 
 // ---- 自定义打断词可配置(config.wakeStopWords 覆盖默认) ----
 const det2 = new WakeDetector(['你好小智'], () => {}, 10000, {}, ['安静点']);

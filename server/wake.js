@@ -125,15 +125,36 @@ class WakeDetector {
     return null;
   }
 
-  // 语义化打断判定:归一化后文本长度 ≤ stopMaxLen 且含任一打断词(字符精确/拼音模糊)→ 判为打断。
-  // 用长度上限挡住正常问句(如"为什么停止播放"),避免误伤;词表用明确词(停下/停止回答),不含过宽单字(停)。
+  // 语义化打断判定:只有"确实是打断指令"才命中——归一化后去掉某个打断词,剩余【为空或仅剩语气/代词】
+  // 才算真打断(如"别说了""停下""你别说了""停一下好吗"→命中)。句子("帮我暂停一下""为什么停止播放")
+  // 虽含打断词但剥词后剩有实词,视为正常话不打断——这是"外部声音/回答内容不误断"的关键。
   matchStop(text) {
     const n = normalize(text);
     if (!n || n.length > this.stopMaxLen) return false;
-    if (this.stopWords.some((w) => n.includes(w))) return true;
-    // 拼音模糊:打断词音节序列是文本音节序列的连续子序列(兼容 ASR 同音字,如 部说了/别说了)
+    // 字符精确:任一打断词剥词后只剩语气/代词才算打断指令(不因第一个命中就返回,后面可能有更能剥干净的词)。
+    for (const w of this.stopWords) {
+      if (n.includes(w) && this._restIsInterjection(n.replace(w, ''))) return true;
+    }
+    // 拼音模糊(ASR 同音,如 别硕了/别说了):命中打断词音节后,按字符窗口剥词,也需只剩语气/代词。
+    // 与字符分支对称——否则会把"帮我暂停一下"(含 zan-ting 音节)误判成打断。
     const syl = toSyllables(n);
-    return this.stopSyllables.some((sub) => sub.length && findSubseq(syl, sub) >= 0);
+    for (let i = 0; i < this.stopSyllables.length; i++) {
+      const sub = this.stopSyllables[i];
+      if (!sub.length) continue;
+      const idx = findSubseq(syl, sub);
+      if (idx >= 0) {
+        const rest = n.slice(0, idx) + n.slice(idx + this.stopWords[i].length);
+        if (this._restIsInterjection(rest)) return true;
+      }
+    }
+    return false;
+  }
+
+  // 去掉打断词后的剩余:为空,或只含语气词/代词(如"你""好""吗""吧""一下""请"),视为祈使打断;
+  // 含有实词(如"帮""放"等动词)则当成请求句,不判打断。
+  _restIsInterjection(rest) {
+    if (rest === '') return true;
+    return [...rest].every((ch) => '你我他她它的好吧吗啊呢哦请一下啦点'.includes(ch));
   }
 
   async init() {

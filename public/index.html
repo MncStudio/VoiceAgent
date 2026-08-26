@@ -88,10 +88,12 @@
         <code>multipart/form-data</code>:<code>audio</code>(webm/mp4 录音) →
         后端转码→VAD 裁静音→ASR→LLM,返回 <code>{replyText, userText}</code>;
         音频由前端经 <code>/api/tts</code> 流式合成播放(边生成边播,无需等整段)。
+        「⏹ 打断」即 <code>agent.stopPlay()</code>,语音/打断词失效时的手动保底。
       </div>
       <div class="row">
         <button id="recordBtn">🎤 按住说话</button>
         <span style="color:#95a5a6;font-size:0.85rem">松开发送</span>
+        <button id="stopBtn" class="secondary">⏹ 打断</button>
       </div>
     </div>
 
@@ -139,6 +141,7 @@
     const recordBtn = document.getElementById('recordBtn');
     const textInput = document.getElementById('textInput');
     const sendBtn = document.getElementById('sendBtn');
+    const stopBtn = document.getElementById('stopBtn');
 
     function showError(msg) {
       errBox.textContent = msg;
@@ -272,6 +275,9 @@
       agent.startRecording().catch((e) => showError('无法录音:' + e.message));
     });
     recordBtn.addEventListener('touchend', () => agent.stopRecording());
+
+    // 手动打断(保底):语音/打断词识别失效时点它
+    stopBtn.addEventListener('click', () => agent.stopPlay());
 
     // 文字问答
     function sendText() {

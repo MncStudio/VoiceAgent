@@ -24,7 +24,7 @@
 //   agent.askText(text);     // Promise<{replyText,userText}>:文字问答,自动播放
 //   agent.startRecording();  // Promise<void>:按住说话开始
 //   agent.stopRecording();   // Promise<{replyText,userText}|null>:松开发送,自动播放
-//   agent.stopPlay();        // void:打断播放
+//   agent.stopPlay();        // void:手动打断当前播放(保底,在播时触发 onInterrupt)
 
 (function (global) {
   // ============ TtsPlayer:流式 TTS 播放(内联,私有,不挂 window) ============
@@ -203,6 +203,8 @@
 
   // ============ VoiceAgent:三路问答统一入口 ============
   const MIN_DURATION = 400; // 按住说话最短时长(ms),太短不发
+
+  // 打断词判定完全在后端(唤醒链监听采集→ASR→匹配暂停词→发 interrupt)，前端只执行停止，不做判断。
 
   class VoiceAgent {
     constructor(opts = {}) {
@@ -524,9 +526,12 @@
       this._streamReply(t);
     }
 
-    // 手动打断播放
+    // 手动打断播放(保底):停止当前回答;在播时触发 onInterrupt,与语音打断行为一致。
+    // 语音/打断词识别失效时点它兜底。
     stopPlay() {
+      const was = this._tts.playing;
       this._tts.stop();
+      if (was) this._emit('interrupt');
       this._refreshState();
     }
   }
