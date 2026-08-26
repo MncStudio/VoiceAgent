@@ -73,7 +73,7 @@ VA_PROFILE=online npm start   # 全线上（百炼 + DeepSeek，按量计费）
 |---|---|---|
 | `yuxi-chat` | 语析 openapi chat：POST `{url}/yuxi/openapi/v1/agents/{agentId}/chat`，SSE 流式（`stream:true`），累加 `message_delta` 成完整回复 | `thread_id` |
 | `yuxi-runs` | yuxi agent runs：先 POST `/api/chat/thread` 建线程拿 id，再 POST `/api/agent/runs` 建 run，最后 GET `/api/agent/runs/{run_id}/events` 拉 SSE | `thread_id`（首次自动建线程） |
-| `openai-compatible` | DeepSeek 等 OpenAI 兼容接口 | 消息历史数组 |
+| `openai-compatible` | DeepSeek 等 OpenAI 兼容接口 | 无（单轮，每次空历史；不本地存消息数组） |
 
 | 字段 | 类型 | 适用 provider | 说明 |
 |---|---|---|---|

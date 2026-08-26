@@ -23,7 +23,9 @@ function attach(wss) {
   wss.on('connection', (ws, req) => {
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname !== '/api/chat_stream') return; // 非流式问答,交给其他 handler
-    const pipeline = new StreamPipeline(ws);
+    // sessionId 可选:接入方传固定值则据此续 yuxi 多轮记忆(存 thread_id);不传则每次单轮。
+    const sessionId = url.searchParams.get('sessionId') || undefined;
+    const pipeline = new StreamPipeline(ws, sessionId);
     ws.on('close', () => pipeline.cancel());
     ws.on('message', (data, isBinary) => {
       if (isBinary) return;
@@ -37,8 +39,9 @@ function attach(wss) {
 }
 
 class StreamPipeline {
-  constructor(ws) {
+  constructor(ws, sessionId) {
     this.ws = ws;
+    this.sessionId = sessionId;
     this.splitter = new SentenceBuffer({
       maxLen: config.llm?.maxSentenceLen || 80,
       minLen: config.llm?.minSentenceLen || 5, // 短于此的句暂缓合并,减少碎句/请求数(防限流)
@@ -77,7 +80,7 @@ class StreamPipeline {
     this._sentCount = 0;
     this.llmController = new AbortController();
     turn
-      .askStream(text, (delta) => this._onDelta(gen, delta), this.llmController.signal)
+      .askStream(text, this.sessionId, (delta) => this._onDelta(gen, delta), this.llmController.signal)
       .then(({ replyText }) => {
         if (gen !== this.gen) return; // 已被打断,丢弃
         t.mark('LLM完成');

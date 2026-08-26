@@ -74,4 +74,4 @@ class SentenceBuffer {
   }
 }
 
-module.exports = { SentenceBuffer, hasContent };
+module.exports = { SentenceBuffer };

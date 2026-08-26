@@ -7,6 +7,7 @@
 //
 // 用法:
 //   const agent = new VoiceAgent({
+//     sessionId: '…',        // 可选;接入方传固定值则后端据此续 yuxi 多轮记忆(thread_id);不传则每次单轮
 //     baseUrl: '…',          // 可选;后端地址(如 http://192.168.1.5:3000),跨域/独立部署时填;缺省同源相对路径
 //     autoWake: true,        // 可选;true 则构造后自动开始唤醒监听
 //     onUserText(text),      // 识别到用户说的话(三路都触发)
@@ -41,7 +42,6 @@
       this._ttsSampleRate = 24000;  // 收 meta 后更新为 config.tts.sampleRate
       this._nextTime = 0;           // 下个音块的预定播放时刻
       this._pending = null;         // 流式块累积缓冲:服务端块不保证 2 字节对齐,跨块拼整采样
-      this._pcmCount = 0;           // 累计已调度块数,首块到达时才定播放起点
       this._activeSources = new Set();
       this._playing = false;
       this._out = null;             // 播放汇流 Gain(扬声器 + MediaStreamAudioDestination)
@@ -94,7 +94,6 @@
       this._activeSources.clear();
       this._nextTime = 0;
       this._pending = null; // 清残留累积字节
-      this._pcmCount = 0;
       this._setPlaying(false);
     }
 
@@ -196,7 +195,6 @@
         if (this._activeSources.size === 0 && gen === this._playGen) this._setPlaying(false);
       };
       src.start(this._nextTime);
-      this._pcmCount++;
       this._nextTime += buf.duration;
     }
   }
@@ -208,6 +206,7 @@
 
   class VoiceAgent {
     constructor(opts = {}) {
+      this.sessionId = opts.sessionId; // 可选:接入方传固定值则后端据此续 yuxi 多轮记忆;不传则每次单轮
       this.baseUrl = String(opts.baseUrl || '').replace(/\/+$/, ''); // 跨域部署:后端地址(如 http://host:port)
 
       this._on = {
@@ -512,7 +511,7 @@
         if (seq !== this._reqSeq) return;
         if (replyText) this._emit('reply', replyText);
       };
-      const url = this._wsUrl('/api/chat_stream');
+      const url = this._wsUrl('/api/chat_stream' + (this.sessionId ? '?sessionId=' + encodeURIComponent(this.sessionId) : ''));
       this._tts.playStream(url, { type: 'chat', text: q }).catch((e) => {
         if (seq === this._reqSeq) this._emit('error', '出错了:' + e.message);
       });

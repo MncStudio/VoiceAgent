@@ -97,8 +97,9 @@ async function askOpenAIStream(query, messages, onDelta, signal) {
   }
   if (!result.text.trim()) throw new Error('DeepSeek 返回内容为空');
 
-  nextMessages.push({ role: 'assistant', content: result.text });
-  return { text: result.text, context: nextMessages };
+  // openai-compatible 无会话 id:不返回可续 context(本地存消息数组没意义,且随会话表只增不减)。
+  // 每次空历史单轮,无多轮记忆;多轮只走 yuxi 提供的 thread_id。
+  return { text: result.text, context: undefined };
 }
 
 // 逐行读 OpenAI SSE:data: 行是 JSON,取 choices[].delta.content 增量。
