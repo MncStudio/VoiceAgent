@@ -147,7 +147,32 @@ class WakeDetector {
         if (this._restIsInterjection(rest)) return true;
       }
     }
+    if (this._isPrefixedStop(n)) return true;
     return false;
+  }
+
+  // 前缀祈使打断:归一化文本 = [礼貌/催促前缀]打断词[轻量后缀] 即判打断。
+  // 拦截"暂停播放 / 帮我暂停一下 / 快停下(来)"这类带轻动作词的祈使,而"为什么停止播放 / 暂停功能怎么用"
+  // 虽含打断词但剩余含"怎么/为什么/功能"等实词(不在轻量表)→ 不判,避免把疑问句当打断。
+  _isPrefixedStop(n) {
+    // 先剥礼貌/催促前缀("请帮我暂停一下" → "暂停一下")。
+    let s = n;
+    for (const p of ['请帮我', '帮我', '麻烦你', '请你', '请', '麻烦', '快', '赶紧', '立刻', '马上', '先']) {
+      if (s.startsWith(p)) { s = s.slice(p.length); break; }
+    }
+    // 优先按配置打断词前缀(裸"暂停"也覆盖:剩余为空即 true)。
+    const w = this.stopWords.find((sw) => sw && s.startsWith(sw));
+    if (w) return this._isStopLight(s.slice(w.length));
+    // 单字"停"前缀:用户常直接喊"停/先停/快停";剩余须全轻量,挡住"停车场/停留/停到"这类正常词。
+    // 不能把"停"加进 stopWords——它的 contains 分支会误伤任何含"停"的句子,这里只在开头严格判。
+    if (s.startsWith('停')) return this._isStopLight(s.slice('停'.length));
+    return false;
+  }
+
+  // 打断词后的剩余若全为轻量成分(语气/代词 + "播放-说-停一下-了-点-下来"等轻动作后缀),视为祈使被打断。
+  _isStopLight(rest) {
+    if (rest === '') return true;
+    return [...rest].every((ch) => '一下了的点吧啊哦呢啦么着停播放说掉话下来这个那个它让我给他次'.includes(ch));
   }
 
   // 去掉打断词后的剩余:为空,或只含语气词/代词(如"你""好""吗""吧""一下""请"),视为祈使打断;

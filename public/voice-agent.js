@@ -405,11 +405,18 @@
       switch (msg.type) {
         case 'answer': // 唤醒自动回答:只说唤醒词时 replyText=固定问候(走 /api/tts 全篇);带问题则走 /api/chat_stream 流式
           this._armed = true;
-          this._tts.onDone = null;
           if (msg.replyText) {
+            // 只说唤醒词:固定问候,全篇播放(无 LLM),会打断正在播的话。
+            this._tts.onDone = null;
             if (msg.userText) this._emit('userText', msg.userText);
             this._emit('reply', msg.replyText);
             this._tts.play(msg.replyText);
+          } else if (this._tts.playing) {
+            // 正在播上一轮回答时又采到语音——多半是用户正跟旁人说话(旁人声音不受 AEC 消除、会被采回),
+            // 也可能残留外放回声。此刻不当新问题打断重答,否则回答一开口就被掐断、甚至"外放回答被采回
+            // → 再当新问题"循环重答。真正的打断只走后端打断词 → interrupt 静默停播。
+            // 此处不动 onDone,保证当前回答播完仍能回调 onReply;也不回 userText,避免把旁人话误记为用户输入。
+            return;
           } else {
             this._streamReply(msg.userText); // 带问题:流式问答,完整回复经 onDone → onReply 回
           }
