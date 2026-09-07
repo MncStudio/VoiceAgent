@@ -55,6 +55,23 @@ if (FIRST_RUN) {
 
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
+// ---- 宠物形象只读列表:列出 public/pets/*.{png,webp} 及其配对的 <名字>.json(供宠物页/演示页) ----
+const PETS_DIR = path.join(__dirname, '..', 'public', 'pets');
+app.get('/api/pets', (req, res) => {
+  let files;
+  try { files = fs.readdirSync(PETS_DIR); } catch { return res.json({ pets: [] }); }
+  const pets = files
+    .filter((f) => /\.(png|webp)$/i.test(f))
+    .map((sp) => {
+      const base = sp.replace(/\.[^.]+$/, '');
+      const pair = files.find((f) => f.toLowerCase() === base.toLowerCase() + '.json');
+      let meta = null;
+      if (pair) { try { meta = JSON.parse(fs.readFileSync(path.join(PETS_DIR, pair), 'utf8')); } catch {} }
+      return { name: base, sprite: sp, meta };
+    });
+  res.json({ pets });
+});
+
 app.post('/api/chat', upload.single('audio'), async (req, res) => {
   if (FIRST_RUN) {
     return res.status(503).json({

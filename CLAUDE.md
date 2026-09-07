@@ -30,7 +30,7 @@ node --check 文件.js       # 唯一语法检查手段
 
 ## 代码结构（server/）
 
-- `index.js` 路由 + 共享 WebSocketServer 入口。
+- `index.js` 路由 + 共享 WebSocketServer 入口；`/api/pets`(只读列表，列 `public/pets/*.{png,webp}` 及配对 `<名>.json`)。
 - `asr.js` / `tts.js` / `llm.js` 各 provider 分流（asr/tts: local 内网 HTTP vs online 百炼 WS；llm: `yuxi-runs`/`yuxi-chat` 语析 vs `openai-compatible`）。
 - `vad.js` Silero VAD（ONNX，模型在 `server/models/`）；`audio.js` 转码 webm→wav。
 - `wake.js` 流式开口段检测 + 唤醒词匹配 + 自动回答 + 语义化打断；`turn.js` 会话表(仅存 yuxi `thread_id`)+ 流式问答 LLM 调用；`timing.js` 链路耗时打点。
@@ -41,6 +41,7 @@ node --check 文件.js       # 唯一语法检查手段
 
 - `voice-agent.js` 前端 SDK（自包含，单 `<script>` 引入）：`VoiceAgent` 类一个入口封装三路问答（唤醒监听/按住说话/文字问答）+ 自动 TTS 播放，内联了 TtsPlayer；接入方 `new VoiceAgent({...})` 即可，不必碰 getUserMedia/WebSocket/MediaRecorder 样板。
 - `index.html` 接口演示页，只调 SDK 的 UI 示例（`autoWake:true` 加载即自动开始监听）。
+- `voicepet.js` + `pet.html` + `pets/`：桌面宠物运行时 —— 精灵图集 + 状态机渲染器 `VoicePet`(读 `pet.json` 裁帧、`talk` 行按音量包络选口型、订阅 `agent.on(...)` 驱动状态)；形象按 `docs/pet-prompt.md` 让 AI 生成后放进 `public/pets/` 即自动出现(`/api/pets` 只读列出)。
 - 其他项目接入：接口协议与 SDK 用法（含 `baseUrl` 跨域部署）见 `docs/API.md`。
 
 ## 约定
@@ -54,4 +55,6 @@ node --check 文件.js       # 唯一语法检查手段
 - **唤醒回答**去掉唤醒词后只回 `userText`，由前端经 `/api/chat_stream` 流式问答(带 `sessionId` 即续 yuxi 多轮记忆)；ASR 异步且串行（classifying 标志防堆积）。
 - **唤醒窗口休眠时间**：WS `/api/wake` 的 `wake` 事件带 `timeoutSeconds`（窗口总秒数，来自配置 `wakeTimeout`），`sleep` 事件带 `idleSeconds`（实际静默秒数）。前端 SDK 透传为 `onWake(word, timeoutSeconds)` / `onSleep(idleSeconds)`，接入方可据此自行画倒计时/进度条。
 - **前端 SDK 的 `baseUrl` 与 `sessionId`**：WS 地址由 `http(s)`→`ws(s)` 自动转换，同源用 `location.host`，跨域部署传 baseUrl。`opts.sessionId` 传固定值则 /api/chat_stream 带上，后端据此续 yuxi 多轮记忆；不传则每次单轮。
+- **SDK 事件订阅**：`agent.on(name, fn)` / `agent.off(name, fn)` 供附加层(宠物/数字人)监听 `stateChange/wake/reply/error/interrupt/audioStream/userText`，不占用构造时的 `opts.onXxx` 回调。
+- **宠物运行时**：`VoicePet`(public/voicepet.js) 读 `public/pets/<名>.json` 的状态定义按坐标裁帧播放；`talk` 状态用 `agent.audioStream` 的音量包络在 `from..to` 帧间选口型；`/api/pets` 为只读，勿改成写盘接口。
 - 本地 CosyVoice 音色克隆：`tts.js` 每次按 `config.tts.promptWav` 读参考音频、随 `promptText` 一起上传给 TTS 服务。参考音频放 `server/config/`（默认 `prompt_wav.wav` 随仓库），换音色就替换该 wav 或改 `promptWav` 路径。`devtools/shantou/tts-admin.html` 是给 TTS 服务注册音色的管理页（服务端视角，非本项目运行时依赖）。

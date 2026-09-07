@@ -25,6 +25,8 @@ npm start                  # 直接启动,无需 VA_PROFILE —— 自动找配�
 
 配置生成与修改(新部署、改唤醒词/换 provider 都在这):见下文 [「用配置生成器生成/修改配置」](#用配置生成器生成修改配置推荐)。
 
+**桌面宠物**:起服务后开 [public/pet.html](public/pet.html) 或直接看演示页右下角(说话张嘴、空闲眨眼)。换形象:按 [docs/pet-prompt.md](docs/pet-prompt.md) 让 AI 生成 `public/pets/<名字>.png` + `<名字>.json`,放进目录刷新即自动出现。
+
 **环境要求**:Node >= 18;系统装有 `ffmpeg`(`audio.js` 转码用)。
 
 **首次 clone 需两步**(均已被 gitignore,仓库里没有):
@@ -75,7 +77,7 @@ npm start                  # 直接启动,无需 VA_PROFILE —— 自动找配�
 
 ```text
 server/
-├── index.js     # Express 入口 + /api/chat + 共享 WebSocketServer(/api/wake、/api/tts、/api/chat_stream)
+├── index.js     # Express 入口 + /api/chat、/api/pets(只读列表)+ 共享 WebSocketServer(/api/wake、/api/tts、/api/chat_stream)
 ├── config.js    # 加载固定 server/config/local.json(多套并存才用 VA_PROFILE 指向);缺文件则报错 + 配置引导(开网页)
 ├── config/      # 配置(固定 local.json,含 key,gitignore 不入库;字段说明见 config/README.md)
 ├── audio.js     # ffmpeg 转码(webm → 16k mono wav)、临时文件清理
@@ -91,11 +93,15 @@ server/
 
 public/
 ├── voice-agent.js      # 前端 SDK(VoiceAgent 类,一个入口封装三路问答 + 自动 TTS 播放)
-├── index.html          # 接口演示页(只调 SDK 的 UI 示例)
-└── config-builder.html # 配置生成器(纯前端):填参数 → 下载 local.json,放进 server/config/(用法见上节)
+├── voicepet.js         # 桌面宠物渲染器(精灵图集 + 状态机,规范见 docs/pet-prompt.md)
+├── index.html          # 接口演示页(只调 SDK 的 UI 示例;右下角自带宠物)
+├── pet.html            # 独立宠物页(开始监听/说话)
+├── config-builder.html # 配置生成器(纯前端):填参数 → 下载 local.json,放进 server/config/(用法见上节)
+└── pets/               # 宠物形象库:demo.png + demo.json(样板),AI 按规范生成后放这里即自动出现
 ```
 
 ## 相关文档
 
 - [docs/API.md](docs/API.md) — 接入文档(SDK 用法 + 后端接口协议 + 跨域部署)
+- [docs/pet-prompt.md](docs/pet-prompt.md) — 宠物形象生成提示词(整份丢给 AI:规格提示词 + 生成后自检/缩放)
 - [server/config/README.md](server/config/README.md) — 配置字段说明与完整示例

@@ -238,6 +238,9 @@
       this._tts.onStateChange = () => this._refreshState();
       this._tts.onAudioStream = (stream) => this._emit('audioStream', stream);
 
+      // 事件订阅:供数字人/宠物等附加层监听,不占用上面的 opts 回调
+      this._listeners = {};
+
       // 状态:派生于 _recording/_tts.playing/_wakeOn/_armed/_ctxRunning,见 _refreshState
       this._state = 'idle';
       this._reqSeq = 0;        // 请求竞态:只让最后一次提问生效,丢弃晚到的旧响应
@@ -275,6 +278,19 @@
 
     get wakeActive() { return this._wakeOn; }
 
+    // 事件订阅/退订(事件名:state/audioStream/wake/sleep/interrupt/error/userText/reply)
+    on(name, fn) {
+      (this._listeners[name] = this._listeners[name] || []).push(fn);
+      return this;
+    }
+    off(name, fn) {
+      const a = this._listeners[name];
+      if (!a) return this;
+      const i = a.indexOf(fn);
+      if (i >= 0) a.splice(i, 1);
+      return this;
+    }
+
     // TTS 播放输出流(创建后即稳定存在;无播放时音频静音,供 Live2D 口型同步等消费)
     get audioStream() { return this._tts.audioStream; }
 
@@ -289,6 +305,8 @@
     _emit(name, ...args) {
       const fn = this._on[name];
       if (typeof fn === 'function') fn(...args);
+      const ls = this._listeners[name];
+      if (ls) ls.forEach((f) => { try { f(...args); } catch {} });
     }
 
     _setState(s) {

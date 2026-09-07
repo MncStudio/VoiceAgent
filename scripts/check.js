@@ -37,7 +37,9 @@ for (const f of fs.readdirSync('test')) {
   if (f.endsWith('.js')) checkJs(path.join('test', f));
 }
 checkJs(path.join('public', 'voice-agent.js'));
+checkJs(path.join('public', 'voicepet.js'));
 checkInlineScript(path.join('public', 'index.html'));
+checkInlineScript(path.join('public', 'pet.html'));
 checkInlineScript(path.join('public', 'config-builder.html'));
 
 if (failed) {

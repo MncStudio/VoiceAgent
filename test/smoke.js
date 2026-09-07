@@ -87,6 +87,8 @@ function expect(name, cond, extra) {
   expect('正常模式: 旧写盘接口已移除(404)', save404 && save404.status === 404, save404);
   const chatEmpty = await httpGet(port1, '/api/chat', 'POST');
   expect('正常模式: /api/chat 空文件 400(含错误提示)', chatEmpty && chatEmpty.status === 400 && /error/.test(chatEmpty.body), chatEmpty);
+  const pets = await httpGet(port1, '/api/pets');
+  expect('正常模式: /api/pets 只读列表,含 demo', pets && pets.status === 200 && /demo/.test(pets.body), pets);
   children[0].kill('SIGTERM');
 
   // ---- 2) 引导模式(指向不存在的 profile) ----

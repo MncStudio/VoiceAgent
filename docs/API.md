@@ -49,6 +49,8 @@
 | `onStateChange(state)` | 状态：`idle / starting / waiting-activation / listening / wake-active / sleep / recording / speaking` |
 | `onError(msg)` | 错误 |
 
+> 除构造选项回调外，还可 `agent.on(name, fn)` / `agent.off(name, fn)` 订阅事件（附加层/宠物/数字人用，不占用上面的回调）：事件名 `stateChange / wake / sleep / interrupt / error / userText / reply / audioStream`。桌面宠物组件 `VoicePet`(public/voicepet.js) 即基于此驱动。
+
 ## 二、后端接口协议
 
 ### POST /api/chat — 语音问答
@@ -64,6 +66,18 @@
 
 响应 `200`：`{ "userText": "..." }`
 错误：非 2xx + `{ "error": "原因" }`
+
+### GET /api/pets — 宠物形象只读列表
+
+列出 `public/pets/` 下的 `*.png|webp` 及其配对 `<名>.json`（桌面宠物，规范见 [docs/pet-prompt.md](pet-prompt.md)）。
+
+响应 `200`：
+
+```json
+{ "pets": [ { "name": "demo", "sprite": "demo.png", "meta": { "name": "小能", "frame": { "w": 128, "h": 128 }, "states": { ... } } } ] }
+```
+
+> 只读、不写盘；渲染由前端 `VoicePet`(public/voicepet.js) 完成。把 AI 按规范生成的 `xxx.png` + `xxx.json` 放进 `public/pets/` 即可在此列表中自动出现。
 
 ### WS /api/wake — 唤醒词监听
 

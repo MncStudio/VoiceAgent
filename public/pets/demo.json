@@ -1,0 +1,22 @@
+{
+  "name": "小能",
+  "sprite": "demo.png",
+  "frame": { "w": 128, "h": 128 },
+  "grid": { "cols": 8, "rows": 8 },
+  "defaultFps": 10,
+  "states": {
+    "idle":    { "row": 0, "from": 0, "to": 5, "loop": true,  "fps": 8 },
+    "talk":    { "row": 1, "from": 0, "to": 7, "loop": true,  "fps": 14 },
+    "wave":    { "row": 2, "from": 0, "to": 3, "loop": false, "fps": 10 },
+    "jump":    { "row": 3, "from": 0, "to": 4, "loop": false, "fps": 12 },
+    "failed":  { "row": 4, "from": 0, "to": 7, "loop": false, "fps": 10 },
+    "review":  { "row": 5, "from": 0, "to": 5, "loop": false, "fps": 10 },
+    "waiting": { "row": 6, "from": 0, "to": 5, "loop": true,  "fps": 6 },
+    "spare":   { "row": 7, "from": 0, "to": 7, "loop": true,  "fps": 6 }
+  },
+  "mapping": {
+    "idle": "idle", "listening": "idle", "wake-active": "idle",
+    "speaking": "talk", "recording": "waiting",
+    "waiting-activation": "waiting"
+  }
+}

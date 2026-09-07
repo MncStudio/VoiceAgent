@@ -55,6 +55,13 @@
     .wake-dot { width: 10px; height: 10px; border-radius: 50%; background: #b2bec3; display: inline-block; }
     .wake-dot.active { background: #27ae60; box-shadow: 0 0 0 4px rgba(39, 174, 96, 0.15); }
     #ttsMeter { width: 100%; max-width: 560px; background: #f0f1f5; border-radius: 8px; }
+    .pet-corner {
+      position: fixed; right: 16px; bottom: 16px; z-index: 50;
+      background: #fff; border-radius: 16px; padding: 10px;
+      box-shadow: 0 8px 30px rgba(0,0,0,.18); max-width: 160px;
+    }
+    .pet-corner .voicepet canvas { display: block; image-rendering: pixelated; }
+    .pet-corner .voicepet select { display: block; width: 100%; margin-bottom: .3rem; font-size: .72rem; border: 1px solid #ddd; border-radius: 6px; }
   </style>
 </head>
 <body>
@@ -126,7 +133,10 @@
   <div class="panel" id="panel"></div>
   <div id="errBox"></div>
 
+  <div id="petBox" class="pet-corner"></div>
+
   <script src="/voice-agent.js"></script>
+  <script src="/voicepet.js"></script>
   <script>
     // ================= UI 元素 =================
     const status = document.getElementById('status');
@@ -288,6 +298,15 @@
     textInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText(); }
     });
+
+    // 右下角桌面宠物(精灵图集 + 状态机,见 docs/pet-prompt.md;形象放 public/pets/)
+    const petBox = document.getElementById('petBox');
+    if (petBox && window.VoicePet) {
+      const vp = new VoicePet({ el: petBox, agent, size: 150 });
+      vp.init().catch((e) => {
+        petBox.innerHTML = '<div style="color:#95a5a6;font-size:.7rem">宠物:' + e.message + '</div>';
+      });
+    }
   </script>
 </body>
 </html>
