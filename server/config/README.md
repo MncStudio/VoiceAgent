@@ -1,27 +1,29 @@
 # 配置说明（server/config）
 
-后端配置文件，JSON 格式。启动时由 [config.js](../config.js) 按环境变量 `VA_PROFILE` 加载 `server/config/{profile}.json`，默认 `local`。
+后端配置文件，JSON 格式。启动时由 [config.js](../config.js) **固定加载 `server/config/local.json`**，无需环境变量、无需起配置名。`local.json` 缺失时控制台报错并自动打开配置生成网页（纯前端：生成并下载 `local.json`，放进本目录后重新 `npm start`）。
 
 ## 使用方式
 
-1. 参考下方「完整示例」创建 `config/local.json` 或 `config/online.json`，填真实值。
-2. 用 `VA_PROFILE` 切换档位：
+1. 用配置生成器或手写生成 `server/config/local.json`（内容按这台机器能连到的服务定:ASR/LLM/TTS 各自选 provider）。
+2. 直接启动：
 
 ```bash
-VA_PROFILE=local  npm start   # 内网后端（默认，不设也走 local）
-VA_PROFILE=online npm start   # 全线上（百炼 + DeepSeek，按量计费）
+npm start                 # 固定加载 server/config/local.json
+# 想在一台机器上并存多套:把文件改名,用 VA_PROFILE=<名字> npm start 指向 {名字}.json(日常不需要)
 ```
 
-> `local.json` / `online.json` 含 API key，已被 `.gitignore` 排除，**不要提交**。
+> `local.json` 含 API key，已被 `.gitignore` 排除，**不要提交**。
 
-## 两种档位
+> 嫌手写 JSON 麻烦？用纯前端配置生成器 `public/config-builder.html`:填参数 →「生成并下载」`local.json` → 放进本目录即可(可双击文件离线用;「导入现有 json」可改旧配置)。ASR/LLM/TTS 的 provider 各自独立选择。
 
-| 档位 | ASR（识别） | LLM（模型） | TTS（合成） |
+## 自带的两份示例配置(local / online)
+
+| 示例 | ASR（识别） | LLM（模型） | TTS（合成） |
 |---|---|---|---|
 | **local** | 内网 Paraformer HTTP | 内网语析 agent/runs | 内网 CosyVoice HTTP |
 | **online** | 百炼 Paraformer WS | DeepSeek（OpenAI 兼容） | 百炼 CosyVoice WS |
 
-三个环节各有两个实现，靠各自的 `provider` 字段二选一。同一份配置里 ASR / LLM / TTS 的 provider 独立选择，不强绑定档位。
+三个环节各有两个实现，靠各自的 `provider` 字段二选一。同一份配置里 ASR / LLM / TTS 的 provider 独立选择，任意组合（生成器里点选即可）。
 
 ---
 
@@ -29,7 +31,7 @@ VA_PROFILE=online npm start   # 全线上（百炼 + DeepSeek，按量计费）
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `profile` | string | 仅作标识，与文件名保持一致便于人读；不影响加载逻辑（加载看 `VA_PROFILE`）。 |
+| `profile` | string | 仅作标识，固定为 `local` 便于人读；不影响加载逻辑（启动固定加载 `local.json`，除非 `VA_PROFILE` 显式指定别的文件）。 |
 | `wakeWords` | string[] | 唤醒词列表，可配多个，命中任意一个即唤醒，支持同音容错。 |
 | `wakeTimeout` | number（秒） | 唤醒窗口总秒数：命中唤醒词后这段时间内免唤醒词连续问答；随 `/api/wake` 的 `wake` 事件 `timeoutSeconds` 下发给前端。 |
 | `wakeStopWords` | string[] | 语义化打断词：唤醒窗口内识别到这些词（如"别说了/暂停"）即静默停止正在播的回答（不再"一听到声音就断"）。缺省用内置默认表。 |

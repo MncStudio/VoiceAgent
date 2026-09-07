@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VoiceAgent 配置生成器</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+    background: #f5f6fa; color: #2d3436; padding: 1.5rem 1rem 3rem;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 1.35rem; }
+  .sub { color: #95a5a6; font-size: .85rem; margin: .4rem 0 1.2rem; line-height: 1.7; }
+  .sub code { background: #eef0f5; padding: .05rem .35rem; border-radius: 5px; }
+  .banner {
+    background: #fff3cd; border: 1px solid #ffe08a; color: #664d03;
+    padding: .55rem .8rem; border-radius: 10px; font-size: .82rem; margin-bottom: 1rem; line-height: 1.6;
+  }
+  .banner.firstrun {
+    background: #d4edda; border-color: #b7e3c0; color: #155724;
+  }
+  .card {
+    background: #fff; border-radius: 12px; padding: 1rem 1.2rem; margin-bottom: 1rem;
+    box-shadow: 0 2px 12px rgba(0,0,0,.06);
+  }
+  .card > h2 {
+    font-size: .98rem; display: flex; align-items: center; gap: .5rem; margin-bottom: .8rem;
+  }
+  .badge { font-size: .7rem; background: #eef1ff; color: #6c5ce7; padding: .12rem .5rem; border-radius: 99px; font-weight: 600; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-bottom: .6rem; }
+  .toolbar label { font-size: .85rem; color: #636e72; }
+  button {
+    border: none; border-radius: 9px; cursor: pointer; padding: .5rem .9rem;
+    background: #6c5ce7; color: #fff; font-size: .88rem; transition: all .12s;
+  }
+  button:hover { transform: scale(1.03); }
+  button.ghost { background: #e8e9f0; color: #2d3436; }
+  button.green { background: #00b894; }
+  .row { display: grid; grid-template-columns: 170px 1fr; gap: .6rem; align-items: baseline; margin-bottom: .6rem; }
+  .row label { font-size: .85rem; color: #636e72; word-break: break-word; }
+  .row label .req { color: #e17055; }
+  .row label .opt { color: #b2bec3; font-size: .72rem; }
+  .row input[type=text], .row input[type=number], .row textarea {
+    width: 100%; padding: .45rem .6rem; border: 1px solid #ddd; border-radius: 8px;
+    font-size: .85rem; font-family: inherit; background: #fff;
+  }
+  .row textarea { min-height: 54px; resize: vertical; }
+  .row input:focus, .row textarea:focus { outline: none; border-color: #6c5ce7; }
+  .hint { grid-column: 2; font-size: .75rem; color: #b2bec3; margin-top: -.3rem; line-height: 1.5; }
+  .hide { display: none !important; }
+  .provider-tabs { display: flex; gap: .4rem; margin-bottom: .9rem; flex-wrap: wrap; }
+  .provider-tabs button {
+    background: #e8e9f0; color: #2d3436; border-radius: 99px; padding: .32rem .85rem; font-size: .82rem;
+  }
+  .provider-tabs button.on { background: #6c5ce7; color: #fff; }
+  details.adv { margin-top: .4rem; }
+  details.adv summary { font-size: .8rem; color: #6c5ce7; cursor: pointer; margin-bottom: .5rem; }
+  .preview {
+    width: 100%; min-height: 320px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: .78rem; border: 1px solid #ddd; border-radius: 10px; padding: .7rem;
+    white-space: pre; overflow: auto; background: #fbfcff; color: #2d3436; tab-size: 2;
+  }
+  .issues { margin: .6rem 0 .4rem; font-size: .82rem; }
+  .issues .err { color: #e17055; }
+  .issues .warn { color: #b7791f; }
+  .issues div { margin: .15rem 0; }
+  .ok { color: #00b894; }
+  #status { font-size: .85rem; margin-top: .5rem; min-height: 1.2rem; color: #636e72; }
+  .filebtn { position: relative; overflow: hidden; }
+  .filebtn input[type=file] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>VoiceAgent 配置生成器</h1>
+  <div class="sub">
+    输出文件名<b>固定为</b> <code>server/config/local.json</code> —— 服务启动默认就加载它,<b>不用起配置名</b>。ASR / LLM / TTS 三个环节<b>互相独立</b>选 provider(内网自建选 http 档,百炼 / DeepSeek / 语析选 ws / openai 档,任意混搭)。
+    <br>用法:填参数 → 「生成并下载 local.json」→ 放进目标机器 <code>server/config/</code> → <code>npm start</code>。
+  </div>
+
+  <div class="banner">⚠️ 配置含 API key(明文),只放进目标机器 <code>server/config/</code>(该目录已被 .gitignore 排除),<b>别提交、别外发</b>。</div>
+
+  <div class="banner firstrun" id="firstBanner" style="display:none">
+    🚀 <b>配置引导</b>:当前服务没有可用配置。填好参数点「生成并下载」得到 <code>local.json</code>,把它放进本机 <code>server/config/</code>,再重新 <code>npm start</code> 即完成初始化(想改就再下载覆盖,不用删旧文件)。
+  </div>
+
+  <div class="card">
+    <div class="toolbar">
+      <button class="ghost filebtn" type="button">导入现有 json(改参数用)<input type="file" id="importFile" accept=".json,application/json"></button>
+      <button class="green" id="downloadBtn" type="button">生成并下载 local.json</button>
+      <button class="ghost" id="copyBtn" type="button">复制 JSON</button>
+      <span style="font-size:.78rem;color:#95a5a6">输出文件名固定为 local.json;想并存多套,下载后改名再用 VA_PROFILE=&lt;名字&gt; 指向</span>
+    </div>
+    <div class="issues" id="issues"></div>
+  </div>
+
+  <!-- ============ 基础 ============ -->
+  <div class="card">
+    <h2><span class="badge">基础</span> 唤醒词 & 服务</h2>
+
+    <div class="row">
+      <label>唤醒词 <span class="req">*</span></label>
+      <div>
+        <textarea id="wakeWords" data-key="wakeWords" data-array rows="3"></textarea>
+        <div class="hint">可多个,每行一个或用逗号分隔,任意命中即唤醒(支持同音字容错)。</div>
+      </div>
+    </div>
+    <div class="row">
+      <label>唤醒窗口 wakeTimeout(秒)</label>
+      <div>
+        <input type="number" id="wakeTimeout" data-key="wakeTimeout">
+        <div class="hint">命中唤醒词后这段时间内免唤醒词直接问答;窗口超时自动休眠。</div>
+      </div>
+    </div>
+    <div class="row">
+      <label>打断词 wakeStopWords <span class="opt">(可选)</span></label>
+      <div>
+        <textarea id="wakeStopWords" data-key="wakeStopWords" data-array rows="2"></textarea>
+        <div class="hint">语义化打断词,缺省用内置默认表(暂停/别说了…)。留空则输出里省略此字段。</div>
+      </div>
+    </div>
+    <div class="row">
+      <label>打断长度上限 wakeStopMaxLen <span class="opt">(可选)</span></label>
+      <div>
+        <input type="number" id="wakeStopMaxLen" data-key="wakeStopMaxLen" placeholder="6">
+        <div class="hint">命中打断词前文本长度上限,挡住正常长句;留空省略。</div>
+      </div>
+    </div>
+
+    <details class="adv">
+      <summary>高级:自定义 VAD 判定参数(缺省 0.55 / 3 / 15)</summary>
+      <div class="row">
+        <label><input type="checkbox" id="vadOn"> 输出自定义 vad 参数</label>
+        <div></div>
+      </div>
+      <div id="vadBox" class="hide">
+        <div class="row">
+          <label>threshold(语音概率阈值)</label>
+          <div><input type="number" step="0.01" id="vadThreshold" data-vad-key="threshold"></div>
+        </div>
+        <div class="row">
+          <label>startFrames(判开口)</label>
+          <div><input type="number" id="vadStart" data-vad-key="startFrames"></div>
+        </div>
+        <div class="row">
+          <label>endFrames(判段结束)</label>
+          <div><input type="number" id="vadEnd" data-vad-key="endFrames"></div>
+        </div>
+      </div>
+    </details>
+
+    <div class="row">
+      <label>server.port <span class="req">*</span></label>
+      <div>
+        <input type="number" data-key="server.port">
+        <div class="hint">HTTP 与 WebSocket(/api/wake、/api/tts、/api/chat_stream)共用端口。</div>
+      </div>
+    </div>
+    <div class="row">
+      <label>server.tmpDir</label>
+      <div>
+        <input type="text" data-key="server.tmpDir">
+        <div class="hint">转码/VAD 中间产物临时目录,用完即删。</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ ASR ============ -->
+  <div class="card">
+    <h2><span class="badge">ASR</span> 语音识别(音频 → 文字)</h2>
+    <div class="provider-tabs" id="asrTabs">
+      <button type="button" data-provider="paraformer-http">paraformer-http(内网 HTTP)</button>
+      <button type="button" data-provider="paraformer-ws">paraformer-ws(百炼 WS)</button>
+    </div>
+
+    <div class="row">
+      <label>url <span class="req">*</span></label>
+      <div>
+        <input type="text" data-key="asr.url" placeholder="http://192.168.x.x:50001 或 wss://…/api-ws/v1/inference">
+        <div class="hint">http 档填内网服务地址;ws 档填百炼地址。</div>
+      </div>
+    </div>
+    <div class="row" data-group="asr" data-show-for="paraformer-http">
+      <label>endpoint <span class="req">*</span></label>
+      <div><input type="text" data-key="asr.endpoint" placeholder="/transcribe"></div>
+    </div>
+    <div class="row" data-group="asr" data-show-for="paraformer-ws">
+      <label>apiKey <span class="req">*</span></label>
+      <div><input type="text" data-key="asr.apiKey" placeholder="sk-ws-…"></div>
+    </div>
+    <div class="row" data-group="asr" data-show-for="paraformer-ws">
+      <label>model</label>
+      <div><input type="text" data-key="asr.model" value="paraformer-realtime-v2"></div>
+    </div>
+    <div class="row" data-group="asr" data-show-for="paraformer-ws">
+      <label>format</label>
+      <div><input type="text" data-key="asr.format" value="wav"></div>
+    </div>
+    <div class="row" data-group="asr" data-show-for="paraformer-ws">
+      <label>sampleRate</label>
+      <div><input type="number" data-key="asr.sampleRate" value="16000"></div>
+    </div>
+    <div class="row">
+      <label>timeoutMs</label>
+      <div><input type="number" data-key="asr.timeoutMs" value="30000"></div>
+    </div>
+  </div>
+
+  <!-- ============ LLM ============ -->
+  <div class="card">
+    <h2><span class="badge">LLM</span> 大模型(文字 → 回复)</h2>
+    <div class="provider-tabs" id="llmTabs">
+      <button type="button" data-provider="openai-compatible">openai-compatible(DeepSeek 等)</button>
+      <button type="button" data-provider="yuxi-runs">yuxi-runs(建线程/run)</button>
+      <button type="button" data-provider="yuxi-chat">yuxi-chat(语析 openapi)</button>
+    </div>
+
+    <div class="row">
+      <label>apiKey / token <span class="req">*</span></label>
+      <div><input type="text" data-key="llm.apiKey" placeholder="sk-… 或 yuxi Bearer token"></div>
+    </div>
+    <div class="row" data-group="llm" data-show-for="openai-compatible">
+      <label>baseUrl <span class="req">*</span></label>
+      <div><input type="text" data-key="llm.baseUrl" value="https://api.deepseek.com/v1"></div>
+      <div class="hint">会拼 /chat/completions。</div>
+    </div>
+    <div class="row" data-group="llm" data-show-for="openai-compatible">
+      <label>model</label>
+      <div><input type="text" data-key="llm.model" value="deepseek-chat"></div>
+    </div>
+    <div class="row" data-group="llm" data-show-for="yuxi-runs">
+      <label>url <span class="req">*</span></label>
+      <div><input type="text" data-key="llm.url" placeholder="http://10.x.x.x:4902"></div>
+    </div>
+    <div class="row" data-group="llm" data-show-for="yuxi-runs">
+      <label>agentSlug <span class="req">*</span></label>
+      <div><input type="text" data-key="llm.agentSlug" placeholder="agent-xxxx"></div>
+      <div class="hint">建线程 body 的 agent_id 与 run body 的 agent_slug 都用它;多轮记忆走 thread_id。</div>
+    </div>
+    <div class="row" data-group="llm" data-show-for="yuxi-chat">
+      <label>url <span class="req">*</span></label>
+      <div><input type="text" data-key="llm.url" placeholder="http://10.x.x.x:xxxx"></div>
+    </div>
+    <div class="row" data-group="llm" data-show-for="yuxi-chat">
+      <label>agentId <span class="req">*</span></label>
+      <div><input type="text" data-key="llm.agentId" placeholder="拼进 chat URL 的 agent id"></div>
+    </div>
+    <div class="row" data-group="llm" data-show-for="yuxi-chat">
+      <label>userId <span class="opt">(可选)</span></label>
+      <div><input type="text" data-key="llm.userId" placeholder="external-user-001"></div>
+    </div>
+    <div class="row">
+      <label>timeoutMs</label>
+      <div><input type="number" data-key="llm.timeoutMs" value="120000"></div>
+    </div>
+  </div>
+
+  <!-- ============ TTS ============ -->
+  <div class="card">
+    <h2><span class="badge">TTS</span> 语音合成(回复 → PCM 流)</h2>
+    <div class="provider-tabs" id="ttsTabs">
+      <button type="button" data-provider="cosyvoice-http">cosyvoice-http(内网)</button>
+      <button type="button" data-provider="cosyvoice-ws">cosyvoice-ws(百炼)</button>
+    </div>
+
+    <div class="row">
+      <label>url <span class="req">*</span></label>
+      <div>
+        <input type="text" data-key="tts.url" placeholder="http://192.168.x.x:50002 或 wss://…/api-ws/v1/inference">
+      </div>
+    </div>
+    <div class="row" data-group="tts" data-show-for="cosyvoice-http">
+      <label>endpoint <span class="req">*</span></label>
+      <div><input type="text" data-key="tts.endpoint" value="/inference_zero_shot"></div>
+      <div class="hint">参考音频克隆用 /inference_zero_shot 或 /inference_cross_lingual。</div>
+    </div>
+    <div class="row" data-group="tts" data-show-for="cosyvoice-http">
+      <label>promptWav <span class="req">*</span></label>
+      <div><input type="text" data-key="tts.promptWav" value="server/config/prompt_wav.wav"></div>
+      <div class="hint">参考音频路径(每次合成读它做音色克隆)。默认音色 prompt_wav.wav 已随仓库自带;换音色时把新 wav 也放进该机器 server/config/ 并改这里的路径。</div>
+    </div>
+    <div class="row" data-group="tts" data-show-for="cosyvoice-http">
+      <label>promptText <span class="req">*</span></label>
+      <div><textarea data-key="tts.promptText" rows="2"></textarea></div>
+      <div class="hint">参考音频对应的文字;CosyVoice3 文本需带 &lt;|endofprompt|&gt; 前缀,缺失会触发模型断言报错。</div>
+    </div>
+    <div class="row" data-group="tts" data-show-for="cosyvoice-ws">
+      <label>apiKey <span class="opt">(可选)</span></label>
+      <div><input type="text" data-key="tts.apiKey" placeholder="留空则回退用 asr.apiKey"></div>
+    </div>
+    <div class="row" data-group="tts" data-show-for="cosyvoice-ws">
+      <label>model</label>
+      <div><input type="text" data-key="tts.model" value="cosyvoice-v3-flash"></div>
+    </div>
+    <div class="row" data-group="tts" data-show-for="cosyvoice-ws">
+      <label>voice <span class="req">*</span></label>
+      <div><input type="text" data-key="tts.voice" placeholder="longxiaochun_v3"></div>
+    </div>
+    <div class="row" data-group="tts" data-show-for="cosyvoice-ws">
+      <label>format</label>
+      <div><input type="text" data-key="tts.format" value="pcm"></div>
+    </div>
+    <div class="row">
+      <label>sampleRate</label>
+      <div><input type="number" data-key="tts.sampleRate" value="24000"></div>
+      <div class="hint">输出 PCM 采样率;meta 事件与前端播放都按它解码,同一服务下各配置需一致。</div>
+    </div>
+    <div class="row">
+      <label>channels</label>
+      <div><input type="number" data-key="tts.channels" value="1"></div>
+    </div>
+    <div class="row">
+      <label>bitsPerSample</label>
+      <div><input type="number" data-key="tts.bitsPerSample" value="16"></div>
+    </div>
+    <div class="row">
+      <label>timeoutMs</label>
+      <div><input type="number" data-key="tts.timeoutMs" value="120000"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><span class="badge">预览</span> 生成的 JSON(自动更新)</h2>
+    <pre class="preview" id="preview"></pre>
+    <div id="status"></div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+/* ---------------- 工具 ---------------- */
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => Array.from(document.querySelectorAll(s));
+
+/* ---------------- provider 切换 ---------------- */
+const GROUPS = {
+  asr: ['paraformer-http', 'paraformer-ws'],
+  llm: ['openai-compatible', 'yuxi-runs', 'yuxi-chat'],
+  tts: ['cosyvoice-http', 'cosyvoice-ws'],
+};
+
+function setProvider(group, provider) {
+  if (!GROUPS[group].includes(provider)) return;
+  $(`#${group}Tabs`).querySelectorAll('button').forEach((b) =>
+    b.classList.toggle('on', b.dataset.provider === provider));
+  $$(`[data-group="${group}"]`).forEach((el) => {
+    const showFor = (el.dataset.showFor || '').split(',').filter(Boolean);
+    el.classList.toggle('hide', showFor.length > 0 && !showFor.includes(provider));
+  });
+}
+
+function currentProvider(group) {
+  const on = $(`#${group}Tabs`).querySelector('button.on');
+  return on ? on.dataset.provider : GROUPS[group][0];
+}
+
+/* ---------------- 收集/生成 ---------------- */
+function setNested(obj, key, value) {
+  const parts = key.split('.');
+  let cur = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    cur[parts[i]] = cur[parts[i]] || {};
+    cur = cur[parts[i]];
+  }
+  cur[parts[parts.length - 1]] = value;
+}
+
+function parseArray(text) {
+  return String(text || '')
+    .split(/[\n,，、;；]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function collect() {
+  const obj = {};
+  $$('[data-key]').forEach((el) => {
+    if (el.closest('.hide')) return;
+    const raw = el.value;
+    if (el.dataset.array !== undefined) {
+      const arr = parseArray(raw);
+      if (arr.length) setNested(obj, el.dataset.key, arr);
+      return;
+    }
+    if (raw === '') return;
+    const num = el.type === 'number' ? Number(raw) : null;
+    setNested(obj, el.dataset.key, num !== null && isFinite(num) ? num : raw);
+  });
+
+  if (!obj.wakeWords || !obj.wakeWords.length) obj.wakeWords = ['你好小智'];
+
+  if ($('#vadOn').checked) {
+    const v = {};
+    [['threshold', '#vadThreshold'], ['startFrames', '#vadStart'], ['endFrames', '#vadEnd']].forEach(([k, sel]) => {
+      const raw = $(sel).value;
+      if (raw !== '') v[k] = Number(raw);
+    });
+    if (Object.keys(v).length) obj.vad = v;
+  }
+  return obj;
+}
+
+/* ---------------- 校验 ---------------- */
+function validate(obj) {
+  const errs = [];
+  const warns = [];
+  const need = (ok, msg) => { if (!ok) errs.push(msg); };
+  const P = (o, k) => o && o[k];
+
+  need(P(obj, 'server') && P(obj.server, 'port') > 0, 'server.port 必填且大于 0');
+  if (!(P(obj.server, 'tmpDir') || '').startsWith('/')) warns.push('server.tmpDir 建议用绝对路径(如 /tmp/voiceagent)');
+
+  const asr = P(obj, 'asr') || {};
+  need(asr.url, 'asr.url 必填');
+  if (asr.provider === 'paraformer-http') {
+    need(asr.endpoint, 'asr.endpoint 必填(paraformer-http)');
+  } else if (asr.provider === 'paraformer-ws') {
+    need(asr.apiKey, 'asr.apiKey 必填(paraformer-ws)');
+    need(asr.model && asr.format && asr.sampleRate, 'asr.model/format/sampleRate 必填(paraformer-ws)');
+  }
+
+  const llm = P(obj, 'llm') || {};
+  need(llm.apiKey, 'llm.apiKey 必填');
+  if (llm.provider === 'yuxi-runs') {
+    need(llm.url && llm.agentSlug, 'llm.url / llm.agentSlug 必填(yuxi-runs)');
+  } else if (llm.provider === 'yuxi-chat') {
+    need(llm.url && llm.agentId, 'llm.url / llm.agentId 必填(yuxi-chat)');
+  } else if (llm.provider === 'openai-compatible') {
+    need(llm.baseUrl && llm.model, 'llm.baseUrl / llm.model 必填(openai-compatible)');
+  }
+
+  const tts = P(obj, 'tts') || {};
+  need(tts.url, 'tts.url 必填');
+  if (tts.provider === 'cosyvoice-http') {
+    need(tts.endpoint, 'tts.endpoint 必填(cosyvoice-http)');
+    need(tts.promptWav && tts.promptText, 'tts.promptWav / tts.promptText 必填(cosyvoice-http,音色克隆)');
+  } else if (tts.provider === 'cosyvoice-ws') {
+    need(tts.voice, 'tts.voice 必填(cosyvoice-ws,音色名,如 longxiaochun_v3)');
+  }
+  need(tts.sampleRate > 0, 'tts.sampleRate 需大于 0');
+
+  if (/sk-|eyJ/.test(JSON.stringify(obj))) warns.push('检测到疑似密钥,请确认目标环境正确、文件不会被提交/外发。');
+  return { errs, warns };
+}
+
+/* ---------------- 渲染 / 下载 / 复制 ---------------- */
+let lastJson = '';
+
+function render() {
+  const obj = collect();
+  obj.profile = 'local'; // 输出文件名固定为 local.json(服务端默认加载它)
+  obj.asr = obj.asr || {}; obj.asr.provider = currentProvider('asr');
+  obj.llm = obj.llm || {}; obj.llm.provider = currentProvider('llm');
+  obj.tts = obj.tts || {}; obj.tts.provider = currentProvider('tts');
+
+  const { errs, warns } = validate(obj);
+  const issues = $('#issues');
+  issues.innerHTML = '';
+  errs.forEach((m) => issues.insertAdjacentHTML('beforeend', `<div class="err">✗ ${m}</div>`));
+  warns.forEach((m) => issues.insertAdjacentHTML('beforeend', `<div class="warn">△ ${m}</div>`));
+  if (!errs.length && !warns.length) issues.insertAdjacentHTML('beforeend', '<div class="ok">✓ 配置完整,可下载</div>');
+
+  lastJson = JSON.stringify(obj, null, 2);
+  $('#preview').textContent = lastJson;
+  $('#status').textContent = `将生成 server/config/local.json(${(new Blob([lastJson]).size / 1024).toFixed(1)} KB)`;
+  return { errs };
+}
+function flash(msg) { $('#status').textContent = msg; }
+
+function download() {
+  const { errs } = render();
+  if (errs.length) { flash('有必填项缺失,请按红色提示补全后再下载。'); return; }
+  const blob = new Blob([lastJson], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'local.json';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+  flash('已下载 local.json:放进目标机器 server/config/(替换同名文件)后 npm start 即可;想并存多套,可把文件改名后用 VA_PROFILE=<名字> npm start 指向。');
+}
+
+function copyJson() {
+  render();
+  const done = () => flash('已复制到剪贴板。');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(lastJson).then(done).catch(() => fallbackCopy(done));
+  } else fallbackCopy(done);
+}
+function fallbackCopy(done) {
+  const ta = document.createElement('textarea');
+  ta.value = lastJson;
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); done(); } catch {}
+  ta.remove();
+}
+
+/* ---------------- 导入现有 json(改参数/另存) ---------------- */
+function importJson(text) {
+  let obj;
+  try { obj = JSON.parse(text); } catch (e) { flash('JSON 解析失败:' + e.message); return; }
+  $$('[data-key]').forEach((el) => {
+    const parts = el.dataset.key.split('.');
+    let cur = obj;
+    for (const p of parts) cur = cur && cur[p];
+    el.value = Array.isArray(cur) ? cur.join('\n') : (cur === undefined || cur === null ? '' : String(cur));
+  });
+  [['asr', obj.asr && obj.asr.provider], ['llm', obj.llm && obj.llm.provider], ['tts', obj.tts && obj.tts.provider]]
+    .forEach(([g, p]) => setProvider(g, p));
+  if (obj.vad) {
+    $('#vadOn').checked = true;
+    $('#vadBox').classList.remove('hide');
+    if (obj.vad.threshold !== undefined) $('#vadThreshold').value = obj.vad.threshold;
+    if (obj.vad.startFrames !== undefined) $('#vadStart').value = obj.vad.startFrames;
+    if (obj.vad.endFrames !== undefined) $('#vadEnd').value = obj.vad.endFrames;
+  }
+  render(); // 导入的旧 profile 字段仅作参考,输出名固定为 local.json
+}
+
+/* ---------------- 初始化 ---------------- */
+function boot() {
+  // 配置引导模式(?first=1,index.js 在无配置时把 / 302 到这里):显示绿色引导条
+  if (new URLSearchParams(location.search).get('first')) $('#firstBanner').style.display = 'block';
+
+  // 字段默认值(常见起步值)
+  const defaults = {
+    wakeWords: '你好小智',
+    wakeTimeout: 300,
+    'server.port': 3000,
+    'server.tmpDir': '/tmp/voiceagent',
+  };
+  Object.entries(defaults).forEach(([k, v]) => {
+    const el = $$('[data-key]').find((e) => e.dataset.key === k);
+    if (el) el.value = v;
+  });
+
+  $$('#asrTabs, #llmTabs, #ttsTabs').forEach((tabs) => {
+    tabs.querySelectorAll('button').forEach((b) => {
+      b.addEventListener('click', () => { setProvider(tabs.id.replace('Tabs', ''), b.dataset.provider); render(); });
+    });
+  });
+
+  $('#vadOn').addEventListener('change', () => $('#vadBox').classList.toggle('hide', !$('#vadOn').checked));
+  $('#downloadBtn').addEventListener('click', download);
+  $('#copyBtn').addEventListener('click', copyJson);
+  $('#importFile').addEventListener('change', (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => importJson(r.result);
+    r.readAsText(f);
+    e.target.value = '';
+  });
+
+  document.addEventListener('input', () => render());
+  render();
+}
+
+document.addEventListener('DOMContentLoaded', boot);
+</script>
+</body>
+</html>

@@ -80,7 +80,7 @@
 
 前端也可发 `{"type":"wake_manual"}` 手动唤醒（免唤醒词直接进入窗口，`agent.wakeManual()` 即此协议），用于唤醒词检测不到时兜底。
 
-唤醒词与窗口时长由后端配置：`server/config/{profile}.json` 的 `wakeWords` / `wakeTimeout`。
+唤醒词与窗口时长由后端配置：`server/config/local.json` 的 `wakeWords` / `wakeTimeout`。
 
 ### WS /api/chat_stream — 流式问答（LLM 增量 → 断句 → 逐句 TTS → 顺序播放）
 
@@ -138,8 +138,7 @@
 ## 五、后端启动
 
 ```bash
-VA_PROFILE=local  npm start   # 内网后端
-VA_PROFILE=online npm start   # 全线上
+npm start                 # 直接启动:固定加载 server/config/local.json(无需环境变量)
 ```
 
-端口取 `server/config/{profile}.json` 的 `server.port`（默认 local=3000 / online=30002）。
+> `local.json` 不存在时,启动会**报错并自动打开配置生成页**(`public/config-builder.html`,纯前端):生成并下载 `local.json`、放进 `server/config/` 后重新 `npm start`。想在一台机器上并存多套配置,把文件改名后用 `VA_PROFILE=<名字> npm start` 指向。端口取所加载配置的 `server.port`。

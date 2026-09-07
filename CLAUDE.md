@@ -7,9 +7,10 @@
 ## 常用命令
 
 ```bash
-npm install                # 只装一次,需 Node >= 18
-VA_PROFILE=local npm start # 内网后端(默认,不设也走 local);端口取配置 server.port
-VA_PROFILE=online npm start# 全线上(百炼 + DeepSeek,按量计费)
+npm install                 # 只装一次,需 Node >= 18
+npm start                   # 直接启动,无需 VA_PROFILE:固定加载 server/config/local.json;缺文件则报错并开配置网页
+# 配置生成/修改用 public/config-builder.html(纯前端,生成并下载 local.json 放进 server/config/,见 README「配置生成器」节)
+# 想在一台机器上并存多套:把文件改名后用 VA_PROFILE=<名字> npm start 指向(日常不需要)
 
 node --check 文件.js       # 唯一语法检查手段
 ```
@@ -18,14 +19,14 @@ node --check 文件.js       # 唯一语法检查手段
 - **系统级依赖 `ffmpeg`**：`audio.js` 用 execFile 调它把 webm→16k mono wav，没装会转码失败。
 - 启动后浏览器开 `http://localhost:<port>`。演示页 `index.html` 用 `autoWake:true`，加载即请求麦克风并自动监听；注意浏览器 autoplay 限制下采集 AudioContext 初始挂起，需首次点击页面才 `resume`（状态 `waiting-activation`）。
 - **首次 clone 需两步**（二者都已 gitignore，仓库里没有）：
-  1. 按 `server/config/README.md` 创建 `server/config/{profile}.json`（含 API key，别提交）。
+  1. 用 [public/config-builder.html](public/config-builder.html) 生成,或按 `server/config/README.md` 手写 `server/config/local.json`(含 API key,别提交;没配置时直接 `npm start` 会报错并自动打开生成页)。
   2. 准备 `server/models/silero_vad.onnx`（v5 分发版；官方 snakers4 版在此环境推理异常，见 `vad.js` 头注释）。
 
 ## 配置
 
 - 字段说明见 `server/config/README.md`；真实值放 `server/config/local.json` / `online.json`，已被 gitignore 排除（含 API key），不要提交。
-- 通过 `VA_PROFILE` 环境变量切换后端服务；唤醒词在配置 `wakeWords`（可配多个）、唤醒窗口 `wakeTimeout`（秒，窗口内免唤醒词直接问答）。
-- **`config.js` 按 `VA_PROFILE` 拼 `server/config/{profile}.json`，文件缺失直接 throw**；三个环节（asr/llm/tts）的 `provider` 字段彼此独立，可任意混搭，不以档位强绑定。
+- 配置选择：日常直接 `npm start` 自动选（见下条）；`VA_PROFILE` 仅在多配置并存需显式指定时用。唤醒词在配置 `wakeWords`（可配多个）、唤醒窗口 `wakeTimeout`（秒，窗口内免唤醒词直接问答）。
+- **配置固定为 `server/config/local.json`，缺失不崩**：日常 `npm start` 直接加载它（想并存多套，把文件改名后 `VA_PROFILE=<名字> npm start` 指向 `{名字}.json`）。找不到时导出带 `__missing:true` 的兜底配置，`index.js` 进入**配置引导模式**（控制台报错 + 自动打开配置生成页 `/`；生成器是纯前端，生成并下载 `local.json` 放进 `server/config/` 后重启；引导端口兜底 3000，可用 `VA_PORT` 覆盖、`VA_NO_OPEN` 关闭自动开浏览器）；三个环节（asr/llm/tts）的 `provider` 字段彼此独立，可任意混搭，不以档位强绑定。
 
 ## 代码结构（server/）
 

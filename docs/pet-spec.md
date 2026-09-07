@@ -42,7 +42,7 @@
 
 ## 四、验收
 
-- `VA_PROFILE=local npm start` 后打开 `http://localhost:3000`，右下出现小宠物，自动 idle 动画。
+- `npm start` 后打开 `http://localhost:<port>`(用仓库自带 `local` 配置即可;没配置时会报错并自动打开配置页),右下出现小宠物,自动 idle 动画。
 - 发起一次语音/文字问答，回答播放时宠物进入「说话」（嘴动+身体弹），回答结束回 idle。
 - 无 console 报错；不影响现有录音、唤醒、打断功能；无新增构建/依赖。
 
