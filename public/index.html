@@ -269,12 +269,12 @@
     recordBtn.addEventListener('mousedown', () => {
       agent.startRecording().catch((e) => showError('无法录音:' + e.message));
     });
-    recordBtn.addEventListener('mouseup', () => agent.stopRecording());
+    recordBtn.addEventListener('mouseup', () => { agent.stopRecording().catch(() => {}); });
     recordBtn.addEventListener('touchstart', (e) => {
       e.preventDefault();
       agent.startRecording().catch((e) => showError('无法录音:' + e.message));
     });
-    recordBtn.addEventListener('touchend', () => agent.stopRecording());
+    recordBtn.addEventListener('touchend', () => { agent.stopRecording().catch(() => {}); });
 
     // 手动打断(保底):语音/打断词识别失效时点它
     stopBtn.addEventListener('click', () => agent.stopPlay());

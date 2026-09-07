@@ -24,7 +24,7 @@ node --check 文件.js       # 唯一语法检查手段
 
 ## 配置
 
-- 字段说明见 `server/config/README.md`；真实值放 `server/config/local.json` / `online.json`，已被 gitignore 排除（含 API key），不要提交。
+- 字段说明见 `server/config/README.md`；真实值放 `server/config/local.json`（含 API key，已被 gitignore 排除），不要提交。
 - 配置选择：日常直接 `npm start` 自动选（见下条）；`VA_PROFILE` 仅在多配置并存需显式指定时用。唤醒词在配置 `wakeWords`（可配多个）、唤醒窗口 `wakeTimeout`（秒，窗口内免唤醒词直接问答）。
 - **配置固定为 `server/config/local.json`，缺失不崩**：日常 `npm start` 直接加载它（想并存多套，把文件改名后 `VA_PROFILE=<名字> npm start` 指向 `{名字}.json`）。找不到时导出带 `__missing:true` 的兜底配置，`index.js` 进入**配置引导模式**（控制台报错 + 自动打开配置生成页 `/`；生成器是纯前端，生成并下载 `local.json` 放进 `server/config/` 后重启；引导端口兜底 3000，可用 `VA_PORT` 覆盖、`VA_NO_OPEN` 关闭自动开浏览器）；三个环节（asr/llm/tts）的 `provider` 字段彼此独立，可任意混搭，不以档位强绑定。
 
@@ -54,4 +54,4 @@ node --check 文件.js       # 唯一语法检查手段
 - **唤醒回答**去掉唤醒词后只回 `userText`，由前端经 `/api/chat_stream` 流式问答(带 `sessionId` 即续 yuxi 多轮记忆)；ASR 异步且串行（classifying 标志防堆积）。
 - **唤醒窗口休眠时间**：WS `/api/wake` 的 `wake` 事件带 `timeoutSeconds`（窗口总秒数，来自配置 `wakeTimeout`），`sleep` 事件带 `idleSeconds`（实际静默秒数）。前端 SDK 透传为 `onWake(word, timeoutSeconds)` / `onSleep(idleSeconds)`，接入方可据此自行画倒计时/进度条。
 - **前端 SDK 的 `baseUrl` 与 `sessionId`**：WS 地址由 `http(s)`→`ws(s)` 自动转换，同源用 `location.host`，跨域部署传 baseUrl。`opts.sessionId` 传固定值则 /api/chat_stream 带上，后端据此续 yuxi 多轮记忆；不传则每次单轮。
-- 本地 CosyVoice 音色靠 `spkId` 引用：先用 `scripts/tts-admin.html` 把参考音频注册到 TTS 服务，再把 `spkId` 配进 `config.tts.spkId`，主链路只发 `tts_text + spk_id`，不碰参考文件。
+- 本地 CosyVoice 音色克隆：`tts.js` 每次按 `config.tts.promptWav` 读参考音频、随 `promptText` 一起上传给 TTS 服务。参考音频放 `server/config/`（默认 `prompt_wav.wav` 随仓库），换音色就替换该 wav 或改 `promptWav` 路径。`devtools/shantou/tts-admin.html` 是给 TTS 服务注册音色的管理页（服务端视角，非本项目运行时依赖）。

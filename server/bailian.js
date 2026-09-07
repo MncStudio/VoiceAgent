@@ -70,14 +70,18 @@ function asrWs(wavBuffer) {
         const s = msg.payload?.output?.sentence;
         if (s?.text && s.sentence_end) finals.push(s.text);
       } else if (evt === 'task-finished') {
-        finish();
+        // 正常结束:有最终句才成功;结果为空视为失败(与 HTTP 档一致,避免静默空答)
+        finish(finals.length ? undefined : new Error('百炼 ASR 未识别到文字'));
       } else if (evt === 'task-failed') {
         finish(new Error(`百炼 ASR 失败: ${msg.header?.error_code}: ${msg.header?.error_message}`));
       }
     });
 
     ws.on('error', (e) => finish(new Error(`百炼 ASR 连接错误: ${e.message}`)));
-    ws.on('close', () => { if (!finished) finish(); });
+    // task-finished 之前被关闭 = 异常,不能当成功返回空
+    ws.on('close', () => {
+      if (!finished) finish(new Error('百炼 ASR 连接提前关闭(未收到 task-finished)'));
+    });
   });
 }
 
@@ -85,6 +89,7 @@ function asrWs(wavBuffer) {
 // cancel() 供前端打断时关掉底层百炼 WS,停止生成。
 function ttsWsStream(text, onChunk) {
   let ws = null;
+  let cancelled = false; // cancel() 主动打断:关连接不算异常
   const promise = new Promise((resolve, reject) => {
     const taskId = newTaskId();
     ws = new WebSocket(config.tts.url, bailianOptions());
@@ -141,9 +146,15 @@ function ttsWsStream(text, onChunk) {
     });
 
     ws.on('error', (e) => finish(new Error(`百炼 TTS 连接错误: ${e.message}`)));
-    ws.on('close', () => { if (!finished) finish(); });
+    // task-finished 之前被关闭 = 异常(音频被截断),不能当成功结束;cancel() 主动打断除外
+    ws.on('close', () => {
+      if (!finished) {
+        if (cancelled) finish();
+        else finish(new Error('百炼 TTS 连接提前关闭(未收到 task-finished)'));
+      }
+    });
   });
-  return { promise, cancel: () => { try { ws && ws.close(); } catch {} } };
+  return { promise, cancel: () => { cancelled = true; try { ws && ws.close(); } catch {} } };
 }
 
 module.exports = { asrWs, ttsWsStream };

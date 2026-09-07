@@ -100,7 +100,14 @@
     async play(text) {
       this.stop();
       const gen = this._playGen;
-      const ctx = await this._ensureAudioCtx(); // await resume,确保 currentTime 是真实时钟
+      let ctx;
+      try {
+        ctx = await this._ensureAudioCtx(); // await resume,确保 currentTime 是真实时钟
+      } catch (e) {
+        // autoplay 拦截等:转成 onError 而不是抛 unhandled rejection(自动唤醒首次回答常见)
+        if (this.onError) this.onError('无法开始播放:' + e.message);
+        return;
+      }
       if (gen !== this._playGen) return;        // await 期间被打断,丢弃
       this._setPlaying(true);                   // 播放会话开始
       const url = this._baseUrl
@@ -133,7 +140,13 @@
     async playStream(wsUrl, initialMessage) {
       this.stop();
       const gen = this._playGen;
-      const ctx = await this._ensureAudioCtx(); // await resume,确保 currentTime 是真实时钟
+      let ctx;
+      try {
+        ctx = await this._ensureAudioCtx(); // await resume,确保 currentTime 是真实时钟
+      } catch (e) {
+        if (this.onError) this.onError('无法开始播放:' + e.message);
+        return;
+      }
       if (gen !== this._playGen) return;        // await 期间被打断,丢弃
       this._setPlaying(true);
       const ws = new WebSocket(wsUrl);
@@ -447,6 +460,8 @@
     }
 
     async startRecording() {
+      // 防重入:连点/触屏同时触发 mousedown+touchstart 时,只录一路,避免麦克风双开泄漏
+      if (this._recording || this._mediaRecorder) return;
       this._tts.stop(); // 开口即打断正在播的回答
       // 按住说话同样开回声消除/降噪;MediaRecorder 按设备默认采样率录(opus 内部 48k),不设 sampleRate
       const stream = await navigator.mediaDevices.getUserMedia({

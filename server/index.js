@@ -43,8 +43,10 @@ app.use((req, res, next) => {
   next();
 });
 
-const upload = multer({ storage: multer.memoryStorage() });
-app.use(express.json());
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024, files: 1 }, // 单文件 ≤20MB,防大文件打爆内存
+});
 
 if (FIRST_RUN) {
   // 首次运行:根路径直接进配置生成页(须在 express.static 之前注册,否则 '/' 会被 index.html 抢占)
@@ -95,6 +97,13 @@ app.post('/api/chat', upload.single('audio'), async (req, res) => {
 });
 
 // 文字问答走 /api/chat_stream(WS 流式),不再有独立的非流式端点。
+
+// 统一 JSON 错误响应(multer 超限等)
+app.use((err, req, res, next) => {
+  if (!err) return next();
+  const msg = err.code === 'LIMIT_FILE_SIZE' ? '录音文件超过 20MB 限制' : err.message;
+  res.status(400).json({ error: msg });
+});
 
 // 唤醒词检测:WebSocket,前端常驻推 16k int16 PCM 块,命中唤醒词回 {"type":"wake","word":...}
 const server = http.createServer(app);

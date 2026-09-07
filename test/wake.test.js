@@ -49,4 +49,12 @@ const det2 = new WakeDetector(['你好小智'], () => {}, 10000, {}, ['安静点
 assert.strictEqual(det2.matchStop('安静点'), true);
 assert.strictEqual(det2.matchStop('别说了'), false); // 默认词表已被覆盖
 
+// ---- match:字符命中时 rest 取原文剥词(保留空格/标点,别把送 LLM 的文本压扁) ----
+assert.deepStrictEqual(det.match('你好小智 How are you?'), { word: '你好小智', rest: 'How are you?' });
+assert.deepStrictEqual(det.match('今天天气如何？你好小智'), { word: '你好小智', rest: '今天天气如何？' });
+assert.strictEqual(det.match('你好小智 帮我查下 WMS 库存').rest, '帮我查下 WMS 库存');
+// 唤醒词字面不在原文(ASR 同音字 志/智)时走拼音匹配 → 退回归一化剥词
+assert.strictEqual(det.match('你好小志 What time is it?').rest, 'whattimeisit');
+assert.strictEqual(det.match('你好小志').word, '你好小智');
+
 console.log('wake.test.js 全部通过');

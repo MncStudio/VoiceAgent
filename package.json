@@ -5,7 +5,9 @@
   "description": "语音代理:录音 → ASR → LLM → TTS → 播放",
   "main": "server/index.js",
   "scripts": {
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "check": "node scripts/check.js",
+    "test": "node test/wake.test.js && node test/smoke.js"
   },
   "engines": {
     "node": ">=18"

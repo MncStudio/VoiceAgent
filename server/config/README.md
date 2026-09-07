@@ -16,9 +16,11 @@ npm start                 # 固定加载 server/config/local.json
 
 > 嫌手写 JSON 麻烦？用纯前端配置生成器 `public/config-builder.html`:填参数 →「生成并下载」`local.json` → 放进本目录即可(可双击文件离线用;「导入现有 json」可改旧配置)。ASR/LLM/TTS 的 provider 各自独立选择。
 
-## 自带的两份示例配置(local / online)
+## 典型 provider 组合参考
 
-| 示例 | ASR（识别） | LLM（模型） | TTS（合成） |
+> 下列是两种典型组合（内容示意，不是仓库文件）：部署时固定生成 `local.json`，按这台机器能连到的服务在生成器里点选即可。
+
+| 组合 | ASR（识别） | LLM（模型） | TTS（合成） |
 |---|---|---|---|
 | **local** | 内网 Paraformer HTTP | 内网语析 agent/runs | 内网 CosyVoice HTTP |
 | **online** | 百炼 Paraformer WS | DeepSeek（OpenAI 兼容） | 百炼 CosyVoice WS |
@@ -107,7 +109,7 @@ npm start                 # 固定加载 server/config/local.json
 | `model` | string | ws | 百炼 TTS 模型名，如 `cosyvoice-v3-flash`。 |
 | `voice` | string | ws | 音色名，如 `longxiaochun_v3`。 |
 | `format` | string | ws | 输出音频格式，如 `pcm`。 |
-| `spkId` | string | http | 说话人 id（仅 `endpoint` 用 `/inference_sft` 时）。需先用 `scripts/tts-admin.html` 或 `POST /v1/speakers/register` 注册音色。 |
+| `spkId` | string | http | ~~旧字段:说话人 id(仅 /inference_sft 用)~~ 当前 `tts.js` 不读取它,克隆走 `promptWav`/`promptText`;保留仅为兼容旧版配置。 |
 | `promptWav` | string | http | 参考音频路径（`/inference_zero_shot`、`/inference_cross_lingual` 用）。每次合成上传它做音色克隆，如 `server/config/prompt_wav.wav`。 |
 | `promptText` | string | http | 参考音频对应的文字（零样本/跨语种克隆用）。CosyVoice3 文本需带 `endofprompt` 标记（token 151646）前缀，缺失会触发模型断言报错。 |
 | `sampleRate` | number | 两个都 | 输出 PCM 采样率。 |

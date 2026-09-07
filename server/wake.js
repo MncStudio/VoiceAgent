@@ -105,11 +105,19 @@ class WakeDetector {
 
   // 匹配唤醒词:先按字符精确匹配(快路径),不中再按拼音匹配(忽略声调)。
   // 拼音匹配解决 ASR 同音字误识别(如「你好小智」被识别成「你好小志」,志/智拼音都是 zhi)。
-  // 命中返回 { word, rest },rest=剥掉唤醒词后的剩余文本(归一化);未命中返回 null。
+  // 命中返回 { word, rest },rest=剥掉唤醒词后的剩余文本。字符命中时 rest 尽量取**原文**剥词
+  // (保留空格/标点,避免送 LLM 的问题被压成无空格小写);原文剥不动(同音字/词内带标点)才退回归一化结果。
+  // 拼音匹配按音节窗口映射回归一化文本 n 的字符区间剥词(唤醒词为纯中文,字符数=音节数)。
   match(text) {
-    const n = normalize(text);
+    const orig = text || '';
+    const n = normalize(orig);
     const word = this.wakeWords.find((w) => n.includes(w));
-    if (word) return { word, rest: n.replace(word, '').trim() };
+    if (word) {
+      let rest = n.replace(word, '').trim(); // 兜底:归一化剥词
+      const i = orig.indexOf(word); // 优先:原文里直接剥字面唤醒词
+      if (i >= 0) rest = (orig.slice(0, i) + orig.slice(i + word.length)).trim();
+      return { word, rest };
+    }
     // 拼音匹配:唤醒词音节序列是文本音节序列的连续子序列。
     // 音节逐字对应原文,命中的窗口映射回 n 的字符区间剥词(唤醒词为纯中文,字符数=音节数)。
     const syl = toSyllables(n);
@@ -157,7 +165,9 @@ class WakeDetector {
   _isPrefixedStop(n) {
     // 先剥礼貌/催促前缀("请帮我暂停一下" → "暂停一下")。
     let s = n;
-    for (const p of ['请帮我', '帮我', '麻烦你', '请你', '请', '麻烦', '快', '赶紧', '立刻', '马上', '先']) {
+    // 先剥礼貌/催促前缀("请暂停一下" → "暂停一下")。注意:不含功能性动词前缀
+    // ("帮我/请帮我"带实词"帮"是请求句,不该转成祈使打断——与剥词分支的口径一致)。
+    for (const p of ['麻烦你', '请你', '请', '麻烦', '快', '赶紧', '立刻', '马上', '先']) {
       if (s.startsWith(p)) { s = s.slice(p.length); break; }
     }
     // 优先按配置打断词前缀(裸"暂停"也覆盖:剩余为空即 true)。
@@ -351,7 +361,16 @@ function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen)
     // feed 串行化:并发喂帧会互相覆盖共享的 state/pending,导致检测错乱。
     // chain 从 ready 开始,消息按到达顺序排队处理。
     let chain = ready;
-    ws.on('close', () => detector.close()); // 断开时清休眠定时器,避免残留回调
+    // 心跳保活:常驻连接被 NAT/代理掐断时及时清理(否则半开连接长期占着 ONNX VAD 状态)
+    let alive = true;
+    ws.on('pong', () => { alive = true; });
+    const hb = setInterval(() => {
+      if (ws.readyState !== ws.OPEN) return;
+      if (!alive) return ws.terminate(); // 上一轮 ping 无 pong → 视为死连接
+      alive = false;
+      try { ws.ping(); } catch {}
+    }, 30000);
+    ws.on('close', () => { detector.close(); clearInterval(hb); }); // 断开:清休眠定时器与心跳
     ws.on('message', (data, isBinary) => {
       if (!isBinary) {
         // 手动唤醒:前端点按钮发 {"type":"wake_manual"},免唤醒词直接进入唤醒窗口。
