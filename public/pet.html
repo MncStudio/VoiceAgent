@@ -13,7 +13,7 @@
   }
   h1 { font-size: 1.1rem; }
   .sub { color: #93a0b4; font-size: .82rem; text-align: center; }
-  .voicepet { background: #223; border-radius: 18px; padding: .6rem; box-shadow: 0 18px 60px rgba(0,0,0,.5); }
+  .voicepet { background: transparent; border-radius: 0; padding: 0; box-shadow: none; }
   .voicepet canvas { display: block; image-rendering: pixelated; }
   .voicepet select { margin-bottom: .4rem; width: 100%; background: #20273a; color: #fff; border: 1px solid #39435c; border-radius: 8px; padding: .3rem; }
   .row { display: flex; gap: .5rem; flex-wrap: wrap; justify-content: center; align-items: center; }
@@ -26,7 +26,7 @@
 </head>
 <body>
   <h1>VoiceAgent · 桌面宠物</h1>
-  <div class="sub">形象 = public/pets/*(AI 按 docs/pet-prompt.md 规范生成,放进即用);说话张嘴、等待眨眼。</div>
+  <div class="sub">形象 = public/pets/*(AI 按 docs/pet-prompt.md 规范生成,放进即用);说话张嘴、等待眨眼;<b>点击宠物会跳一下</b>。</div>
   <div id="petBox" class="voicepet"></div>
   <div class="row">
     <button id="wakeBtn">🎤 开始监听</button>

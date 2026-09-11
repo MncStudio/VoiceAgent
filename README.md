@@ -34,7 +34,7 @@ npm start                  # 直接启动,无需 VA_PROFILE —— 自动找配�
 1. 用 [public/config-builder.html](public/config-builder.html) 生成,或按 [server/config/README.md](server/config/README.md) 手写 `server/config/` 下的配置文件(含 API key,别提交);没配置时直接 `npm start` 会报错并自动打开生成页。
 2. 准备 `server/models/silero_vad.onnx`(v5 分发版,官方 snakers4 版局部推理异常)。
 
-无测试/无 lint/无构建,前端 SDK 是无打包的 IIFE。
+提供 Node 自动测试与语法检查；前端 SDK 是无打包、无运行时依赖的 IIFE。
 
 ## 用「配置生成器」生成/修改配置(推荐)
 
@@ -103,5 +103,5 @@ public/
 ## 相关文档
 
 - [docs/API.md](docs/API.md) — 接入文档(SDK 用法 + 后端接口协议 + 跨域部署)
-- [docs/pet-prompt.md](docs/pet-prompt.md) — 宠物形象生成提示词(整份丢给 AI:规格提示词 + 生成后自检/缩放)
+- [docs/pet-prompt.md](docs/pet-prompt.md) — 数字人形象的唯一生成、配置、验收与替换标准
 - [server/config/README.md](server/config/README.md) — 配置字段说明与完整示例

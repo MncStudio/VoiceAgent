@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node server/index.js",
     "check": "node scripts/check.js",
-    "test": "node test/wake.test.js && node test/smoke.js"
+    "test": "node test/wake.test.js && node test/voice-agent-audio.test.js && node test/voicepet.test.js && node test/pet-contract.test.js && node test/smoke.js"
   },
   "engines": {
     "node": ">=18"
