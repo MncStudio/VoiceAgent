@@ -12,8 +12,9 @@
 cd <repo> && npm start          # 端口见 server/config/local.json(当前 3000)
 #   http://localhost:3000/pet.html   独立数字人页(「开始监听」「让 TA 说一句」按钮)
 #   http://localhost:3000/           演示页,右下角同一个数字人
-npm test                        # wake / voice-agent-audio / voicepet / pet-contract / smoke
+npm test                        # wake / voice-agent-audio / voicepet / pet-contract / pet-asset-quality / smoke
 npm run check                   # 全量 node --check(含 HTML 内联 script)
+npm run check:asset             # 素材质量严格验收(= pet-asset-quality.test.js --strict)
 ```
 
 日志分级：控制台执行 `__voicePet.setLogLevel('frame')`，或 URL 加 `?petlog=frame`；`?petlog=off` 关闭。
@@ -120,22 +121,33 @@ const lv = []; __voicePet.agent.on('audioLevel', v => lv.push(+v.toFixed(3)));
 
 因此 `demo.json` 里用 `safeCrop: { top: 6, left: 5 }` 遮住切格侵入，`pet-contract.test.js` 允许这种「显式声明兼容」的旧素材。
 
-### 3.2 新素材的量化验收（阈值）
+### 3.2 新素材的量化验收（**已实现**为 `test/pet-asset-quality.test.js`）
 
-要求写成 `test/pet-asset-quality.test.js` 并串进 `npm test`；**必须先确认它对现有 `demo.png` 判定为失败（fail-first）**，再确认新图通过：
+已串进 `npm test`，另有严格模式入口 `npm run check:asset`。零依赖（Node 内置 `zlib` 自己解 PNG）。
+三种用法：默认宽松（存量素材不判失败，但逐条打印）、`--strict`（不达标即 exit 1）、`--report`（只打印数据）。
 
-1. **尺寸**：1024×1024，能被 8 整除
-2. **不得越格**：每格四周 ≥2px 完全透明
-3. **行内一致**：同帧角色 bbox 宽/高变化 ≤2px、中心 x/y 变化 ≤2px；
-   `jump` 行允许中心 y 变化，但中心 x 变化 ≤2px、宽高变化 ≤3px
-4. **talk 行单调递增**：以 col0 为基准，各帧「张口程度」单调不减且首末差 ≥3 倍
-   （「张口程度」固定取一种定义：面部下半区暗色像素数，或与 col0 的差异像素数）
-5. **talk 行只有嘴变**：面部区域之外与 col0 的差异 < 该格总像素的 1%
+已实现的判据（**硬判据**：不达标即在 `--strict` 下失败）：
 
-替换标准素材后应**删除 `demo.json` 的 `safeCrop`**（`pet-contract.test.js` 在无 `safeCrop` 时会要求 1024×1024）。
+| 判据 | 阈值 |
+|---|---|
+| 尺寸 | 1024×1024，能被 8 整除 |
+| 不得越格 | 每格四周 2px 环完全透明（alpha < 8） |
+| 行内尺度一致 | 行内**头部框宽度极差 ÷ 最小宽度 ≤ 20%** |
+| 说话行张口程度 | 从 col0 到 col7 单调不减，且末帧 ≥ 3×(col1 或 50px) |
+| 说话行只有嘴变 | 面部（角色外接框下 45%）之外与 col0 的差异 < 该格像素的 1% |
 
-> 实现提示：Node 里可用内置 `zlib` 解 PNG 的 IDAT 并做反滤波，无第三方依赖；
-> 已有先例——`pet-contract.test.js` 直接用 `Buffer` 读 PNG 头（签名 / 宽高）。
+**为什么"尺度"判据用 20% 极差、而不是"中心/高度必须一动不动"**：挥手抬臂、低头、张望都会合法地改变
+外接框（存量素材实测：wave 头部框宽变化 9%、failed 中心 y 变化 27.5px、waiting 中心 x 变化 14px 都是正常动作）。
+用"≤2px"会**误杀合法动作**。20% 极差能抓住真正的缺陷（存量 jump 行实测 **62%**，c3~c6 被画大），
+同时不误杀上述合法动作。中心/高度变化降级为"参考信息"，只打印不判失败。
+
+**当前状态（fail-first 证据齐全）**：对存量 `demo.png` 运行 `npm run check:asset` → **exit 1，5 项不达标**
+（尺寸、越格、jump 行尺度 62%、说话行张口有回落、面部之外差异 8.73%）；
+换新图并删除 `safeCrop` 后该命令变为强制通过。
+
+> 阈值是从标准 + 实测反推的，**尚未在一份真正达标的素材上验证过**。第一份合格素材到位后，
+> 若某项过严，请按该素材实际数值微调并把依据写进注释，不要盲目放宽。
+> 实现提示：Node 里用内置 `zlib` 解 PNG 的 IDAT 并做反滤波即可，无第三方依赖。
 
 ## 4. 结论级事实：现在「说话嘴不动」到底怪谁
 
