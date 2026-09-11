@@ -12,10 +12,12 @@ npm start                   # 直接启动,无需 VA_PROFILE:固定加载 server
 # 配置生成/修改用 public/config-builder.html(纯前端,生成并下载 local.json 放进 server/config/,见 README「配置生成器」节)
 # 想在一台机器上并存多套:把文件改名后用 VA_PROFILE=<名字> npm start 指向(日常不需要)
 
-node --check 文件.js       # 唯一语法检查手段
+npm test                    # 自动测试:wake / voice-agent-audio / voicepet / pet-contract / smoke
+npm run check               # 全量 node --check(server/**、test/**、SDK,含 HTML 内联 script)
+node --check 文件.js       # 单个文件快速语法检查
 ```
 
-- **无测试框架、无 linter、无构建步骤**。浏览器 SDK 是无打包的 IIFE，改完用 `node --check public/voice-agent.js` 验语法即可。
+- **无 linter、无构建步骤**；但有 `npm test` 自动测试与 `npm run check` 语法检查,改完**两个都跑**。浏览器 SDK 是无打包的 IIFE。
 - **系统级依赖 `ffmpeg`**：`audio.js` 用 execFile 调它把 webm→16k mono wav，没装会转码失败。
 - 启动后浏览器开 `http://localhost:<port>`。演示页 `index.html` 用 `autoWake:true`，加载即请求麦克风并自动监听；注意浏览器 autoplay 限制下采集 AudioContext 初始挂起，需首次点击页面才 `resume`（状态 `waiting-activation`）。
 - **首次 clone 需两步**（二者都已 gitignore，仓库里没有）：
@@ -41,7 +43,7 @@ node --check 文件.js       # 唯一语法检查手段
 
 - `voice-agent.js` 前端 SDK（自包含，单 `<script>` 引入）：`VoiceAgent` 类一个入口封装三路问答（唤醒监听/按住说话/文字问答）+ 自动 TTS 播放，内联了 TtsPlayer；接入方 `new VoiceAgent({...})` 即可，不必碰 getUserMedia/WebSocket/MediaRecorder 样板。
 - `index.html` 接口演示页，只调 SDK 的 UI 示例（`autoWake:true` 加载即自动开始监听）。
-- `voicepet.js` + `pet.html` + `pets/`：桌面宠物运行时 —— 精灵图集 + 状态机渲染器 `VoicePet`(读 `pet.json` 裁帧、`talk` 行按音量包络选口型、订阅 `agent.on(...)` 驱动状态)；形象按 `docs/pet-prompt.md` 让 AI 生成后放进 `public/pets/` 即自动出现(`/api/pets` 只读列出)。
+- `voicepet.js` + `pet.html` + `pets/`：数字人(桌面宠物)运行时 —— 精灵图集 + 状态机渲染器 `VoicePet`(读 `<名>.json` 裁帧、`talk` 行按音量选口型、一次性动作 `lift`/逐帧 `durations`/旧素材 `safeCrop`、订阅 `agent.on(...)` 驱动状态、`?petlog=frame|off` 分级日志)；形象按 `docs/pet-prompt.md` 生成后放进 `public/pets/` 即自动出现(`/api/pets` 只读列出)。**验证清单与素材量化验收见 `docs/pet-verification-handoff.md`**。
 - 其他项目接入：接口协议与 SDK 用法（含 `baseUrl` 跨域部署）见 `docs/API.md`。
 
 ## 约定
@@ -55,6 +57,7 @@ node --check 文件.js       # 唯一语法检查手段
 - **唤醒回答**去掉唤醒词后只回 `userText`，由前端经 `/api/chat_stream` 流式问答(带 `sessionId` 即续 yuxi 多轮记忆)；ASR 异步且串行（classifying 标志防堆积）。
 - **唤醒窗口休眠时间**：WS `/api/wake` 的 `wake` 事件带 `timeoutSeconds`（窗口总秒数，来自配置 `wakeTimeout`），`sleep` 事件带 `idleSeconds`（实际静默秒数）。前端 SDK 透传为 `onWake(word, timeoutSeconds)` / `onSleep(idleSeconds)`，接入方可据此自行画倒计时/进度条。
 - **前端 SDK 的 `baseUrl` 与 `sessionId`**：WS 地址由 `http(s)`→`ws(s)` 自动转换，同源用 `location.host`，跨域部署传 baseUrl。`opts.sessionId` 传固定值则 /api/chat_stream 带上，后端据此续 yuxi 多轮记忆；不传则每次单轮。
-- **SDK 事件订阅**：`agent.on(name, fn)` / `agent.off(name, fn)` 供附加层(宠物/数字人)监听 `stateChange/wake/reply/error/interrupt/audioStream/userText`，不占用构造时的 `opts.onXxx` 回调。
-- **宠物运行时**：`VoicePet`(public/voicepet.js) 读 `public/pets/<名>.json` 的状态定义按坐标裁帧播放；`talk` 状态用 `agent.audioStream` 的音量包络在 `from..to` 帧间选口型；`/api/pets` 为只读，勿改成写盘接口。
+- **SDK 事件订阅**：`agent.on(name, fn)` / `agent.off(name, fn)` 供附加层(宠物/数字人)监听 `stateChange/wake/sleep/reply/error/interrupt/audioStream/audioLevel/userText`，不占用构造时的 `opts.onXxx` 回调。
+- **口型音量源**：首选 `agent.on('audioLevel')`(SDK 按 PCM 被排入的播放时刻排程算 RMS，不依赖浏览器音频图实现)，其次 `agent.analyser`；**别再回到"另建 AudioContext 去接 agent.audioStream"**——那种接法拿到的常是静音。AnalyserNode 必须**串在播放主通路**(`_out → analyser → destination/_dest`)，挂 gain=0 旁路会被 Chromium 优化掉、恒读 128。
+- **宠物运行时**：`VoicePet`(public/voicepet.js) 读 `public/pets/<名>.json` 的状态定义按坐标裁帧播放；`talk` 用音频包络在 `from..to` 帧间选口型；`speaking` 的结束必须走 `_maybeFinish`(流式 TTS 句间有合成空窗，不能因 `_activeSources` 暂时为空就结束)；时间推进一律用真实 `delta`，禁止"每帧 += 常量"；`/api/pets` 为只读，勿改成写盘接口。
 - 本地 CosyVoice 音色克隆：`tts.js` 每次按 `config.tts.promptWav` 读参考音频、随 `promptText` 一起上传给 TTS 服务。参考音频放 `server/config/`（默认 `prompt_wav.wav` 随仓库），换音色就替换该 wav 或改 `promptWav` 路径。`devtools/shantou/tts-admin.html` 是给 TTS 服务注册音色的管理页（服务端视角，非本项目运行时依赖）。
