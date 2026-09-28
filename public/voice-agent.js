@@ -12,6 +12,7 @@
 //     autoWake: true,        // 可选;true 则构造后自动开始唤醒监听
 //     onUserText(text),      // 识别到用户说的话(三路都触发)
 //     onReply(text),         // 得到回复文本(已自动 TTS 播放)
+//     onReplyDelta(text),    // 流式回复增量(文字问答/唤醒带问题,随 LLM 生成逐段回调;用于实时字幕)
 //     onWake(word, timeoutSeconds),  // 命中唤醒词;timeoutSeconds=唤醒窗口总秒数
 //     onSleep(idleSeconds),          // 唤醒窗口超时;idleSeconds=实际静默秒数
 //     onInterrupt(),         // 开口打断正在播的回答
@@ -285,6 +286,7 @@
       this._on = {
         userText: opts.onUserText,
         reply: opts.onReply,
+        replyDelta: opts.onReplyDelta,
         wake: opts.onWake,
         sleep: opts.onSleep,
         interrupt: opts.onInterrupt,
@@ -606,12 +608,16 @@
 
     // ============ ③ 文字问答(流式:改走 /api/chat_stream) ============
     // 流式问答:连 /api/chat_stream,由后端一条龙做 LLM 增量→逐句 TTS→顺序推 PCM。
-    // 完整回复经 onDone(replyText) → onReply 回调;打断直接 _tts.stop() 关连接,服务端中止。
+    // 增量经 onReplyDelta 逐段回调(实时字幕);完整回复经 onDone(replyText) → onReply 回调;
+    // 打断直接 _tts.stop() 关连接,服务端中止。
     _streamReply(text) {
       const q = String(text || '').trim();
       if (!q) return;
       const seq = ++this._reqSeq; // 抢占:只让最后一次提问生效
-      this._tts.onReplyDelta = null;
+      this._tts.onReplyDelta = (deltaText) => {
+        if (seq !== this._reqSeq) return; // 旧流增量丢弃
+        if (deltaText) this._emit('replyDelta', deltaText);
+      };
       this._tts.onDone = (replyText) => {
         if (seq !== this._reqSeq) return;
         if (replyText) this._emit('reply', replyText);
