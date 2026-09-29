@@ -56,7 +56,7 @@ async function run(replyText) {
 (async () => {
   // ---- 1) 默认(key-numbers):显示完整,只念含数字的片段 ----
   const REPLY = '当前库存总量为 12,345 件，其中原材料 5,678 件，此外建议关注临期物料。';
-  const SPOKEN = '当前库存总量为 12,345 件，其中原材料 5,678 件，';
+  const SPOKEN = '当前库存总量为 12,345 件，其中原材料 5,678 件。';
   let synthesized = stub(REPLY);
   let ws = await run(REPLY);
 
