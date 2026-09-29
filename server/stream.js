@@ -3,6 +3,7 @@
 const config = require('./config');
 const tts = require('./tts');
 const turn = require('./turn');
+const speech = require('./speech');
 const { SentenceBuffer } = require('./sentence');
 const { Timing } = require('./timing');
 
@@ -13,11 +14,15 @@ const SENTENCE_GAP_MS = 120; // 句间停顿,避免连续句子连珠炮式播�
 // 用户文本 → llm.askStream 增量 → 断句器切句 → 逐句串行 TTS(一次一句) → 顺序推裸 s16le PCM 给前端。
 // 前端打断直接 close(或主动停止),后端取消 LLM 请求、停当前合成、清队列。
 //
+// 显示与播报在这里分流(见 speech.js):
+//   delta / done.replyText = LLM 完整回复 → 前端弹窗与字幕显示完整;
+//   推给前端的 PCM / done.speechText = 精简后的播报文本(config.speech.mode,默认只念含数字的片段)。
+//
 // 协议(服务端 → 客户端,严格按序):
 //   1. {type:'start', userText}
 //   2. {type:'meta', sampleRate, channels, bitsPerSample}(须在任何二进制帧之前)
-//   3. {type:'delta', text}(LLM 增量,供流式字幕) 与 二进制帧(裸 s16le PCM)交错
-//   4. {type:'done', replyText}(TTS 队列全部排空后发) 或 {type:'error', message}
+//   3. {type:'delta', text}(LLM 增量,完整文本,供流式字幕) 与 二进制帧(裸 s16le PCM)交错
+//   4. {type:'done', replyText, speechText}(TTS 队列全部排空后发) 或 {type:'error', message}
 
 function attach(wss) {
   wss.on('connection', (ws, req) => {
@@ -50,11 +55,17 @@ class StreamPipeline {
     this.active = null;    // 当前 tts.synthesizeStream 的 {promise, cancel}
     this.gen = 0;          // 管线世代:打断/新请求都 +1,旧异步续体全部失效
     this.llmController = null;
-    this.replyText = '';
+    this.replyText = '';   // 完整回复(显示用)
+    this.speechText = '';  // 实际播报文本(精简后,可能为空→走兜底)
+    this.spokenAny = false;// 是否已产出过播报文本
     this._t = null;        // 本轮 Timing(chat_stream),用于链路耗时打点
     this._firstDelta = false;
     this._firstChunk = false;
     this._sentCount = 0;   // 已合成句数
+  }
+
+  get speechMode() {
+    return speech.normalizeMode(config.speech && config.speech.mode);
   }
 
   // 开始一轮流式问答。
@@ -62,6 +73,8 @@ class StreamPipeline {
     if (!text) return;
     this.cancel(); // 取消上一轮(若有),gen++;开始新轮
     this.replyText = '';
+    this.speechText = '';
+    this.spokenAny = false;
     const gen = this.gen;
 
     this._sendJson({ type: 'start', userText: text });
@@ -86,6 +99,7 @@ class StreamPipeline {
         t.mark('LLM完成');
         this.replyText = replyText || '';
         this._flushTail(gen);
+        this._fallbackSpeakFull(gen);
         this._waitDrain(gen, this.replyText);
       })
       .catch((e) => {
@@ -99,14 +113,46 @@ class StreamPipeline {
   _onDelta(gen, delta) {
     if (gen !== this.gen) return;
     if (!this._firstDelta) { this._firstDelta = true; this._t.mark('LLM首字'); }
-    this._sendJson({ type: 'delta', text: delta }); // 流式字幕(可选)
+    this.replyText += delta;
+    this._sendJson({ type: 'delta', text: delta }); // 流式字幕:完整文本,弹窗照全文显示
     const sentences = this.splitter.push(delta);
-    for (const s of sentences) this._enqueue(gen, s);
+    for (const s of sentences) this._enqueueSpeech(gen, s);
   }
 
   // LLM 流结束,把残余半句入队。
   _flushTail(gen) {
-    for (const s of this.splitter.flush()) this._enqueue(gen, s);
+    for (const s of this.splitter.flush()) this._enqueueSpeech(gen, s);
+  }
+
+  // 一句显示文本 → 播报文本后入队。精简模式下该句不含数字则整句不播(返回空,不入队)。
+  _enqueueSpeech(gen, sentence) {
+    if (gen !== this.gen) return;
+    const mode = this.speechMode;
+    const spoken = mode === 'full' ? sentence : speech.toSpeechText(sentence, mode);
+    if (!spoken) return;
+    this.spokenAny = true;
+    this.speechText += spoken;
+    this._enqueue(gen, spoken);
+  }
+
+  // 兜底:精简模式下整段回复一个数字都没有(纯寒暄/纯文字结论)时,按句播完整回复,
+  // 否则会出现"有问无声"。speech = 'full' 时每句都已入队,这里直接跳过。
+  _fallbackSpeakFull(gen) {
+    if (gen !== this.gen) return;
+    if (this.speechMode === 'full' || this.spokenAny) return;
+    const full = speech.toSpeechText(this.replyText, 'full');
+    if (!full) return;
+    const tail = new SentenceBuffer({
+      maxLen: config.llm?.maxSentenceLen || 80,
+      minLen: config.llm?.minSentenceLen || 5,
+    });
+    const parts = tail.push(full);
+    parts.push(...tail.flush());
+    for (const s of parts.length ? parts : [full]) {
+      this.spokenAny = true;
+      this.speechText += s;
+      this._enqueue(gen, s);
+    }
   }
 
   _enqueue(gen, text) {
@@ -148,7 +194,7 @@ class StreamPipeline {
     if (this.queue.length === 0 && !this.active) {
       this._t.mark('全部合成完');
       this._t.log();
-      this._finish('done', { replyText });
+      this._finish('done', { replyText, speechText: this.speechText });
       return;
     }
     setTimeout(() => this._waitDrain(gen, replyText), 50);
@@ -173,4 +219,5 @@ class StreamPipeline {
   }
 }
 
-module.exports = { attach };
+// StreamPipeline 导出供单测用(test/stream-speech.test.js 桩掉 LLM/TTS 驱动整条管线),无副作用。
+module.exports = { attach, StreamPipeline };

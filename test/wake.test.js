@@ -58,3 +58,99 @@ assert.strictEqual(det.match('你好小志 What time is it?').rest, 'whattimeisi
 assert.strictEqual(det.match('你好小志').word, '你好小智');
 
 console.log('wake.test.js 全部通过');
+
+// ---- 每次提问都带唤醒词(config.wakeRequireWord) ----
+// classify 走 ASR(需要网络/ffmpeg),这里把 asr.recognizeBuffer 换成固定文本的桩,
+// 只验证"识别到这段话后唤醒器怎么决策"这一层纯逻辑。
+const asr = require('../server/asr');
+let nextText = '';
+asr.recognizeBuffer = async () => nextText;
+
+function makeDetector(events, requireWake) {
+  return new WakeDetector(
+    ['你好小智'],
+    (type, payload) => events.push({ type, ...payload }),
+    10000,
+    {},
+    undefined,
+    undefined,
+    requireWake
+  );
+}
+
+async function feed(det, text) {
+  nextText = text;
+  det.classify(Buffer.alloc(0)); // wav 内容由上面的桩忽略
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+}
+
+(async () => {
+  // 1) 开启后:带唤醒词只答本句,不开窗口
+  {
+    const events = [];
+    const det = makeDetector(events, true);
+    await feed(det, '你好小智 库存还有多少');
+    assert.deepStrictEqual(events, [
+      { type: 'wake', word: '你好小智', timeoutSeconds: 10 },
+      { type: 'answer', userText: '库存还有多少' },
+      { type: 'sleep', idleSeconds: 0 },
+    ]);
+    assert.strictEqual(det.armed, false); // 不开"窗口内免唤醒词"的窗口
+    assert.strictEqual(det.sleepTimer, null); // 也不需要休眠倒计时
+    det.close();
+  }
+
+  // 2) 开启后:没带唤醒词的话整段丢弃(第二句也不会被当问题)
+  {
+    const events = [];
+    const det = makeDetector(events, true);
+    await feed(det, '库存还有多少');
+    assert.deepStrictEqual(events, []);
+    await feed(det, '你好小智 那入库呢');
+    assert.deepStrictEqual(events.map((e) => e.type), ['wake', 'answer', 'sleep']);
+    // 紧接着的下一句又必须带唤醒词
+    events.length = 0;
+    await feed(det, '那入库呢');
+    assert.deepStrictEqual(events, []);
+    det.close();
+  }
+
+  // 3) 只说唤醒词:仍回固定问候
+  {
+    const events = [];
+    const det = makeDetector(events, true);
+    await feed(det, '你好小智');
+    assert.strictEqual(events[0].type, 'wake');
+    assert.deepStrictEqual(events[1], { type: 'answer', userText: '你好小智', replyText: '我在，请讲' });
+    det.close();
+  }
+
+  // 4) 手动唤醒(用户主动点按钮)仍开一次窗口:窗口内整句直接问
+  {
+    const events = [];
+    const det = makeDetector(events, true);
+    det.armed = true; // 等价于收到 {"type":"wake_manual"}
+    det.lastActiveAt = Date.now();
+    await feed(det, '库存还有多少');
+    assert.deepStrictEqual(events, [{ type: 'answer', userText: '库存还有多少' }]);
+    det.close();
+  }
+
+  // 5) 默认(未开启):命中唤醒词后开窗口,下一句免唤醒词
+  {
+    const events = [];
+    const det = makeDetector(events, false);
+    await feed(det, '你好小智 库存还有多少');
+    assert.strictEqual(det.armed, true);
+    events.length = 0;
+    await feed(det, '那入库呢');
+    assert.deepStrictEqual(events, [{ type: 'answer', userText: '那入库呢' }]);
+    det.close();
+  }
+
+  console.log('wake.test.js 唤醒词/每次提问带唤醒词 全部通过');
+})().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

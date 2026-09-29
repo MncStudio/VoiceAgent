@@ -33,6 +33,8 @@
 | 选项 | 类型 | 说明 |
 |---|---|---|
 | `baseUrl` | string | 后端地址，如 `http://192.168.1.5:3000`（带协议）。跨域/独立部署时必填；缺省用同源相对路径。 |
+| `wakeRequireWord` | boolean | `true` 则连 `/api/wake` 时带 `?requireWake=1`：**每次提问都要带唤醒词**（命中唤醒词只回答本句、不开"窗口内免唤醒词"的窗口；没说唤醒词的话整段丢弃）。判定仍在后端，见下文 /api/wake。缺省 `false`（唤醒窗口内免唤醒词）。 |
+| `newSessionPerAsk` | boolean | `true` 则**每次提问换一个会话 id**（"每次提问都是新对话"，不带上一轮上下文；每次提问在后端各建一条对话记录）。缺省 `false` 沿用同一段多轮上下文。 |
 | `sessionId` | string | 单次对话的会话 id，语音/文字/唤醒三路共用。同一次对话内（同一 sessionId）连续问答共享上下文；不传则本次实例随机生成，刷新/重开即新对话，不跨会话持久化。要跨会话记忆就传固定 id。 |
 | `autoWake` | boolean | `true` 则构造后自动开始唤醒监听。 |
 
@@ -97,6 +99,12 @@
 
 唤醒词与窗口时长由后端配置：`server/config/local.json` 的 `wakeWords` / `wakeTimeout`。
 
+**每次提问都要唤醒词**（大屏/公共场景：窗口内免唤醒词会把环境里的闲聊当成问题）——全局开关是配置 `wakeRequireWord: true`，接入方也可以只对自己的连接开：`WS /api/wake?requireWake=1`（SDK 用 `new VoiceAgent({ wakeRequireWord: true })`）。开启后：
+
+- 命中唤醒词只回答本句（`wake` → `answer`），**不开**"窗口内免唤醒词"的窗口，紧接着补一个 `sleep`（`idleSeconds: 0`）让前端的"已唤醒"指示与本轮一起复位；
+- 没说唤醒词的话整段丢弃，不进 LLM；
+- 手动唤醒（`wake_manual`）仍开一次窗口，保留"唤醒词检测不到"时的兜底路径。
+
 ### WS /api/chat_stream — 流式问答（LLM 增量 → 断句 → 逐句 TTS → 顺序播放）
 
 语音/文字问答的**流式通道**：后端一条龙 `LLM 流式增量 → 断句器切句 → 逐句串行 TTS → 顺序推 PCM`，首句音频不用等整段回复生成完。前端连 `WS /api/chat_stream?sessionId=xxx`（sessionId 用于多轮记忆）。
@@ -112,7 +120,9 @@
 1. `{ "type": "start", "userText": "..." }` — 回显问题。
 2. `{ "type": "meta", "sampleRate": 24000, "channels": 1, "bitsPerSample": 16 }` — **必须先于首个二进制字节**，前端解码依它。
 3. `{ "type": "delta", "text": "..." }`（LLM 增量，供流式字幕）与 一个或多个**二进制帧**（裸 s16le PCM）交错推送。
-4. `{ "type": "done", "replyText": "完整回复" }`（TTS 队列全部合成完才发），或 `{ "type": "error", "message": "..." }`。
+4. `{ "type": "done", "replyText": "完整回复", "speechText": "实际播报的精简文本" }`（TTS 队列全部合成完才发），或 `{ "type": "error", "message": "..." }`。
+
+> **显示文本 ≠ 播报文本**：`delta` 与 `done.replyText` 始终是 LLM 完整回复（弹窗/字幕照全文显示）；推给前端的 PCM 与 `done.speechText` 是配置 `speech.mode` 决定的播报文本。默认 `key-numbers`：只念含数字的片段（"库存总量为 12,345 件，其中原材料 5,678 件，此外建议关注临期物料" → 只念带数字的两段；纯叙述不念），整段回复一个数字都没有时兜底按句念完整回复，避免"有问无声"。`speech.mode: "full"` 则播报=完整回复。
 
 打断：直接 `ws.close()`；后端取消 LLM 请求（abort SSE）、停当前合成、清空队列并复位断句器。
 

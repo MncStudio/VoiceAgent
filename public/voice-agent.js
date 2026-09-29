@@ -8,6 +8,8 @@
 // 用法:
 //   const agent = new VoiceAgent({
 //     sessionId: '…',        // 可选;接入方传固定值则后端据此续 yuxi 多轮记忆(thread_id);不传则每次单轮
+//     newSessionPerAsk: true,// 可选;每次提问都换一个 sessionId("每次提问都是新对话",不带上一轮上下文)
+//     wakeRequireWord: true, // 可选;每次提问都要带唤醒词(后端 ?requireWake=1):命中只答本句,不开免唤醒词窗口
 //     baseUrl: '…',          // 可选;后端地址(如 http://192.168.1.5:3000),跨域/独立部署时填;缺省同源相对路径
 //     autoWake: true,        // 可选;true 则构造后自动开始唤醒监听
 //     onUserText(text),      // 识别到用户说的话(三路都触发)
@@ -281,6 +283,10 @@
   class VoiceAgent {
     constructor(opts = {}) {
       this.sessionId = opts.sessionId; // 可选:接入方传固定值则后端据此续 yuxi 多轮记忆;不传则每次单轮
+      // 每次提问换新 sessionId:后端按 sessionId 映射 yuxi thread_id,换新即"每次提问都是新对话"。
+      this.newSessionPerAsk = !!opts.newSessionPerAsk;
+      // 每次提问都要唤醒词:连 /api/wake 时带 ?requireWake=1,后端命中唤醒词只回答本句、不开免唤醒词窗口。
+      this.wakeRequireWord = !!opts.wakeRequireWord;
       this.baseUrl = String(opts.baseUrl || '').replace(/\/+$/, ''); // 跨域部署:后端地址(如 http://host:port)
 
       this._on = {
@@ -341,6 +347,17 @@
     }
 
     get wakeActive() { return this._wakeOn; }
+
+    // 生成一个全新的会话键(不落盘):配合 newSessionPerAsk 每轮提问单独开一段对话。
+    _makeSessionId() {
+      return 'va-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+    }
+
+    // 立即开一段新会话并返回会话键;newSessionPerAsk 打开时每轮提问会自动调用。
+    newSession() {
+      this.sessionId = this._makeSessionId();
+      return this.sessionId;
+    }
 
     // 事件订阅/退订(事件名:stateChange/audioStream/audioLevel/wake/sleep/interrupt/error/userText/reply)
     on(name, fn) {
@@ -440,7 +457,8 @@
       this._wakeCtx = ctx;
       this._ctxRunning = ctx.state === 'running';
 
-      const wsUrl = this._wsUrl('/api/wake');
+      // requireWake=1:大屏等公共场景要求"每次提问都说唤醒词",不做窗口内免唤醒词(判定在服务端)。
+      const wsUrl = this._wsUrl('/api/wake' + (this.wakeRequireWord ? '?requireWake=1' : ''));
       const ws = new WebSocket(wsUrl);
       this._wakeWs = ws;
 
@@ -614,6 +632,8 @@
       const q = String(text || '').trim();
       if (!q) return;
       const seq = ++this._reqSeq; // 抢占:只让最后一次提问生效
+      // 每轮提问独立成段对话:URL 在下面才拼,这里换键即可让后端开新的 yuxi thread。
+      if (this.newSessionPerAsk) this.newSession();
       this._tts.onReplyDelta = (deltaText) => {
         if (seq !== this._reqSeq) return; // 旧流增量丢弃
         if (deltaText) this._emit('replyDelta', deltaText);

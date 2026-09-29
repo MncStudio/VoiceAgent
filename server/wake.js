@@ -10,6 +10,8 @@ const { pinyin } = require('pinyin-pro'); // 拼音模糊匹配,兼容 ASR 同�
 // 命中后**自动回答**:去掉唤醒词,剩余文本直接送 LLM→TTS,音频经 WS 回传前端播放(免按键)。
 // 命中唤醒词即进入"唤醒窗口"(config 的 wakeTimeout,秒):窗口内再说话不用带唤醒词,
 // 直接回答;窗口超时自动休眠,需重新说唤醒词。
+// 窗口内免唤醒词会误答环境里的闲聊,大屏场景要"每次提问都带唤醒词"时把 config.wakeRequireWord
+// 打开:命中唤醒词只回答本句,不开窗口(见 requireWake)。
 // 唤醒词来自 server/config/{profile}.json 的 wakeWords,可配置多个、可改。
 
 // VAD 开口/静音判定参数(threshold/startFrames/endFrames)由 config.vad 配置,默认见构造函数。
@@ -82,13 +84,16 @@ class Ring {
 }
 
 class WakeDetector {
-  constructor(wakeWords, onEvent, wakeTimeoutMs, vad = {}, stopWords, stopMaxLen) {
+  constructor(wakeWords, onEvent, wakeTimeoutMs, vad = {}, stopWords, stopMaxLen, requireWake = false) {
     this.wakeWords = wakeWords.map(normalize).filter(Boolean);
     this.wakeSyllables = this.wakeWords.map(toSyllables); // 拼音匹配用,构造时预计算一次
     // 打断词可配(config.wakeStopWords 覆盖默认),每个归一化 + 拼音预处理,供 matchStop 用。
     this.stopWords = (Array.isArray(stopWords) && stopWords.length ? stopWords : STOP_WORDS).map(normalize).filter(Boolean);
     this.stopMaxLen = stopMaxLen || STOP_MAX_LEN;
     this.stopSyllables = this.stopWords.map(toSyllables); // 打断词拼音序列,同唤醒词,用于同音字容错
+    // 每次提问都要求带唤醒词(config.wakeRequireWord):命中唤醒词只回答本句,不开"窗口内免唤醒词"的窗口。
+    // 手动唤醒(config 之外的用户主动操作)仍开窗口,保留"唤醒词检测不到"时的兜底路径。
+    this.requireWake = !!requireWake;
     this.onEvent = onEvent; // 回调(type, payload):answer=回答、wake=命中唤醒词、sleep=已休眠
     this.wakeTimeoutMs = wakeTimeoutMs || 300000; // 唤醒窗口时长,默认 5 分钟
     // VAD 开口/静音判定(config.vad 可覆盖)。门槛太低环境噪音误触发多,
@@ -304,11 +309,16 @@ class WakeDetector {
           console.log(`[wake] 未命中唤醒词,识别为:「${text}」`);
           return;
         }
-        this.armed = true;
-        this.lastActiveAt = now;
-        this._scheduleSleep();
+        // 每次提问都带唤醒词(requireWake):只回答本句,不开窗口 —— 窗口内免唤醒词会让
+        // 环境里的闲聊被当成问题。给前端补一个 sleep,让"已唤醒"指示与本轮一起复位。
+        if (!this.requireWake) {
+          this.armed = true;
+          this.lastActiveAt = now;
+          this._scheduleSleep();
+        }
         this.onEvent('wake', { word: m.word, timeoutSeconds: Math.round(this.wakeTimeoutMs / 1000) });
         this.answer(m.rest, m.word);
+        if (this.requireWake) this.onEvent('sleep', { idleSeconds: 0 });
       })
       .catch((e) => console.error(`[wake] 唤醒段识别失败: ${e.message}`))
       .finally(() => {
@@ -348,16 +358,20 @@ class WakeDetector {
 }
 
 // 挂到共享 WebSocketServer(无 path,这里过滤 /api/wake)。前端连上后持续发二进制 int16 块。
-function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen) {
+// requireWake=true 时每次提问都要带唤醒词(命中只答本句,不开窗口),见 WakeDetector。
+// 接入方也可按连接用 `?requireWake=1` 只对自己的连接开这个模式(大屏就是这种用法):
+// 配置是全局默认,查询参数是单连接覆盖,判定与执行都在服务端。
+function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen, requireWake = false) {
   const words = Array.isArray(wakeWords) ? wakeWords : [];
   const timeoutMs = (wakeTimeoutSec && wakeTimeoutSec > 0 ? wakeTimeoutSec : 300) * 1000;
   wss.on('connection', (ws, req) => {
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname !== '/api/wake') return; // 非唤醒连接,交给其他 handler(如 /api/tts)
+    const requireWakeForConn = requireWake || url.searchParams.get('requireWake') === '1';
     const detector = new WakeDetector(words, (type, payload) => {
       if (ws.readyState !== ws.OPEN) return;
       ws.send(JSON.stringify({ type, ...payload }));
-    }, timeoutMs, vad, stopWords, stopMaxLen);
+    }, timeoutMs, vad, stopWords, stopMaxLen, requireWakeForConn);
     // init 异步加载 ONNX 模型(数百 ms),消息到达时等它就绪再喂,避免丢帧
     const ready = detector.init().catch((e) => {
       console.error('[wake] 初始化失败:', e.message);

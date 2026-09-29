@@ -8,9 +8,9 @@
 | --- | --- | --- |
 | 语音问答 | `POST /api/chat?stream=1` → `WS /api/chat_stream` | 先上传录音识别成文本,再连流式通道问答(两跳) |
 | 文字问答 | `WS /api/chat_stream` | 直接发文本,后端一条龙流式 LLM→TTS |
-| 唤醒词免按键 | `WS /api/wake` | 前端常驻推 16k int16 PCM,命中唤醒词自动回答(带问题走 `/api/chat_stream` 流式) |
+| 唤醒词免按键 | `WS /api/wake` | 前端常驻推 16k int16 PCM,命中唤醒词自动回答(带问题走 `/api/chat_stream` 流式);配 `wakeRequireWord`(或接入方 `/api/wake?requireWake=1`)可要求**每次提问都带唤醒词** |
 
-**流式问答(文字/语音)**:经 `WS /api/chat_stream` 后端一条龙 `LLM 流式增量 → 断句器切句 → 逐句 TTS → 顺序推 PCM`,首句音频不必等整段回复生成完,降低首字延迟。唤醒命中也走 `WS /api/chat_stream`(带问题时),只说唤醒词回固定问候仍走 `/api/tts`。
+**流式问答(文字/语音)**:经 `WS /api/chat_stream` 后端一条龙 `LLM 流式增量 → 断句器切句 → 逐句 TTS → 顺序推 PCM`,首句音频不必等整段回复生成完,降低首字延迟。回复文本分两路:**弹窗/字幕拿 LLM 完整回复**(`delta`/`done.replyText`),**语音只念 `speech.mode` 决定的播报文本**(默认只念含数字的片段,`done.speechText` 回带),见 `server/speech.js`。唤醒命中也走 `WS /api/chat_stream`(带问题时),只说唤醒词回固定问候仍走 `/api/tts`。
 
 ## 快速启动
 

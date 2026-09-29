@@ -35,8 +35,8 @@ node --check 文件.js       # 单个文件快速语法检查
 - `index.js` 路由 + 共享 WebSocketServer 入口；`/api/pets`(只读列表，列 `public/pets/*.{png,webp}` 及配对 `<名>.json`)。
 - `asr.js` / `tts.js` / `llm.js` 各 provider 分流（asr/tts: local 内网 HTTP vs online 百炼 WS；llm: `yuxi-runs`/`yuxi-chat` 语析 vs `openai-compatible`）。
 - `vad.js` Silero VAD（ONNX，模型在 `server/models/`）；`audio.js` 转码 webm→wav。
-- `wake.js` 流式开口段检测 + 唤醒词匹配 + 自动回答 + 语义化打断；`turn.js` 会话表(仅存 yuxi `thread_id`)+ 流式问答 LLM 调用；`timing.js` 链路耗时打点。
-- `stream.js` 流式问答管线 + `/api/chat_stream`（LLM 增量→断句→逐句 TTS→顺序推 PCM）；`sentence.js` 断句器 `SentenceBuffer`。
+- `wake.js` 流式开口段检测 + 唤醒词匹配 + 自动回答 + 语义化打断；`turn.js` 会话表(仅存 yuxi `thread_id`)+ 流式问答 LLM 调用；`speech.js` 显示文本 → 播报文本(精简)；`timing.js` 链路耗时打点。
+- `stream.js` 流式问答管线 + `/api/chat_stream`（LLM 增量→断句→逐句 TTS→顺序推 PCM，并按 `speech.js` 分流"显示文本/播报文本"）；`sentence.js` 断句器 `SentenceBuffer`。
 - `bailian.js` 阿里云百炼 WebSocket 客户端（ASR + TTS 共用握手/task 协议）。
 
 ## 代码结构（public/）
@@ -54,9 +54,11 @@ node --check 文件.js       # 单个文件快速语法检查
 - **TTS 边生成边播**：后端 `synthesizeStream` 返回 { promise, cancel }，先发 `meta` 再透传 PCM 块最后 `done`；前端拿 replyText 后连 `/api/tts` 流式合成，打断直接 close，后端 cancel。
 - **流式问答 `/api/chat_stream`**：文字/语音走它，后端一条龙 `llm.askStream` 增量 → `SentenceBuffer`(server/sentence.js)按标点/长度断句 → 逐句 `tts.synthesizeStream` 串行(一次一句)推 PCM。`meta` 必须在首个 PCM 字节前发；`/api/chat?stream=1` 只回 `userText`，由前端再连流式通道(避免 LLM 跑两遍)；唤醒命中带问题也走本通道(wake.js 的 answer 有 question 时只回 userText,前端 `_streamReply`);只说唤醒词回固定问候仍走 `/api/tts`。
 - **16k mono s16le 是唤醒/ASR 的音频契约**；TTS 输出按 `config.tts.sampleRate`（默认 24k）的 s16le。服务端（tts.js）与前端（TtsPlayer）都做**跨块 2 字节对齐**：流式块不保证偶数长度，直接 `new Int16Array(odd)` 会 RangeError/崩，务必 `usable & ~1` 取整后再转。`sampleRate/channels/bitsPerSample` 由 `/api/tts` 的 `meta` 下发，前后端需一致。
+- **显示文本 ≠ 播报文本**：`/api/chat_stream` 的 `delta` 与 `done.replyText` 是 LLM 完整回复（弹窗/字幕照全文显示），推给前端的 PCM 与 `done.speechText` 是 `config.speech.mode` 决定的播报文本。默认 `key-numbers`：`speech.js` 按标点切片只保留含数字的片段（纯叙述不念），整段没数字时 `stream.js` 兜底按句念完整回复（避免有问无声）；`full` 则播报=完整回复。改这条规则只动 `server/speech.js`（有 `test/speech.test.js` 兜着）。
+- **每次提问都要唤醒词**：`config.wakeRequireWord=true`（或接入方按连接 `?requireWake=1`，SDK 选项 `wakeRequireWord`）时 `wake.js` 命中唤醒词只回答本句、不置 `armed`（不开免唤醒词窗口），紧跟一个 `sleep` 事件让前端"已唤醒"指示复位；`armed` 只由手动唤醒（`wake_manual`）开启，保留兜底路径。
 - **唤醒回答**去掉唤醒词后只回 `userText`，由前端经 `/api/chat_stream` 流式问答(带 `sessionId` 即续 yuxi 多轮记忆)；ASR 异步且串行（classifying 标志防堆积）。
 - **唤醒窗口休眠时间**：WS `/api/wake` 的 `wake` 事件带 `timeoutSeconds`（窗口总秒数，来自配置 `wakeTimeout`），`sleep` 事件带 `idleSeconds`（实际静默秒数）。前端 SDK 透传为 `onWake(word, timeoutSeconds)` / `onSleep(idleSeconds)`，接入方可据此自行画倒计时/进度条。
-- **前端 SDK 的 `baseUrl` 与 `sessionId`**：WS 地址由 `http(s)`→`ws(s)` 自动转换，同源用 `location.host`，跨域部署传 baseUrl。`opts.sessionId` 传固定值则 /api/chat_stream 带上，后端据此续 yuxi 多轮记忆；不传则每次单轮。
+- **前端 SDK 的 `baseUrl` 与 `sessionId`**：WS 地址由 `http(s)`→`ws(s)` 自动转换，同源用 `location.host`，跨域部署传 baseUrl。`opts.sessionId` 传固定值则 /api/chat_stream 带上，后端据此续 yuxi 多轮记忆；不传则每次单轮。`opts.newSessionPerAsk=true` 则 `_streamReply` 每轮提问前换一个 sessionId（"每次提问都是新对话"，后端各建一条 yuxi thread）。
 - **SDK 事件订阅**：`agent.on(name, fn)` / `agent.off(name, fn)` 供附加层(宠物/数字人)监听 `stateChange/wake/sleep/reply/error/interrupt/audioStream/audioLevel/userText`，不占用构造时的 `opts.onXxx` 回调。
 - **口型音量源**：首选 `agent.on('audioLevel')`(SDK 按 PCM 被排入的播放时刻排程算 RMS，不依赖浏览器音频图实现)，其次 `agent.analyser`；**别再回到"另建 AudioContext 去接 agent.audioStream"**——那种接法拿到的常是静音。AnalyserNode 必须**串在播放主通路**(`_out → analyser → destination/_dest`)，挂 gain=0 旁路会被 Chromium 优化掉、恒读 128。
 - **宠物运行时**：`VoicePet`(public/voicepet.js) 读 `public/pets/<名>.json` 的状态定义按坐标裁帧播放；`talk` 用音频包络在 `from..to` 帧间选口型；`speaking` 的结束必须走 `_maybeFinish`(流式 TTS 句间有合成空窗，不能因 `_activeSources` 暂时为空就结束)；时间推进一律用真实 `delta`，禁止"每帧 += 常量"；`/api/pets` 为只读，勿改成写盘接口。

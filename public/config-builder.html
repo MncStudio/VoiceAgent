@@ -111,7 +111,19 @@
       <label>唤醒窗口 wakeTimeout(秒)</label>
       <div>
         <input type="number" id="wakeTimeout" data-key="wakeTimeout">
-        <div class="hint">命中唤醒词后这段时间内免唤醒词直接问答;窗口超时自动休眠。</div>
+        <div class="hint">命中唤醒词后这段时间内免唤醒词直接问答;窗口超时自动休眠。开了下面的 wakeRequireWord 时,只剩手动唤醒按钮会用到这个窗口。</div>
+      </div>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="wakeRequireWord"> 每次提问都要唤醒词</label>
+      <div>
+        <div class="hint">开启(=wakeRequireWord: true):命中唤醒词只回答本句,下一个问题仍要带唤醒词。大屏/公共场景避免把环境里的闲聊当成问题;手动唤醒按钮的免唤醒词窗口仍保留。</div>
+      </div>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="speechFull"> 语音播报完整回复</label>
+      <div>
+        <div class="hint">不勾(=speech.mode: key-numbers,默认):弹窗/字幕显示完整回复,语音只念含数字的片段(大屏数字人推荐)。勾选(=full)则语音与弹窗一致,完整念完。</div>
       </div>
     </div>
     <div class="row">
@@ -392,6 +404,12 @@ function collect() {
 
   if (!obj.wakeWords || !obj.wakeWords.length) obj.wakeWords = ['你好小智'];
 
+  // 每次提问都要唤醒词(不勾则省略,后端默认 false=保留"窗口内免唤醒词")
+  if ($('#wakeRequireWord').checked) obj.wakeRequireWord = true;
+
+  // 语音播报文本:默认只念含数字的片段;勾选则与弹窗一样念完整回复
+  obj.speech = { mode: $('#speechFull').checked ? 'full' : 'key-numbers' };
+
   if ($('#vadOn').checked) {
     const v = {};
     [['threshold', '#vadThreshold'], ['startFrames', '#vadStart'], ['endFrames', '#vadEnd']].forEach(([k, sel]) => {
@@ -511,6 +529,8 @@ function importJson(text) {
   });
   [['asr', obj.asr && obj.asr.provider], ['llm', obj.llm && obj.llm.provider], ['tts', obj.tts && obj.tts.provider]]
     .forEach(([g, p]) => setProvider(g, p));
+  $('#wakeRequireWord').checked = !!obj.wakeRequireWord;
+  $('#speechFull').checked = !!(obj.speech && obj.speech.mode === 'full');
   if (obj.vad) {
     $('#vadOn').checked = true;
     $('#vadBox').classList.remove('hide');

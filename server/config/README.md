@@ -35,7 +35,9 @@ npm start                 # 固定加载 server/config/local.json
 |---|---|---|
 | `profile` | string | 仅作标识，固定为 `local` 便于人读；不影响加载逻辑（启动固定加载 `local.json`，除非 `VA_PROFILE` 显式指定别的文件）。 |
 | `wakeWords` | string[] | 唤醒词列表，可配多个，命中任意一个即唤醒，支持同音容错。 |
-| `wakeTimeout` | number（秒） | 唤醒窗口总秒数：命中唤醒词后这段时间内免唤醒词连续问答；随 `/api/wake` 的 `wake` 事件 `timeoutSeconds` 下发给前端。 |
+| `wakeTimeout` | number（秒） | 唤醒窗口总秒数：命中唤醒词后这段时间内免唤醒词连续问答；随 `/api/wake` 的 `wake` 事件 `timeoutSeconds` 下发给前端。开了 `wakeRequireWord` 后只有手动唤醒会用到这个窗口。 |
+| `wakeRequireWord` | boolean | 全局默认 `false`；`true` = **每次提问都要带唤醒词**（接入方也可按连接用 `/api/wake?requireWake=1` 单独开启，大屏就是这种用法）：命中唤醒词只回答本句、不开免唤醒词窗口（紧接着回 `sleep` 让前端复位），没说唤醒词的话整段丢弃。大屏/公共场景避免把环境闲聊当问题。缺省 `false`（窗口内免唤醒词）。 |
+| `speech` | object | 播报文本策略：`{ "mode": "key-numbers" \| "full" }`。`key-numbers`（缺省）= 弹窗/字幕显示完整回复、语音只念含数字的片段（整段没数字时兜底念完整回复）；`full` = 语音与显示一致，完整念完。见 [../speech.js](../speech.js)。 |
 | `wakeStopWords` | string[] | 语义化打断词：唤醒窗口内识别到这些词（如"别说了/暂停"）即静默停止正在播的回答（不再"一听到声音就断"）。缺省用内置默认表。 |
 | `wakeStopMaxLen` | number | 命中打断词前的归一化文本长度上限，挡住正常长句问题，避免把"为什么停止"当打断。缺省 6。 |
 | `vad` | object | 唤醒检测的 VAD 判定参数：`threshold`(语音概率阈值)、`startFrames`(连续语音帧数判开口)、`endFrames`(连续静音帧数判段结束)。缺省 0.55/3/15。门槛越低越不丢开头字、但环境噪音误触发多;越高反之。 |
