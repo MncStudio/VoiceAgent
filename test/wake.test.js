@@ -197,46 +197,6 @@ async function feed(det, text) {
     det.close();
   }
 
-
-{
-  const { looksLikeEcho } = require('../server/wake')._test;
-  const speaking = '今天到货计划 1 条，到货清单 0 条。需要看这条计划的供应商、预计到货时间和物料明细吗？';
-  // 回声（它自己在念的内容，即使 ASR 有错字/截断）要判为回声
-  assert.strictEqual(looksLikeEcho('今天到货计划一条到货清单零条', speaking), true, '截断回声');
-  assert.strictEqual(looksLikeEcho('需要看这条计划的供应商预计到货时间', speaking), true, '片段回声');
-  assert.strictEqual(looksLikeEcho('今天到货计划1条，到货清单0条。', speaking), true, '整段回声');
-  // 用户在说话（内容不同）不能判成回声
-  assert.strictEqual(looksLikeEcho('海绵胎有多少个', speaking), false, '用户提问');
-  assert.strictEqual(looksLikeEcho('帮我看一下库存', speaking), false, '用户提问2');
-  assert.strictEqual(looksLikeEcho('嗯', speaking), false, '太短不判');
-
-  // classify：播报中识别到用户说话 → 直接发 interrupt（不需要唤醒词）
-  const events = [];
-  const det = makeDetector(events, true);
-  det.playingText = speaking;
-  await feed(det, '今天到货计划一条到货清单零条'); // 回声 → 忽略
-  assert.deepStrictEqual(events, [], '回声不该打断');
-  await feed(det, '海绵胎有多少个'); // 用户说话 → 打断（也不当问题，仍要唤醒词才能提问）
-  assert.deepStrictEqual(events, [{ type: 'interrupt' }], '说话即打断');
-  // 唤醒词仍然优先：带唤醒词就是走唤醒流程（打断 + 问候 + 开窗口）
-  events.length = 0;
-  await feed(det, '你好小智 库存多少');
-  assert.deepStrictEqual(events.map((e) => e.type), ['wake', 'answer', 'sleep']);
-  // 不播报时不打断（playingText 为空）
-  events.length = 0;
-  det.playingText = '';
-  await feed(det, '海绵胎有多少个');
-  assert.deepStrictEqual(events, [], '没在播就不打断');
-  // 可关掉
-  const off = makeDetector([], true);
-  off.bargeIn = false;
-  off.playingText = speaking;
-  await feed(off, '海绵胎有多少个');
-  assert.deepStrictEqual(off.events || [], []);
-  det.close();
-  off.close();
-}
-
   console.log('wake.test.js 唤醒词/每次提问带唤醒词 全部通过');
 })().catch((e) => {
   console.error(e);

@@ -57,8 +57,6 @@
       this.onError = null;          // (msg:string) TTS 失败/连接异常
       this.onDone = null;           // () 可选,合成完成回调(playStream 下带 replyText)
       this.onReplyDelta = null;     // (text) 可选,流式字幕增量
-      this.onSpeakingText = null;   // (fullText) 可选,正在念的文本变化(上报唤醒通道做回声判定)
-      this.speakingText = '';       // 正在念的文本
       this.onAudioStream = null;    // (stream:MediaStream) 可选,播放流创建后回调
       this.onAudioLevel = null;     // (level:0..1) 可选,按实际播放时刻回调 PCM 短时音量
     }
@@ -104,7 +102,6 @@
     _setPlaying(v) {
       if (this._playing === v) return;
       this._playing = v;
-      if (!v) this.speakingText = ''; // 播完/被打断:清掉"正在念什么"
       if (this.onStateChange) this.onStateChange(v);
     }
 
@@ -173,7 +170,6 @@
         return;
       }
       if (gen !== this._playGen) return;        // await 期间被打断,丢弃
-      this.speakingText = String(text || '');   // 唤醒通道据此分辨"它自己在念的话"
       this._setPlaying(true);                   // 播放会话开始
       const url = this._baseUrl
         ? this._baseUrl.replace(/^http/, 'ws') + '/api/tts'
@@ -224,17 +220,9 @@
           const msg = JSON.parse(e.data);
           if (msg.type === 'start') return;
           if (msg.type === 'meta') this._applyMeta(msg);
-          else if (msg.type === 'delta') {
-            this.speakingText += msg.text || ''; // 累积正在念的文本，供回声判定/说话即打断
-            if (this.onReplyDelta) this.onReplyDelta(msg.text);
-            if (this.onSpeakingText) this.onSpeakingText(this.speakingText);
-          }
+          else if (msg.type === 'delta') { if (this.onReplyDelta) this.onReplyDelta(msg.text); }
           else if (msg.type === 'error') { if (this.onError) this.onError(msg.message); }
-          else if (msg.type === 'done') {
-            if (msg.replyText) this.speakingText = msg.replyText;
-            ws.close();
-            if (this.onDone) this.onDone(msg.replyText);
-          }
+          else if (msg.type === 'done') { ws.close(); if (this.onDone) this.onDone(msg.replyText); }
           return;
         }
         this._consumePcm(gen, ctx, e.data);
@@ -316,12 +304,7 @@
 
       this._tts = new TtsPlayer(this.baseUrl);
       this._tts.onError = (msg) => this._emit('error', 'TTS 失败:' + msg);
-      this._tts.onStateChange = (playing) => {
-        this._notifyWakePlaying(playing);
-        this._refreshState();
-      };
-      // 正在念的文本增长时（流式）也同步给唤醒通道，节流到 ~1s 一次
-      this._tts.onSpeakingText = () => this._notifyWakePlaying(true);
+      this._tts.onStateChange = () => this._refreshState();
       this._tts.onAudioStream = (stream) => this._emit('audioStream', stream);
       this._tts.onAudioLevel = (level) => this._emit('audioLevel', level);
 
@@ -364,23 +347,6 @@
     }
 
     get wakeActive() { return this._wakeOn; }
-
-    // 把"正在念的文本"告诉 /api/wake：后端据此分辨收音里是不是它自己的回声，
-    // 从而做到"识别到不是它自己在说的话就打断"（外放不会被自己的声音打断）。
-    _notifyWakePlaying(playing) {
-      const ws = this._wakeWs;
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      const now = Date.now();
-      if (playing && now - (this._playingSentAt || 0) < 900) return; // 节流：文本在增长，不必每片都发
-      this._playingSentAt = now;
-      try {
-        if (playing) {
-          ws.send(JSON.stringify({ type: 'playing', text: this._tts.speakingText || '' }));
-        } else {
-          ws.send(JSON.stringify({ type: 'idle' }));
-        }
-      } catch {}
-    }
 
     // 生成一个全新的会话键(不落盘):配合 newSessionPerAsk 每轮提问单独开一段对话。
     _makeSessionId() {
