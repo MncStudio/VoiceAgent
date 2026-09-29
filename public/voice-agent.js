@@ -10,7 +10,6 @@
 //     sessionId: '…',        // 可选;接入方传固定值则后端据此续 yuxi 多轮记忆(thread_id);不传则每次单轮
 //     newSessionPerAsk: true,// 可选;每次提问都换一个 sessionId("每次提问都是新对话",不带上一轮上下文)
 //     wakeRequireWord: true, // 可选;每次提问都要带唤醒词(后端 ?requireWake=1):命中只答本句,不开免唤醒词窗口
-//     bargeIn: true,         // 可选;默认 true=外放时"让路":检测到有人说话就把 TTS 压静音,让唤醒词被听清(见 _bargeInTick)
 //     baseUrl: '…',          // 可选;后端地址(如 http://192.168.1.5:3000),跨域/独立部署时填;缺省同源相对路径
 //     autoWake: true,        // 可选;true 则构造后自动开始唤醒监听
 //     onUserText(text),      // 识别到用户说的话(三路都触发)
@@ -51,7 +50,6 @@
       this._levelTimers = new Set(); // 按 PCM 实际播放时刻调度的口型音量
       this._levelEndTimer = null;
       this._playing = false;
-      this._ducked = false;
       this._out = null;             // 播放汇流 Gain(扬声器 + MediaStreamAudioDestination)
       this._dest = null;            // 播放输出流,暴露给外部驱动口型同步等
       this._analyser = null;        // 播放分析器(串在实际输出主通路中,供口型同步读音量)
@@ -116,20 +114,6 @@
       }
     }
 
-    // "让路":把播放音量压到 0(或恢复)。用 setTargetAtTime 做短渐变避免"咔"声。
-    // 外放时麦克风会收到自己的声音(回声),后端 ASR 听不清用户喊的唤醒词→打断不了;压静音后
-    // 唤醒通道就没有回声了,能听清唤醒词。恢复由 VoiceAgent._endYield 负责。
-    setDucked(on) {
-      this._ducked = !!on;
-      const out = this._out;
-      const ctx = this._audioCtx;
-      if (!out || !ctx) return; // 还没建音频图:只记状态
-      try {
-        out.gain.cancelScheduledValues(ctx.currentTime);
-        out.gain.setTargetAtTime(on ? 0 : 1, ctx.currentTime, 0.03);
-      } catch {}
-    }
-
     stop() {
       this._playGen++;              // 旧 gen 全部失效
       if (this._ttsWs) { try { this._ttsWs.close(); } catch {} this._ttsWs = null; }
@@ -162,8 +146,7 @@
         const delay = Math.max(0, (startTime + offset / sampleRate - ctx.currentTime) * 1000);
         const timer = setTimeout(() => {
           this._levelTimers.delete(timer);
-          // 让路（静音）期间不驱动口型，免得"没声音还在动嘴"
-          if (gen === this._playGen && this.onAudioLevel) this.onAudioLevel(this._ducked ? 0 : rms);
+          if (gen === this._playGen && this.onAudioLevel) this.onAudioLevel(rms);
         }, delay);
         this._levelTimers.add(timer);
       }
@@ -187,7 +170,6 @@
         return;
       }
       if (gen !== this._playGen) return;        // await 期间被打断,丢弃
-      if (this._out && !this._ducked) this._out.gain.value = 1; // 别带着上一次的"让路静音"起播
       this._setPlaying(true);                   // 播放会话开始
       const url = this._baseUrl
         ? this._baseUrl.replace(/^http/, 'ws') + '/api/tts'
@@ -227,7 +209,6 @@
         return;
       }
       if (gen !== this._playGen) return;        // await 期间被打断,丢弃
-      if (this._out && !this._ducked) this._out.gain.value = 1; // 别带着上一次的"让路静音"起播
       this._setPlaying(true);
       const ws = new WebSocket(wsUrl);
       ws.binaryType = 'arraybuffer';
@@ -306,14 +287,6 @@
       this.newSessionPerAsk = !!opts.newSessionPerAsk;
       // 每次提问都要唤醒词:连 /api/wake 时带 ?requireWake=1,后端命中唤醒词只回答本句、不开免唤醒词窗口。
       this.wakeRequireWord = !!opts.wakeRequireWord;
-      // 外放回声下的"让路":默认开;关掉就退回"边播边听"(外放时基本听不清唤醒词)
-      this._bargeIn = opts.bargeIn !== false;
-      this._yielding = false;   // 是否正在让路(已把 TTS 压静音)
-      this._yieldStart = 0;
-      this._yieldUntil = 0;
-      this._echoFloor = 0;      // 正在播时的回声底噪(滑动平均)
-      this._roomFloor = 0;      // 让路期间的环境底噪
-      this._graceUntil = 0;     // 起播后的底噪建立期
       this.baseUrl = String(opts.baseUrl || '').replace(/\/+$/, ''); // 跨域部署:后端地址(如 http://host:port)
 
       this._on = {
@@ -331,7 +304,7 @@
 
       this._tts = new TtsPlayer(this.baseUrl);
       this._tts.onError = (msg) => this._emit('error', 'TTS 失败:' + msg);
-      this._tts.onStateChange = (playing) => { this._onTtsPlayingChange(playing); this._refreshState(); };
+      this._tts.onStateChange = () => this._refreshState();
       this._tts.onAudioStream = (stream) => this._emit('audioStream', stream);
       this._tts.onAudioLevel = (level) => this._emit('audioLevel', level);
 
@@ -374,68 +347,6 @@
     }
 
     get wakeActive() { return this._wakeOn; }
-
-    // ============ 外放回声下的"让路"(barge-in) ============
-    // 现象:外放时数字人的回答被麦克风采回(回声),用户喊的唤醒词被自己的声音盖住,
-    //       后端 ASR 认不出来 → 打断不了;戴耳机没有回声所以正常。
-    // 办法:检测到"有人说话"(麦克风电平明显高于正在播的回声底噪)就把 TTS 压到静音,
-    //       此时麦克风里只剩用户的声音,唤醒通道能听清唤醒词 → 后端命中后会发 interrupt 停播;
-    //       说完(电平回落)自动恢复播放。判定全用相对量,不会因外放回声自激成"忽大忽小"。
-    static get BARGE_IN() {
-      return { graceMs: 700, ratio: 1.8, minLevel: 0.02, holdMs: 900, maxMs: 3000, release: 2.2 };
-    }
-
-    _onTtsPlayingChange(playing) {
-      if (playing) {
-        this._echoFloor = 0;
-        this._graceUntil = Date.now() + VoiceAgent.BARGE_IN.graceMs;
-      } else if (this._yielding) {
-        this._endYield();
-      }
-    }
-
-    /** 每个麦克风块调一次:level=该块 RMS(0..1) */
-    _bargeInTick(level, now = Date.now()) {
-      if (!this._bargeIn) return;
-      const P = VoiceAgent.BARGE_IN;
-      const lv = Number.isFinite(level) ? level : 0;
-      if (!this._tts.playing) {
-        if (this._yielding) this._endYield();
-        this._echoFloor = 0;
-        this._roomFloor = 0;
-        return;
-      }
-      if (this._yielding) {
-        // 让路期间没有回声:用环境底噪判断用户是否还在说
-        this._roomFloor = this._roomFloor ? this._roomFloor * 0.9 + lv * 0.1 : lv;
-        if (lv > Math.max(this._roomFloor * P.release, P.minLevel)) this._yieldUntil = now + P.holdMs;
-        if (now - this._yieldStart > P.maxMs || now > this._yieldUntil) this._endYield();
-        return;
-      }
-      if (now < this._graceUntil) {
-        // 起播头几百毫秒:先把回声底噪量出来,不触发
-        this._echoFloor = this._echoFloor ? this._echoFloor * 0.9 + lv * 0.1 : lv;
-        return;
-      }
-      this._echoFloor = this._echoFloor ? this._echoFloor * 0.92 + lv * 0.08 : lv;
-      if (lv > Math.max(this._echoFloor * P.ratio, P.minLevel)) this._startYield(now);
-    }
-
-    _startYield(now) {
-      this._yielding = true;
-      this._yieldStart = now;
-      this._yieldUntil = now + VoiceAgent.BARGE_IN.holdMs;
-      this._roomFloor = 0;
-      this._tts.setDucked(true);
-      if (this._on) this._emit('bargeIn', true);
-    }
-
-    _endYield() {
-      this._yielding = false;
-      this._roomFloor = 0;
-      this._tts.setDucked(false);
-      if (this._on) this._emit('bargeIn', false);
-    }
 
     // 生成一个全新的会话键(不落盘):配合 newSessionPerAsk 每轮提问单独开一段对话。
     _makeSessionId() {
@@ -564,14 +475,8 @@
       this._procNode = procNode;
 
       procNode.onaudioprocess = (e) => {
-        const f = e.inputBuffer.getChannelData(0);
-        // 顺手算块电平:驱动"让路"(外放回声下让唤醒通道听清唤醒词)
-        if (this._bargeIn) {
-          let sum = 0;
-          for (let i = 0; i < f.length; i++) sum += f[i] * f[i];
-          this._bargeInTick(Math.sqrt(sum / (f.length || 1)));
-        }
         if (ws && ws.readyState === WebSocket.OPEN) {
+          const f = e.inputBuffer.getChannelData(0);
           const i16 = new Int16Array(f.length);
           for (let i = 0; i < f.length; i++) i16[i] = Math.max(-1, Math.min(1, f[i])) * 32767;
           ws.send(i16.buffer);
