@@ -3,7 +3,8 @@
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
+const readline = require('readline');
 const express = require('express');
 const multer = require('multer');
 const { WebSocketServer } = require('ws');
@@ -124,21 +125,140 @@ app.use((err, req, res, next) => {
 
 // 唤醒词检测:WebSocket,前端常驻推 16k int16 PCM 块,命中唤醒词回 {"type":"wake","word":...}
 const server = http.createServer(app);
-// 端口占用/监听失败:友好提示,避免 Node 裸崩。ws 会把 server 的 error 转发到
-// WebSocketServer 实例,所以 server 和 wss 都挂同一 handler,并先于 new WSS 注册。
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---- 端口被占用:先问一句,再决定要不要结束旧进程 ----
+// VA_PORT_KILL=ask(默认,终端里交互询问) | yes(不问直接结束,给脚本/CI) | no(只报错退出)
+const PORT_KILL_MODE = String(process.env.VA_PORT_KILL || 'ask').toLowerCase();
+
+// 列出监听该端口的进程 PID(lsof / netstat,取不到返回空数组)
+function listPortPids(port) {
+  return new Promise((resolve) => {
+    if (process.platform === 'win32') {
+      execFile('netstat', ['-ano', '-p', 'TCP'], (err, stdout) => {
+        if (err || !stdout) return resolve([]);
+        const pids = [];
+        for (const line of String(stdout).split(/\r?\n/)) {
+          const cols = line.trim().split(/\s+/);
+          if (cols.length < 5 || cols[3] !== 'LISTENING' || !cols[1].endsWith(`:${port}`)) continue;
+          const pid = Number(cols[4]);
+          if (Number.isInteger(pid) && pid > 0) pids.push(pid);
+        }
+        resolve([...new Set(pids)]);
+      });
+      return;
+    }
+    execFile('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], (err, stdout) => {
+      const pids = String(stdout || '').split(/\s+/).map(Number)
+        .filter((n) => Number.isInteger(n) && n > 0);
+      resolve([...new Set(pids)]);
+    });
+  });
+}
+
+// 占用进程的命令行,便于用户判断该不该结束它
+function describePid(pid) {
+  return new Promise((resolve) => {
+    if (process.platform === 'win32') return resolve('');
+    execFile('ps', ['-o', 'command=', '-p', String(pid)], (err, stdout) => resolve(String(stdout || '').trim()));
+  });
+}
+
+// 终端里问 y/N;EOF / Ctrl-D 等关闭输入都按"不结束"处理
+function askKillConfirm(question) {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; rl.close(); resolve(v); } };
+    rl.question(question, (answer) => done(/^(y|yes)$/i.test(String(answer).trim())));
+    rl.on('close', () => done(false));
+  });
+}
+
+// SIGTERM → 等端口释放(最多 2s)→ 仍占着就 SIGKILL → 再等 1s
+async function killPortListeners(port) {
+  const self = process.pid;
+  for (const pid of (await listPortPids(port)).filter((p) => p !== self)) {
+    try { process.kill(pid, 'SIGTERM'); } catch {}
+  }
+  for (let i = 0; i < 20; i++) {
+    await sleep(100);
+    if (!(await listPortPids(port)).length) return true;
+  }
+  for (const pid of (await listPortPids(port)).filter((p) => p !== self)) {
+    try { process.kill(pid, 'SIGKILL'); } catch {}
+  }
+  for (let i = 0; i < 10; i++) {
+    await sleep(100);
+    if (!(await listPortPids(port)).length) return true;
+  }
+  return false;
+}
+
+// 端口占用时的完整处理:打印占用者 → 询问 → 结束旧进程 → 重新监听
+async function handlePortInUse() {
+  const port = config.server.port;
+  console.error(`端口 ${port} 已被占用。`);
+  const pids = await listPortPids(port);
+  if (!pids.length) {
+    console.error('  没能识别出占用进程(系统缺 lsof?),请手动停掉旧进程或改 server.port。');
+    process.exit(1);
+  }
+  for (const pid of pids) {
+    const cmd = await describePid(pid);
+    console.error(`  占用中: PID ${pid}${cmd ? `  ${cmd}` : ''}`);
+  }
+
+  let kill = false;
+  if (PORT_KILL_MODE === 'yes') {
+    kill = true;
+  } else if (PORT_KILL_MODE === 'no' || !process.stdin.isTTY) {
+    console.error('  当前不是可交互终端(或 VA_PORT_KILL=no),没有结束任何进程;');
+    console.error('  请手动停掉旧进程后重试,或改 server.port。');
+    process.exit(1);
+  } else {
+    kill = await askKillConfirm('  结束上述进程并继续启动? [y/N] ');
+  }
+  if (!kill) {
+    console.error('  已取消,没有结束任何进程。');
+    process.exit(1);
+  }
+  if (!(await killPortListeners(port))) {
+    console.error(`  进程已结束,但端口 ${port} 仍被占用,请手动排查后重试。`);
+    process.exit(1);
+  }
+  console.log(`  端口 ${port} 已释放,继续启动…`);
+  server.listen(config.server.port);
+}
+
+// 端口占用/监听失败:友好提示,避免 Node 裸崩。server 上先挂 handler(须早于 new WSS),
+// wss 只转发同一个 error,所以它单独挂一个"忽略 EADDRINUSE"的兜底 handler,免得同一错误
+// 触发两次询问/两次退出。
+let portRetried = false;
 const onListenError = (err) => {
   if (err.code === 'EADDRINUSE') {
-    console.error(`端口 ${config.server.port} 已被占用,请先停掉旧进程或改 server.port`);
-  } else {
-    console.error('服务启动失败:', err.message);
+    if (portRetried) {
+      // 结束旧进程后又被别人抢走,别再问一遍,直接明确退出
+      console.error(`端口 ${config.server.port} 释放后又被占用,请手动排查后重试。`);
+      process.exit(1);
+    }
+    portRetried = true;
+    handlePortInUse().catch((e) => { console.error('服务启动失败:', e.message); process.exit(1); });
+    return;
   }
+  console.error('服务启动失败:', err.message);
   process.exit(1);
 };
 server.on('error', onListenError);
+const onWssError = (err) => {
+  if (err.code === 'EADDRINUSE') return; // 已由 server 的 onListenError 处理
+  console.error('服务启动失败:', err.message);
+  process.exit(1);
+};
 // 共享一个 WebSocketServer(不带 path):wake 与 tts 的 path 各自在 connection 里过滤。
 // 若分别用两个带 path 的 WSS 挂同一 server,先注册的会把不匹配请求直接回 400。
 const wss = new WebSocketServer({ server });
-wss.on('error', onListenError);
+wss.on('error', onWssError);
 // 唤醒 / 流式问答 / 流式 TTS 都需要真实配置,首次运行(无配置)时不挂载,只留配置引导。
 if (!FIRST_RUN) {
   wake.attach(wss, config.wakeWords || [], config.wakeTimeout, config.vad, config.wakeStopWords, config.wakeStopMaxLen, config.wakeRequireWord);
@@ -194,7 +314,7 @@ if (!FIRST_RUN) {
   });
 }
 
-server.listen(config.server.port, () => {
+function onListening() {
   if (FIRST_RUN) {
     // "没有就报错":明确告知缺哪个配置,再进入引导网页
     const miss = `server/config/${config.__profile}.json`;
@@ -216,7 +336,13 @@ server.listen(config.server.port, () => {
     if (lan) console.log(`局域网访问:    http://${lan}:${config.server.port}`);
     console.log('配置生成/修改:打开 /config-builder.html 生成并下载 local.json,替换 server/config/local.json 后重启进程生效(可直接 npm start)。');
   }
-});
+}
+
+// 首次监听;端口被占用时由 handlePortInUse() 结束后再监听一次。
+// 注意用常驻 'listening' 监听器,别用 listen(port, cb):cb 是 once,首次 EADDRINUSE
+// 不会消费掉它,第二次 listen 会再注册一个,成功时启动横幅会打印两遍。
+server.on('listening', onListening);
+server.listen(config.server.port);
 
 // 尝试用系统默认浏览器打开配置网页(macOS open / win start / linux xdg-open),失败静默。
 function openBrowser(url) {

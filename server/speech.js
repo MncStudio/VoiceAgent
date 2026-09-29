@@ -20,10 +20,11 @@
 //
 // 纯逻辑无 IO，可单测（test/speech.test.js）。
 
-const DEFAULT_MODE = 'key-numbers';
-// 'key-numbers' 规则精简（快、零成本，离线可用）
-// 'llm'         播报文本交给**单独一条 LLM 链路**改写（角色提示：数字人播报员，不念表格/代码）——最自然
-// 'full'        不精简，播报 = 完整回复
+// 默认 'full'：**数字人与对话框用同一个 LLM，LLM 答什么数字人就念什么**（只清掉 HTML/Markdown 排版噪声，
+// 不会把表格竖线、# 号念出来）。另外两种模式按需在配置里开：
+//   'key-numbers' 规则精简：只念「数字+单位」的关键片段（大段结论不念，快且短）
+//   'llm'         再起一条独立 LLM 链路把回答改写成口语（角色=数字人播报员，20~50 字）
+const DEFAULT_MODE = 'full';
 const MODES = new Set(['key-numbers', 'llm', 'full']);
 
 /** 归一化模式：未配置/写错都落回默认值 */

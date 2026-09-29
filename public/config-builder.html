@@ -121,9 +121,9 @@
       </div>
     </div>
     <div class="row">
-      <label><input type="checkbox" id="speechFull"> 语音播报完整回复</label>
+      <label><input type="checkbox" id="speechKeyNumbers"> 语音只念关键数字(精简)</label>
       <div>
-        <div class="hint">不勾(=speech.mode: key-numbers,默认):弹窗/字幕显示完整回复,语音只念含数字的片段(大屏数字人推荐)。勾选(=full)则语音与弹窗一致,完整念完。</div>
+        <div class="hint">两项都不勾 = 默认 full：数字人与对话框用同一个 LLM，LLM 答什么就念什么（只清掉 HTML/Markdown 排版噪声）。勾此项(=key-numbers)则语音只念「数字+单位」的片段。</div>
       </div>
     </div>
     <div class="row">
@@ -409,9 +409,9 @@ function collect() {
   if ($('#wakeRequireWord').checked) obj.wakeRequireWord = true;
 
   // 语音播报文本：默认规则只念关键数字；勾选"单独 LLM 改写"=llm；再勾"完整回复"=full（覆盖前两者）
-  const speechMode = $('#speechFull').checked
-    ? 'full'
-    : ($('#speechLlmOn').checked ? 'llm' : 'key-numbers');
+  const speechMode = $('#speechLlmOn').checked
+    ? 'llm'
+    : ($('#speechKeyNumbers').checked ? 'key-numbers' : 'full');
   obj.speech = Object.assign({}, obj.speech, { mode: speechMode });
   if (speechMode !== 'llm') delete obj.speech.summary;
 
@@ -546,7 +546,7 @@ function importJson(text) {
   [['asr', obj.asr && obj.asr.provider], ['llm', obj.llm && obj.llm.provider], ['tts', obj.tts && obj.tts.provider]]
     .forEach(([g, p]) => setProvider(g, p));
   $('#wakeRequireWord').checked = !!obj.wakeRequireWord;
-  $('#speechFull').checked = !!(obj.speech && obj.speech.mode === 'full');
+  $('#speechKeyNumbers').checked = !!(obj.speech && obj.speech.mode === 'key-numbers');
   const speechLlmOn = !!(obj.speech && obj.speech.mode === 'llm');
   $('#speechLlmOn').checked = speechLlmOn;
   $('#speechLlmBox').classList.toggle('hide', !speechLlmOn);
@@ -587,10 +587,10 @@ function boot() {
   $('#vadOn').addEventListener('change', () => $('#vadBox').classList.toggle('hide', !$('#vadOn').checked));
   $('#speechLlmOn').addEventListener('change', () => {
     $('#speechLlmBox').classList.toggle('hide', !$('#speechLlmOn').checked);
-    if ($('#speechLlmOn').checked) $('#speechFull').checked = false; // 两者互斥，llm 优先
+    if ($('#speechLlmOn').checked) $('#speechKeyNumbers').checked = false; // 互斥：llm 优先
   });
-  $('#speechFull').addEventListener('change', () => {
-    if ($('#speechFull').checked) { $('#speechLlmOn').checked = false; $('#speechLlmBox').classList.add('hide'); }
+  $('#speechKeyNumbers').addEventListener('change', () => {
+    if ($('#speechKeyNumbers').checked) { $('#speechLlmOn').checked = false; $('#speechLlmBox').classList.add('hide'); }
   });
   $('#downloadBtn').addEventListener('click', download);
   $('#copyBtn').addEventListener('click', copyJson);

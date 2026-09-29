@@ -10,7 +10,7 @@
 | 文字问答 | `WS /api/chat_stream` | 直接发文本,后端一条龙流式 LLM→TTS |
 | 唤醒词免按键 | `WS /api/wake` | 前端常驻推 16k int16 PCM,命中唤醒词自动回答(带问题走 `/api/chat_stream` 流式);配 `wakeRequireWord`(或接入方 `/api/wake?requireWake=1`)可要求**每次提问都带唤醒词** |
 
-**流式问答(文字/语音)**:经 `WS /api/chat_stream` 后端一条龙 `LLM 流式增量 → 断句器切句 → 逐句 TTS → 顺序推 PCM`,首句音频不必等整段回复生成完,降低首字延迟。回复文本分两路:**弹窗/字幕拿 LLM 完整回复**(`delta`/`done.replyText`);**语音只念 `speech.mode` 决定的播报文本**(`done.speechText` 回带):默认 `key-numbers` 用规则只念「数字+单位」的关键片段,`llm` 则用**另一条独立 LLM 链路**(`speech.summary`,角色=数字人播报员、不念表格/代码)改写成口语,`full` 完整念。见 `server/speech.js` 与 `server/stream.js`。
+**流式问答(文字/语音)**:经 `WS /api/chat_stream` 后端一条龙 `LLM 流式增量 → 断句器切句 → 逐句 TTS → 顺序推 PCM`,首句音频不必等整段回复生成完,降低首字延迟。回复文本分两路:**弹窗/字幕拿 LLM 完整回复**(`delta`/`done.replyText`);**语音只念 `speech.mode` 决定的播报文本**(`done.speechText` 回带):默认 `full`——**数字人与对话框用同一个 LLM,LLM 答什么数字人就念什么**(只清掉 HTML/Markdown 排版噪声);另可选 `key-numbers`(规则只念「数字+单位」)与 `llm`(再起一条独立链路改写成口语)。见 `server/speech.js` 与 `server/stream.js`。
 
 ## 快速启动
 

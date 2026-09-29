@@ -28,6 +28,7 @@ node --check 文件.js       # 单个文件快速语法检查
 
 - 字段说明见 `server/config/README.md`；真实值放 `server/config/local.json`（含 API key，已被 gitignore 排除），不要提交。
 - 配置选择：日常直接 `npm start` 自动选（见下条）；`VA_PROFILE` 仅在多配置并存需显式指定时用。唤醒词在配置 `wakeWords`（可配多个）、唤醒窗口 `wakeTimeout`（秒，窗口内免唤醒词直接问答）。
+- **端口被占用会先问你**：`npm start` 撞 `server.port`（默认 3000）时，`index.js` 用 `lsof`/`netstat` 列出占用 PID 和命令行，在终端里问 `结束上述进程并继续启动? [y/N]`；答 `y` 先 SIGTERM、2 秒不退再 SIGKILL，端口释放后自动继续启动。非交互环境（stdio 不是 TTY、脚本/CI）不询问也不杀，只报错退出。`VA_PORT_KILL=yes` 不问直接结束（脚本用），`=no` 关掉询问；`=ask` 是默认。
 - **配置固定为 `server/config/local.json`，缺失不崩**：日常 `npm start` 直接加载它（想并存多套，把文件改名后 `VA_PROFILE=<名字> npm start` 指向 `{名字}.json`）。找不到时导出带 `__missing:true` 的兜底配置，`index.js` 进入**配置引导模式**（控制台报错 + 自动打开配置生成页 `/`；生成器是纯前端，生成并下载 `local.json` 放进 `server/config/` 后重启；引导端口兜底 3000，可用 `VA_PORT` 覆盖、`VA_NO_OPEN` 关闭自动开浏览器）；三个环节（asr/llm/tts）的 `provider` 字段彼此独立，可任意混搭，不以档位强绑定。
 
 ## 代码结构（server/）
@@ -55,8 +56,9 @@ node --check 文件.js       # 单个文件快速语法检查
 - **流式问答 `/api/chat_stream`**：文字/语音走它，后端一条龙 `llm.askStream` 增量 → `SentenceBuffer`(server/sentence.js)按标点/长度断句 → 逐句 `tts.synthesizeStream` 串行(一次一句)推 PCM。`meta` 必须在首个 PCM 字节前发；`/api/chat?stream=1` 只回 `userText`，由前端再连流式通道(避免 LLM 跑两遍)；唤醒命中带问题也走本通道(wake.js 的 answer 有 question 时只回 userText,前端 `_streamReply`);只说唤醒词回固定问候仍走 `/api/tts`。
 - **16k mono s16le 是唤醒/ASR 的音频契约**；TTS 输出按 `config.tts.sampleRate`（默认 24k）的 s16le。服务端（tts.js）与前端（TtsPlayer）都做**跨块 2 字节对齐**：流式块不保证偶数长度，直接 `new Int16Array(odd)` 会 RangeError/崩，务必 `usable & ~1` 取整后再转。`sampleRate/channels/bitsPerSample` 由 `/api/tts` 的 `meta` 下发，前后端需一致。
 - **显示文本 ≠ 播报文本**：`/api/chat_stream` 的 `delta` 与 `done.replyText` 是 LLM 完整回复（弹窗/字幕照全文显示），推给前端的 PCM 与 `done.speechText` 是 `config.speech.mode` 决定的播报文本。三选一：
-  - `key-numbers`（缺省，规则）：`speech.js` 只留「数字+单位」的关键片段（表格行/ID/日期不念）；整段没有则退回纯数字，再退回完整回复。
-  - `llm`（推荐，角色改写）：主回答完整后 `stream.js` 的 `_speakSummary` 用**另一条独立 LLM 链路**（`config.speech.summary`，可不同 provider/key/模型）带 `speech.js` 的 `buildSummaryPrompt`（数字人播报员、禁止表格/代码/Markdown）改写成 20~50 字口语；失败自动退回规则精简。
+  - `full`（缺省，本项目当前选择）：数字人与对话框**用同一个 LLM，LLM 答什么就念什么**（只清 HTML/Markdown 排版噪声）。
+  - `key-numbers`（可选，规则）：`speech.js` 只留「数字+单位」的关键片段（表格行/ID/日期不念）；整段没有则退回纯数字，再退回完整回复。
+  - `llm`（可选，额外一条链路）：主回答完整后 `stream.js` 的 `_speakSummary` 用**另一条独立 LLM 链路**（`config.speech.summary`，可不同 provider/key/模型）带 `speech.js` 的 `buildSummaryPrompt`（数字人播报员、禁止表格/代码/Markdown）改写成 20~50 字口语；失败自动退回规则精简。
   - `full`：播报 = 完整回复。
   - 规则改动只动 `server/speech.js`（`test/speech.test.js` 兜着）；管线改 `stream.js`（`test/stream-speech.test.js` 兜着，含 llm 模式与失败回退）。
 - **每次提问都要唤醒词**：`config.wakeRequireWord=true`（或接入方按连接 `?requireWake=1`，SDK 选项 `wakeRequireWord`）时 `wake.js` 命中唤醒词只回答本句、不置 `armed`（不开免唤醒词窗口），紧跟一个 `sleep` 事件让前端"已唤醒"指示复位；`armed` 只由手动唤醒（`wake_manual`）开启，保留兜底路径。
