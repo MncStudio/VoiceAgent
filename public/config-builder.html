@@ -121,6 +121,12 @@
       </div>
     </div>
     <div class="row">
+      <label><input type="checkbox" id="wakeFuzzyOn" checked> 唤醒词模糊容错(口音)</label>
+      <div>
+        <div class="hint">开启(=wakeFuzzyMatch: true，缺省)：除字面与拼音外，再做音节级模糊（声母或韵母相同即算半像，首音节必须一致）。现场实测「你要抄本/你好超本/你好超板」这类不同音误识别就是靠它叫醒的。取消勾选则只保留字面+拼音两层。</div>
+      </div>
+    </div>
+    <div class="row">
       <label>跟随窗口 wakeFollowUpTimeout(秒) <span class="opt">(可选)</span></label>
       <div>
         <input type="number" id="wakeFollowUpTimeout" data-key="wakeFollowUpTimeout" placeholder="15">
@@ -414,6 +420,9 @@ function collect() {
   // 每次提问都要唤醒词(不勾则省略,后端默认 false=保留"窗口内免唤醒词")
   if ($('#wakeRequireWord').checked) obj.wakeRequireWord = true;
 
+  // 唤醒词模糊容错：不勾则显式关掉（后端缺省就是 true）
+  if (!$('#wakeFuzzyOn').checked) obj.wakeFuzzyMatch = false;
+
   // 语音播报文本：默认规则只念关键数字；勾选"单独 LLM 改写"=llm；再勾"完整回复"=full（覆盖前两者）
   // 语音播报文本：默认 full（同一个 LLM，LLM 答什么数字人就念什么）；可勾"只念关键数字"精简
   obj.speech = { mode: $('#speechKeyNumbers').checked ? 'key-numbers' : 'full' };
@@ -539,6 +548,7 @@ function importJson(text) {
   [['asr', obj.asr && obj.asr.provider], ['llm', obj.llm && obj.llm.provider], ['tts', obj.tts && obj.tts.provider]]
     .forEach(([g, p]) => setProvider(g, p));
   $('#wakeRequireWord').checked = !!obj.wakeRequireWord;
+  $('#wakeFuzzyOn').checked = obj.wakeFuzzyMatch !== false;
   $('#speechKeyNumbers').checked = !!(obj.speech && obj.speech.mode === 'key-numbers');
   if (obj.vad) {
     $('#vadOn').checked = true;

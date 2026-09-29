@@ -60,6 +60,57 @@ function findSubseq(syl, sub) {
   return -1;
 }
 
+// ---- 音节级模糊容错（口音 / ASR 误识别）----
+// ASR 常把唤醒词听歪：「你好超宝」→「你要抄本 / 你好超本 / 你好超板 / 你好小宝」——
+// 声母对韵母错、或韵母对声母错。逐音节要求完全一致就永远叫不醒，这里给"半像"也认：
+//   声母相同 +0.5，韵母相同 +0.5；每个音节至少 0.5（不能有完全不搭的音节），
+//   整体平均 ≥ 0.75，且**首音节必须完全一致**（例如必须以「你」开头），以此压住误触发。
+const INITIALS = [
+  'zh', 'ch', 'sh', 'b', 'p', 'm', 'f', 'd', 't', 'n', 'l', 'g', 'k', 'h',
+  'j', 'q', 'x', 'r', 'z', 'c', 's', 'y', 'w',
+];
+
+/** 音节拆成 {initial, final}；零声母（a/o/e 开头）initial 为空 */
+function splitSyllable(syl) {
+  const s = String(syl || '').toLowerCase();
+  for (const ini of INITIALS) {
+    if (s.startsWith(ini)) return { initial: ini, final: s.slice(ini.length) };
+  }
+  return { initial: '', final: s };
+}
+
+/** 两个音节的相似度：1=完全一致，0.5=声母或韵母相同，0=不搭 */
+function syllableScore(a, b) {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  const pa = splitSyllable(a);
+  const pb = splitSyllable(b);
+  let score = 0;
+  if (pa.initial === pb.initial) score += 0.5;
+  if (pa.final === pb.final) score += 0.5;
+  return score;
+}
+
+const FUZZY_MIN_SYLLABLE = 0.5; // 每个音节的最低分（不允许完全不像的音节）
+const FUZZY_MIN_AVG = 0.75; // 整条唤醒词的平均分阈值
+
+/** 模糊子序列查找：返回起始下标，未命中 -1 */
+function fuzzyFindSubseq(syl, sub) {
+  if (!sub.length || syl.length < sub.length) return -1;
+  for (let i = 0; i + sub.length <= syl.length; i++) {
+    if (syl[i] !== sub[0]) continue; // 首音节必须完全一致
+    let sum = 0;
+    let ok = true;
+    for (let j = 0; j < sub.length; j++) {
+      const sc = syllableScore(syl[i + j], sub[j]);
+      if (sc < FUZZY_MIN_SYLLABLE) { ok = false; break; }
+      sum += sc;
+    }
+    if (ok && sum / sub.length >= FUZZY_MIN_AVG) return i;
+  }
+  return -1;
+}
+
 // 环形缓冲:保留最近 PAD_SAMPLES 个样本,作为开口前/段尾的静音 padding。
 class Ring {
   constructor(n) {
@@ -84,7 +135,7 @@ class Ring {
 }
 
 class WakeDetector {
-  constructor(wakeWords, onEvent, wakeTimeoutMs, vad = {}, stopWords, stopMaxLen, requireWake = false, followUpMs = 0) {
+  constructor(wakeWords, onEvent, wakeTimeoutMs, vad = {}, stopWords, stopMaxLen, requireWake = false, followUpMs = 0, fuzzyMatch = true) {
     this.wakeWords = wakeWords.map(normalize).filter(Boolean);
     this.wakeSyllables = this.wakeWords.map(toSyllables); // 拼音匹配用,构造时预计算一次
     // 打断词可配(config.wakeStopWords 覆盖默认),每个归一化 + 拼音预处理,供 matchStop 用。
@@ -98,6 +149,8 @@ class WakeDetector {
     // 单独配（默认 15s），不能复用 wakeTimeout（大屏配了 300s，会把环境闲聊都当问题）。
     this.followUpMs = followUpMs > 0 ? followUpMs : 15000;
     this.armedTimeoutMs = this.wakeTimeoutMs; // 当前窗口时长（手动唤醒=wakeTimeout，跟随=followUp）
+    // 音节级模糊容错（口音/ASR 误识别）：默认开，可用 config.wakeFuzzyMatch=false 关掉
+    this.fuzzy = fuzzyMatch !== false;
     this.onEvent = onEvent; // 回调(type, payload):answer=回答、wake=命中唤醒词、sleep=已休眠
     this.wakeTimeoutMs = wakeTimeoutMs || 300000; // 唤醒窗口时长,默认 5 分钟
     // VAD 开口/静音判定(config.vad 可覆盖)。门槛太低环境噪音误触发多,
@@ -143,6 +196,20 @@ class WakeDetector {
       if (idx >= 0) {
         const w = this.wakeWords[i];
         return { word: w, rest: (n.slice(0, idx) + n.slice(idx + w.length)).trim() };
+      }
+    }
+    // 模糊匹配:口音/ASR 把唤醒词听歪(你要抄本/你好超本/你好超板/你好小宝…)时兜底。
+    // 同样按音节窗口映射回字符区间剥词。
+    if (this.fuzzy) {
+      for (let i = 0; i < this.wakeWords.length; i++) {
+        const sub = this.wakeSyllables[i];
+        if (!sub.length) continue;
+        const idx = fuzzyFindSubseq(syl, sub);
+        if (idx >= 0) {
+          const w = this.wakeWords[i];
+          console.log(`[wake] 模糊命中「${w}」← 识别为「${orig.trim()}」`);
+          return { word: w, rest: (n.slice(0, idx) + n.slice(idx + w.length)).trim() };
+        }
       }
     }
     return null;
@@ -376,7 +443,7 @@ class WakeDetector {
 // requireWake=true 时每次提问都要带唤醒词(命中只答本句,不开窗口),见 WakeDetector。
 // 接入方也可按连接用 `?requireWake=1` 只对自己的连接开这个模式(大屏就是这种用法):
 // 配置是全局默认,查询参数是单连接覆盖,判定与执行都在服务端。
-function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen, requireWake = false, followUpSec = 0) {
+function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen, requireWake = false, followUpSec = 0, fuzzyMatch = true) {
   const words = Array.isArray(wakeWords) ? wakeWords : [];
   const timeoutMs = (wakeTimeoutSec && wakeTimeoutSec > 0 ? wakeTimeoutSec : 300) * 1000;
   wss.on('connection', (ws, req) => {
@@ -386,7 +453,7 @@ function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen,
     const detector = new WakeDetector(words, (type, payload) => {
       if (ws.readyState !== ws.OPEN) return;
       ws.send(JSON.stringify({ type, ...payload }));
-    }, timeoutMs, vad, stopWords, stopMaxLen, requireWakeForConn, followUpSec > 0 ? followUpSec * 1000 : 0);
+    }, timeoutMs, vad, stopWords, stopMaxLen, requireWakeForConn, followUpSec > 0 ? followUpSec * 1000 : 0, fuzzyMatch);
     // init 异步加载 ONNX 模型(数百 ms),消息到达时等它就绪再喂,避免丢帧
     const ready = detector.init().catch((e) => {
       console.error('[wake] 初始化失败:', e.message);
@@ -440,4 +507,4 @@ function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen,
 }
 
 // 导出 attach 供 index.js 挂载;WakeDetector 与纯文本匹配函数导出供测试(test/)用,无副作用。
-module.exports = { attach, WakeDetector, _test: { normalize, toSyllables, findSubseq } };
+module.exports = { attach, WakeDetector, _test: { normalize, toSyllables, findSubseq, syllableScore, fuzzyFindSubseq } };

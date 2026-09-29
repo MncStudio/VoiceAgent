@@ -59,6 +59,37 @@ assert.strictEqual(det.match('你好小志').word, '你好小智');
 
 console.log('wake.test.js 全部通过');
 
+// ---- 音节级模糊容错:口音 / ASR 误识别(现场实测报回来的) ----
+// 「你好超宝」被识别成 你要抄本 / 你好超本 / 你好超板 / 你好小宝 … 都要能叫醒。
+{
+  // 两个词：你好超宝（超/抄/曹/本/板 这条线）+ 你好小超（小 这条线，现场报过「你好小宝」）
+  const fuzzy = new WakeDetector(['你好超宝', '你好小超'], () => {}, 10000);
+  // 用户实测的三条 + 常见口音变体
+  assert.deepStrictEqual(fuzzy.match('你要抄本。1加1等于多少？'), { word: '你好超宝', rest: '1加1等于多少' });
+  assert.deepStrictEqual(fuzzy.match('你好，超本1加1等于多少？'), { word: '你好超宝', rest: '1加1等于多少' });
+  assert.deepStrictEqual(fuzzy.match('你好，超板1加1等于多少？'), { word: '你好超宝', rest: '1加1等于多少' });
+  assert.deepStrictEqual(fuzzy.match('你好小宝，库存多少'), { word: '你好小超', rest: '库存多少' });
+  assert.ok(fuzzy.match('你好超薄'), '同音字仍要命中');
+  assert.ok(fuzzy.match('你好抄报'), '同音字仍要命中');
+  // 不能因此误触(首音节必须一致 + 每音节至少半像 + 平均 0.75)
+  for (const t of [
+    '库存还有多少', '今天到货计划几条', '开始盘点', '帮我查一下库容利用率',
+    '你们发货了吗', '你好好干', '你要不要', '你好我是小王', '还有多少库存', '小曹你在吗',
+  ]) {
+    assert.strictEqual(fuzzy.match(t), null, `模糊匹配不该误触:${t}`);
+  }
+  // 关掉模糊(config.wakeFuzzyMatch=false)后只剩精确/拼音命中
+  const strict = new WakeDetector(['你好超宝'], () => {}, 10000, {}, undefined, undefined, false, 0, false);
+  assert.strictEqual(strict.match('你要抄本1加1等于多少'), null);
+  assert.ok(strict.match('你好超宝'));
+  // 音节相似度本身
+  const { syllableScore } = require('../server/wake')._test;
+  assert.strictEqual(syllableScore('bao', 'bao'), 1);
+  assert.strictEqual(syllableScore('bao', 'ben'), 0.5, '声母同、韵母不同 = 半像');
+  assert.strictEqual(syllableScore('hao', 'yao'), 0.5, '韵母同、声母不同 = 半像');
+  assert.strictEqual(syllableScore('bao', 'shi'), 0);
+}
+
 // ---- 每次提问都带唤醒词(config.wakeRequireWord) ----
 // classify 走 ASR(需要网络/ffmpeg),这里把 asr.recognizeBuffer 换成固定文本的桩,
 // 只验证"识别到这段话后唤醒器怎么决策"这一层纯逻辑。
