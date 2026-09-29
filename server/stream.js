@@ -4,6 +4,7 @@ const config = require('./config');
 const tts = require('./tts');
 const turn = require('./turn');
 const speech = require('./speech');
+const llm = require('./llm');
 const { SentenceBuffer } = require('./sentence');
 const { Timing } = require('./timing');
 
@@ -55,6 +56,7 @@ class StreamPipeline {
     this.active = null;    // 当前 tts.synthesizeStream 的 {promise, cancel}
     this.gen = 0;          // 管线世代:打断/新请求都 +1,旧异步续体全部失效
     this.llmController = null;
+    this.userText = '';    // 本轮用户问题(播报改写提示里要带)
     this.replyText = '';   // 完整回复(显示用)
     this.speechText = '';  // 实际播报文本(精简后,可能为空→走兜底)
     this.spokenAny = false;// 是否已产出过带单位的关键数字(正文播报)
@@ -73,6 +75,7 @@ class StreamPipeline {
   start(text) {
     if (!text) return;
     this.cancel(); // 取消上一轮(若有),gen++;开始新轮
+    this.userText = text;
     this.replyText = '';
     this.speechText = '';
     this.spokenAny = false;
@@ -101,8 +104,12 @@ class StreamPipeline {
         t.mark('LLM完成');
         this.replyText = replyText || '';
         this._flushTail(gen);
-        this._fallbackSpeakFull(gen);
-        this._waitDrain(gen, this.replyText);
+        if (this.speechMode === 'llm') {
+          this._speakSummary(gen); // 单独 LLM 链路改写播报文本，内部再 _waitDrain
+        } else {
+          this._fallbackSpeakFull(gen);
+          this._waitDrain(gen, this.replyText);
+        }
       })
       .catch((e) => {
         if (gen !== this.gen) return; // 打断导致的 reject,不报错
@@ -132,6 +139,7 @@ class StreamPipeline {
   _enqueueSpeech(gen, sentence) {
     if (gen !== this.gen) return;
     const mode = this.speechMode;
+    if (mode === 'llm') return; // 播报文本交给 _speakSummary 整段改写，这里不逐句播
     if (mode === 'full') {
       this.spokenAny = true;
       this.speechText += sentence;
@@ -146,6 +154,54 @@ class StreamPipeline {
       return;
     }
     if (plain) this.plainFallback.push(plain);
+  }
+
+  // speech.mode = 'llm'：主回答完整后，再走一条**单独的 LLM 链路**把显示文本改写成口语播报文本
+  // （角色提示见 speech.buildSummaryPrompt：数字人播报员、不念表格/代码/Markdown）；
+  // 显示文本(delta/done.replyText)保持完整不动，只有 TTS 用改写后的文本。
+  // 改写失败 → 退回规则精简(key-numbers) → 再不行播完整回复。
+  async _speakSummary(gen) {
+    if (gen !== this.gen) return;
+    const cfg = (config.speech && config.speech.summary) || null;
+    let spoken = '';
+    try {
+      const { system, user } = speech.buildSummaryPrompt(this.replyText, this.userText, cfg || {});
+      spoken = await llm.askOnce(user, { config: cfg || undefined, system });
+    } catch (e) {
+      console.warn('[chat_stream] 播报改写失败,退回规则精简:', e.message);
+    }
+    if (gen !== this.gen) return; // 改写期间被新提问/打断,丢弃
+    const clean = speech.stripMarkup(spoken || '');
+    if (clean) {
+      this.spokenAny = true;
+      this.speechText = clean;
+      for (const s of this._splitSentences(clean)) this._enqueue(gen, s);
+    } else if (!this._speakRuleBased(gen)) {
+      this._fallbackSpeakFull(gen);
+    }
+    this._waitDrain(gen, this.replyText);
+  }
+
+  // 规则精简兜底：优先带单位的数字片段，其次纯数字片段；都没有返回 false
+  _speakRuleBased(gen) {
+    const { withUnit, plain } = speech.speechParts(this.replyText, 'key-numbers');
+    const text = withUnit || plain;
+    if (!text) return false;
+    this.spokenAny = true;
+    this.speechText += text;
+    for (const s of this._splitSentences(text)) this._enqueue(gen, s);
+    return true;
+  }
+
+  // 一段播报文本 → 按句切开入队（复用断句器，保证 TTS 一句一句合成）
+  _splitSentences(text) {
+    const buf = new SentenceBuffer({
+      maxLen: config.llm?.maxSentenceLen || 80,
+      minLen: config.llm?.minSentenceLen || 5,
+    });
+    const parts = buf.push(String(text || ''));
+    parts.push(...buf.flush());
+    return parts.length ? parts : [String(text || '').trim()].filter(Boolean);
   }
 
   // 兜底(两级),避免"有问无声",也避免把表格行念一堆:

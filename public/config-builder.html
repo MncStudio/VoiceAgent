@@ -352,6 +352,7 @@ const GROUPS = {
   asr: ['paraformer-http', 'paraformer-ws'],
   llm: ['openai-compatible', 'yuxi-runs', 'yuxi-chat'],
   tts: ['cosyvoice-http', 'cosyvoice-ws'],
+  speechSummary: ['openai-compatible', 'yuxi-runs', 'yuxi-chat'],
 };
 
 function setProvider(group, provider) {
@@ -407,8 +408,12 @@ function collect() {
   // 每次提问都要唤醒词(不勾则省略,后端默认 false=保留"窗口内免唤醒词")
   if ($('#wakeRequireWord').checked) obj.wakeRequireWord = true;
 
-  // 语音播报文本:默认只念含数字的片段;勾选则与弹窗一样念完整回复
-  obj.speech = { mode: $('#speechFull').checked ? 'full' : 'key-numbers' };
+  // 语音播报文本：默认规则只念关键数字；勾选"单独 LLM 改写"=llm；再勾"完整回复"=full（覆盖前两者）
+  const speechMode = $('#speechFull').checked
+    ? 'full'
+    : ($('#speechLlmOn').checked ? 'llm' : 'key-numbers');
+  obj.speech = Object.assign({}, obj.speech, { mode: speechMode });
+  if (speechMode !== 'llm') delete obj.speech.summary;
 
   if ($('#vadOn').checked) {
     const v = {};
@@ -460,6 +465,14 @@ function validate(obj) {
   }
   need(tts.sampleRate > 0, 'tts.sampleRate 需大于 0');
 
+  const speech = P(obj, 'speech') || {};
+  if (speech.mode === 'llm') {
+    const sum = speech.summary || {};
+    need(sum.apiKey, 'speech.summary.apiKey 必填(语音播报走单独 LLM 时)');
+    if (sum.provider === 'openai-compatible') need(sum.baseUrl && sum.model, 'speech.summary.baseUrl / model 必填');
+    else need(sum.url && (sum.agentSlug || sum.agentId), 'speech.summary.url / agentSlug(或 agentId) 必填');
+  }
+
   if (/sk-|eyJ/.test(JSON.stringify(obj))) warns.push('检测到疑似密钥,请确认目标环境正确、文件不会被提交/外发。');
   return { errs, warns };
 }
@@ -473,6 +486,9 @@ function render() {
   obj.asr = obj.asr || {}; obj.asr.provider = currentProvider('asr');
   obj.llm = obj.llm || {}; obj.llm.provider = currentProvider('llm');
   obj.tts = obj.tts || {}; obj.tts.provider = currentProvider('tts');
+  if (obj.speech && obj.speech.mode === 'llm' && obj.speech.summary) {
+    obj.speech.summary.provider = currentProvider('speechSummary');
+  }
 
   const { errs, warns } = validate(obj);
   const issues = $('#issues');
@@ -531,6 +547,10 @@ function importJson(text) {
     .forEach(([g, p]) => setProvider(g, p));
   $('#wakeRequireWord').checked = !!obj.wakeRequireWord;
   $('#speechFull').checked = !!(obj.speech && obj.speech.mode === 'full');
+  const speechLlmOn = !!(obj.speech && obj.speech.mode === 'llm');
+  $('#speechLlmOn').checked = speechLlmOn;
+  $('#speechLlmBox').classList.toggle('hide', !speechLlmOn);
+  setProvider('speechSummary', (obj.speech && obj.speech.summary && obj.speech.summary.provider) || 'openai-compatible');
   if (obj.vad) {
     $('#vadOn').checked = true;
     $('#vadBox').classList.remove('hide');
@@ -558,13 +578,20 @@ function boot() {
     if (el) el.value = v;
   });
 
-  $$('#asrTabs, #llmTabs, #ttsTabs').forEach((tabs) => {
+  $$('#asrTabs, #llmTabs, #ttsTabs, #speechSummaryTabs').forEach((tabs) => {
     tabs.querySelectorAll('button').forEach((b) => {
       b.addEventListener('click', () => { setProvider(tabs.id.replace('Tabs', ''), b.dataset.provider); render(); });
     });
   });
 
   $('#vadOn').addEventListener('change', () => $('#vadBox').classList.toggle('hide', !$('#vadOn').checked));
+  $('#speechLlmOn').addEventListener('change', () => {
+    $('#speechLlmBox').classList.toggle('hide', !$('#speechLlmOn').checked);
+    if ($('#speechLlmOn').checked) $('#speechFull').checked = false; // 两者互斥，llm 优先
+  });
+  $('#speechFull').addEventListener('change', () => {
+    if ($('#speechFull').checked) { $('#speechLlmOn').checked = false; $('#speechLlmBox').classList.add('hide'); }
+  });
   $('#downloadBtn').addEventListener('click', download);
   $('#copyBtn').addEventListener('click', copyJson);
   $('#importFile').addEventListener('change', (e) => {

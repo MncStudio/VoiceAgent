@@ -4,7 +4,16 @@
 // 「弹窗/字幕显示完整回复,语音只念关键数字」这条规则全在 server/speech.js 里。
 // 运行:node test/speech.test.js
 const assert = require('assert');
-const { toSpeechText, normalizeMode, hasNumber, stripMarkup, DEFAULT_MODE } = require('../server/speech');
+const {
+  toSpeechText,
+  normalizeMode,
+  hasNumber,
+  stripMarkup,
+  speechParts,
+  buildSummaryPrompt,
+  DEFAULT_SUMMARY_SYSTEM,
+  DEFAULT_MODE,
+} = require('../server/speech');
 
 // ---- 模式归一化:未配置/写错都落回默认(默认=只播关键数字) ----
 assert.strictEqual(DEFAULT_MODE, 'key-numbers');
@@ -83,6 +92,32 @@ assert.strictEqual(stripMarkup('**库存** 12 件'), '库存 12 件');
 assert.strictEqual(toSpeechText('| 物料 | 数量 |\n| A | 12 件 |'), 'A 12 件。'); // 表头无数字不念,只念有数的那行
 assert.strictEqual(stripMarkup('见 [报表](http://x/report) 12 条'), '见 报表 12 条');
 assert.strictEqual(stripMarkup('```json\n{"a":1}\n```'), ''); // 纯代码块清完只剩空
+
+// ---- 'llm' 模式:播报文本由单独 LLM 链路改写,这里只测提示词组装 ----
+assert.strictEqual(normalizeMode('llm'), 'llm');
+assert.ok(/数字人播报员/.test(DEFAULT_SUMMARY_SYSTEM), '默认角色 = 数字人播报员');
+assert.ok(/表格/.test(DEFAULT_SUMMARY_SYSTEM) && /代码/.test(DEFAULT_SUMMARY_SYSTEM), '默认角色要禁止念表格/代码');
+{
+  const { system, user } = buildSummaryPrompt('| 项目 | 值 |\n| 库存总量 | 12,345 件 |', '库存还有多少');
+  assert.strictEqual(system, DEFAULT_SUMMARY_SYSTEM);
+  assert.ok(user.includes('用户问题：库存还有多少'), '提示里要带原问题');
+  assert.ok(user.includes('12,345'), '提示里要带完整回答供改写');
+  // 自定义角色提示可覆盖
+  const custom = buildSummaryPrompt('随便答一句', '问题', { system: '你是播报员,只念数字' });
+  assert.strictEqual(custom.system, '你是播报员,只念数字');
+  // 没问题/没回答也不报错
+  assert.ok(buildSummaryPrompt('', '').user.length > 0);
+}
+
+// ---- speechParts:withUnit / plain 两类片段(stream.js 按整段决定兜底) ----
+{
+  const p1 = speechParts('聚能医工知识库（kb_c0c1jyi65t） 无仓储数据。到货计划 0 条。');
+  assert.strictEqual(p1.withUnit, '到货计划 0 条。');
+  assert.ok(/kb/.test(p1.plain), `纯数字片段应含 ID：${p1.plain}`);
+  const p2 = speechParts('业务日期 2026-09-29。');
+  assert.strictEqual(p2.withUnit, '');
+  assert.ok(/2026-09-29/.test(p2.plain));
+}
 
 // ---- 边界 ----
 assert.strictEqual(toSpeechText(''), '');

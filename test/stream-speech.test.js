@@ -54,6 +54,11 @@ async function run(replyText) {
 }
 
 (async () => {
+  // 测试自己钉住播报模式：不能依赖开发机 server/config/local.json 里配了什么
+  // （比如本地把 speech.mode 改成 llm 后，用例会去打真实 LLM 而超时）。
+  const realSpeech = config.speech;
+  config.speech = { mode: 'key-numbers' };
+
   // ---- 1) 默认(key-numbers):显示完整,只念含数字的片段 ----
   const REPLY = '当前库存总量为 12,345 件，其中原材料 5,678 件，此外建议关注临期物料。';
   const SPOKEN = '当前库存总量为 12,345 件，其中原材料 5,678 件。';
@@ -112,6 +117,46 @@ async function run(replyText) {
     config.speech = { mode: prevMode || 'key-numbers' };
   }
 
+  // ---- 6) speech.mode = 'llm':播报文本走**单独一条 LLM 链路**改写,弹窗仍是完整回答 ----
+  const llm = require('../server/llm');
+  const prevSpeech = config.speech;
+  const prevAskOnce = llm.askOnce;
+  const SUMMARY = '库存总量一万两千三百四十五件，原材料五千六百七十八件。';
+  let sawSystem = '';
+  let sawModel = '';
+  llm.askOnce = async (user, opts) => {
+    sawSystem = opts.system || '';
+    sawModel = (opts.config && opts.config.model) || '';
+    assert.ok(/库存总量/.test(user), '改写输入要带主链路完整回答');
+    return SUMMARY;
+  };
+  config.speech = {
+    mode: 'llm',
+    summary: { provider: 'openai-compatible', baseUrl: 'http://summary.local/v1', model: 'summary-model', apiKey: 'k' },
+  };
+  try {
+    synthesized = stub(REPLY);
+    ws = await run(REPLY);
+    assert.ok(/数字人播报员/.test(sawSystem), `要用数字人播报员角色提示：${sawSystem.slice(0, 40)}`);
+    assert.ok(/不要念表格|表格/.test(sawSystem), '角色提示要禁止念表格/代码');
+    assert.strictEqual(sawModel, 'summary-model', '要走 speech.summary 这条独立链路（独立模型）');
+    assert.strictEqual(ws.json('delta').map((d) => d.text).join(''), REPLY, '弹窗/delta 仍是完整回答');
+    assert.strictEqual(ws.json('done')[0].replyText, REPLY, 'done.replyText 仍是完整回答');
+    assert.strictEqual(ws.json('done')[0].speechText, SUMMARY, 'done.speechText = 改写后的播报文本');
+    assert.deepStrictEqual(synthesized, [SUMMARY], 'TTS 只念改写后的文本');
+
+    // 改写失败 → 退回规则精简（不能因此没声音）
+    llm.askOnce = async () => { throw new Error('改写超时'); };
+    synthesized = stub(REPLY);
+    ws = await run(REPLY);
+    assert.deepStrictEqual(synthesized, [SPOKEN], '改写失败要退回规则精简');
+    assert.strictEqual(ws.json('done')[0].speechText, SPOKEN);
+  } finally {
+    llm.askOnce = prevAskOnce;
+    config.speech = prevSpeech;
+  }
+
+  config.speech = realSpeech; // 还原开发机配置
   console.log('stream-speech.test.js 全部通过');
 })().catch((e) => {
   console.error(e);

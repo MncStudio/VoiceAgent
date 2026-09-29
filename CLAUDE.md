@@ -54,7 +54,11 @@ node --check 文件.js       # 单个文件快速语法检查
 - **TTS 边生成边播**：后端 `synthesizeStream` 返回 { promise, cancel }，先发 `meta` 再透传 PCM 块最后 `done`；前端拿 replyText 后连 `/api/tts` 流式合成，打断直接 close，后端 cancel。
 - **流式问答 `/api/chat_stream`**：文字/语音走它，后端一条龙 `llm.askStream` 增量 → `SentenceBuffer`(server/sentence.js)按标点/长度断句 → 逐句 `tts.synthesizeStream` 串行(一次一句)推 PCM。`meta` 必须在首个 PCM 字节前发；`/api/chat?stream=1` 只回 `userText`，由前端再连流式通道(避免 LLM 跑两遍)；唤醒命中带问题也走本通道(wake.js 的 answer 有 question 时只回 userText,前端 `_streamReply`);只说唤醒词回固定问候仍走 `/api/tts`。
 - **16k mono s16le 是唤醒/ASR 的音频契约**；TTS 输出按 `config.tts.sampleRate`（默认 24k）的 s16le。服务端（tts.js）与前端（TtsPlayer）都做**跨块 2 字节对齐**：流式块不保证偶数长度，直接 `new Int16Array(odd)` 会 RangeError/崩，务必 `usable & ~1` 取整后再转。`sampleRate/channels/bitsPerSample` 由 `/api/tts` 的 `meta` 下发，前后端需一致。
-- **显示文本 ≠ 播报文本**：`/api/chat_stream` 的 `delta` 与 `done.replyText` 是 LLM 完整回复（弹窗/字幕照全文显示），推给前端的 PCM 与 `done.speechText` 是 `config.speech.mode` 决定的播报文本。默认 `key-numbers`：`speech.js` 按标点切片只保留含数字的片段（纯叙述不念），整段没数字时 `stream.js` 兜底按句念完整回复（避免有问无声）；`full` 则播报=完整回复。改这条规则只动 `server/speech.js`（有 `test/speech.test.js` 兜着）。
+- **显示文本 ≠ 播报文本**：`/api/chat_stream` 的 `delta` 与 `done.replyText` 是 LLM 完整回复（弹窗/字幕照全文显示），推给前端的 PCM 与 `done.speechText` 是 `config.speech.mode` 决定的播报文本。三选一：
+  - `key-numbers`（缺省，规则）：`speech.js` 只留「数字+单位」的关键片段（表格行/ID/日期不念）；整段没有则退回纯数字，再退回完整回复。
+  - `llm`（推荐，角色改写）：主回答完整后 `stream.js` 的 `_speakSummary` 用**另一条独立 LLM 链路**（`config.speech.summary`，可不同 provider/key/模型）带 `speech.js` 的 `buildSummaryPrompt`（数字人播报员、禁止表格/代码/Markdown）改写成 20~50 字口语；失败自动退回规则精简。
+  - `full`：播报 = 完整回复。
+  - 规则改动只动 `server/speech.js`（`test/speech.test.js` 兜着）；管线改 `stream.js`（`test/stream-speech.test.js` 兜着，含 llm 模式与失败回退）。
 - **每次提问都要唤醒词**：`config.wakeRequireWord=true`（或接入方按连接 `?requireWake=1`，SDK 选项 `wakeRequireWord`）时 `wake.js` 命中唤醒词只回答本句、不置 `armed`（不开免唤醒词窗口），紧跟一个 `sleep` 事件让前端"已唤醒"指示复位；`armed` 只由手动唤醒（`wake_manual`）开启，保留兜底路径。
 - **唤醒回答**去掉唤醒词后只回 `userText`，由前端经 `/api/chat_stream` 流式问答(带 `sessionId` 即续 yuxi 多轮记忆)；ASR 异步且串行（classifying 标志防堆积）。
 - **唤醒窗口休眠时间**：WS `/api/wake` 的 `wake` 事件带 `timeoutSeconds`（窗口总秒数，来自配置 `wakeTimeout`），`sleep` 事件带 `idleSeconds`（实际静默秒数）。前端 SDK 透传为 `onWake(word, timeoutSeconds)` / `onSleep(idleSeconds)`，接入方可据此自行画倒计时/进度条。

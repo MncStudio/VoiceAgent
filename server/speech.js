@@ -21,7 +21,10 @@
 // 纯逻辑无 IO，可单测（test/speech.test.js）。
 
 const DEFAULT_MODE = 'key-numbers';
-const MODES = new Set(['key-numbers', 'full']);
+// 'key-numbers' 规则精简（快、零成本，离线可用）
+// 'llm'         播报文本交给**单独一条 LLM 链路**改写（角色提示：数字人播报员，不念表格/代码）——最自然
+// 'full'        不精简，播报 = 完整回复
+const MODES = new Set(['key-numbers', 'llm', 'full']);
 
 /** 归一化模式：未配置/写错都落回默认值 */
 function normalizeMode(mode) {
@@ -174,7 +177,43 @@ function toSpeechText(text, mode) {
   return withUnit || plain;
 }
 
+// ==================== 播报文本改写（单独 LLM 链路） ====================
+// 语音播报单独走一条 LLM：给它"数字人播报员"的角色 + 硬约束（不念表格/代码/Markdown/编号），
+// 让它把主链路的完整回答改写成一句口语播报。对话框仍然显示主链路的完整回答（delta/replyText 不变）。
+// 提示词可用 config.speech.summary.system 覆盖；用户内容里带原问题，便于它判断哪些数字是关键。
+const DEFAULT_SUMMARY_SYSTEM = [
+  '你是仓储数据大屏上的数字人播报员，正在用语音跟现场同事说话。',
+  '把给你的这段系统回答改写成一句口语播报，要求：',
+  '1) 只说用户要的关键数字和结论，20~50 个字，最多两句；',
+  '2) 绝对不要念表格、字段名罗列、Markdown 标记（#、*、|）、代码、链接、编号列表；',
+  '3) 像跟同事说话一样自然，先给结论；数据查不到就直说“暂时查不到”；',
+  '4) 只输出要念的那句话，不要解释、不要前后缀、不要引号。',
+].join('\n');
+
+/**
+ * 组播报改写的提示词。
+ * @param {string} fullText 主链路完整回答（显示文本）
+ * @param {string} [question] 用户原问题
+ * @param {{system?: string}} [opts] system 可覆盖默认角色提示
+ * @returns {{system: string, user: string}}
+ */
+function buildSummaryPrompt(fullText, question, opts = {}) {
+  const system = String((opts && opts.system) || '').trim() || DEFAULT_SUMMARY_SYSTEM;
+  const user = [
+    question ? '用户问题：' + String(question).trim() : '',
+    '系统完整回答（供你改写，不要照抄）：',
+    String(fullText || '').trim(),
+    '',
+    '请只输出要播报的口语文本：',
+  ]
+    .filter((line) => line !== '')
+    .join('\n');
+  return { system, user };
+}
+
 module.exports = {
+  DEFAULT_SUMMARY_SYSTEM,
+  buildSummaryPrompt,
   DEFAULT_MODE,
   normalizeMode,
   toSpeechText,

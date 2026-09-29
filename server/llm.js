@@ -9,13 +9,42 @@ const { Timing } = require('./timing');
 // - yuxi-chat        : 语析 openapi chat(SSE 流式累加,context 是 thread_id)
 // context 由 /api/chat_stream 经 turn.js 在会话表中维护,实现多轮记忆。
 //
-// 只有 askStream 一种调用形态:onDelta(增量文本)逐段回调,只在外部中断时 reject;
-// 超时但已有部分文本仍 resolve(视为已生成)。供 /api/chat_stream 用。
+// 两种调用形态:
+// - askStream:主问答,onDelta(增量文本)逐段回调,只在外部中断时 reject;超时但已有部分文本仍 resolve。
+// - askOnce  :单轮一次性(不回调增量),给"播报文本改写"这类内部用途用——语音要单独一条 LLM 链路,
+//              带上"你是数字人播报员,不要念表格/代码"的角色提示,与主问答链路分开配置(speech.summary)。
+// 两者都支持按调用传 cfg(默认 config.llm),因此可以各用各的 provider/key/模型。
 
-async function askStream(query, context, onDelta, signal) {
-  if (config.llm.provider === 'openai-compatible') return askOpenAIStream(query, context, onDelta, signal);
-  if (config.llm.provider === 'yuxi-runs') return askYuxiRunsStream(query, context, onDelta, signal);
-  return askYuxiChatStream(query, context, onDelta, signal);
+async function askStream(query, context, onDelta, signal, cfg = config.llm) {
+  if (cfg.provider === 'openai-compatible') return askOpenAIStream(query, context, onDelta, signal, cfg);
+  if (cfg.provider === 'yuxi-runs') return askYuxiRunsStream(query, context, onDelta, signal, cfg);
+  return askYuxiChatStream(query, context, onDelta, signal, cfg);
+}
+
+/**
+ * 单轮一次性问答(非流式语义):返回纯文本,失败抛错。
+ * @param {string} text 用户内容
+ * @param {{config?: object, system?: string, signal?: AbortSignal}} [opts]
+ *   config 缺省用 config.llm;system 是角色/系统提示(openai-compatible 走 system 角色,
+ *   yuxi 没有独立 system 位,拼在输入前面)。
+ */
+async function askOnce(text, opts = {}) {
+  const cfg = opts.config || config.llm;
+  const q = String(text || '').trim();
+  if (!q) return '';
+  const system = String(opts.system || '').trim();
+  if (cfg.provider === 'openai-compatible') {
+    const history = system ? [{ role: 'system', content: system }] : [];
+    const r = await askOpenAIStream(q, history, null, opts.signal, cfg);
+    return String(r.text || '').trim();
+  }
+  const merged = system ? system + '\n\n' + q : q;
+  if (cfg.provider === 'yuxi-runs') {
+    const r = await askYuxiRunsStream(merged, undefined, null, opts.signal, cfg);
+    return String(r.text || '').trim();
+  }
+  const r = await askYuxiChatStream(merged, undefined, null, opts.signal, cfg);
+  return String(r.text || '').trim();
 }
 
 // 组合「外部打断信号」与「请求超时」到一个 AbortController。
@@ -41,23 +70,23 @@ function combineSignals(externalSignal, timeoutMs) {
 
 // ---------- DeepSeek / OpenAI 兼容 ----------
 // 流式:SSE 逐 delta.content 回调,返回最终消息数组 context。
-async function askOpenAIStream(query, messages, onDelta, signal) {
-  if (!config.llm.apiKey) {
-    throw new Error('DeepSeek API key 未配置(server/config/online.json 里 llm.apiKey 留空)');
+async function askOpenAIStream(query, messages, onDelta, signal, cfg = config.llm) {
+  if (!cfg.apiKey) {
+    throw new Error('LLM API key 未配置(llm.apiKey / speech.summary.apiKey 留空)');
   }
   const history = Array.isArray(messages) ? messages : [];
   const nextMessages = [...history, { role: 'user', content: query }];
 
-  const combined = combineSignals(signal, config.llm.timeoutMs);
+  const combined = combineSignals(signal, cfg.timeoutMs || 120000);
   let res;
   try {
-    res = await fetch(`${config.llm.baseUrl}/chat/completions`, {
+    res = await fetch(`${cfg.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.llm.apiKey}`,
+        Authorization: `Bearer ${cfg.apiKey}`,
       },
-      body: JSON.stringify({ model: config.llm.model, messages: nextMessages, stream: true }),
+      body: JSON.stringify({ model: cfg.model, messages: nextMessages, stream: true }),
       signal: combined.signal,
     });
   } catch (e) {
@@ -145,18 +174,18 @@ async function readOpenAIStream(body, onDelta) {
 // 再 POST /api/agent/runs 创建 run(拿 run_id),GET /api/agent/runs/{run_id}/events 拉 SSE。
 // SSE 里增量是 payload.items[].stream_event.type==='message_delta' 的 content,与 readYuxiSse 解析一致。
 // context 存 thread_id(多轮记忆),首次由建线程生成,后续沿用。
-async function askYuxiRunsStream(query, threadId, onDelta, signal) {
+async function askYuxiRunsStream(query, threadId, onDelta, signal, cfg = config.llm) {
   const t = new Timing('yuxi-runs');
-  const combined = combineSignals(signal, config.llm.timeoutMs || 120000);
+  const combined = combineSignals(signal, cfg.timeoutMs || 120000);
 
   // 首次无 thread_id:先建对话线程拿 id
   let tid = threadId;
   if (!tid) {
     try {
-      const cRes = await fetch(`${config.llm.url}/api/chat/thread`, {
+      const cRes = await fetch(`${cfg.url}/api/chat/thread`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.llm.apiKey}` },
-        body: JSON.stringify({ agent_id: config.llm.agentSlug, title: 'voiceagent' }),
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+        body: JSON.stringify({ agent_id: cfg.agentSlug, title: 'voiceagent' }),
         signal: combined.signal,
       });
       if (!cRes.ok) {
@@ -173,12 +202,12 @@ async function askYuxiRunsStream(query, threadId, onDelta, signal) {
 
   let res;
   try {
-    res = await fetch(`${config.llm.url}/api/agent/runs`, {
+    res = await fetch(`${cfg.url}/api/agent/runs`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.llm.apiKey}` },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
       body: JSON.stringify({
         query,
-        agent_slug: config.llm.agentSlug,
+        agent_slug: cfg.agentSlug,
         thread_id: tid,
         meta: { request_id: 'req-' + crypto.randomUUID(), attachment_file_ids: [] },
         image_content: null,
@@ -207,8 +236,8 @@ async function askYuxiRunsStream(query, threadId, onDelta, signal) {
 
   let result;
   try {
-    const evRes = await fetch(`${config.llm.url}/api/agent/runs/${runId}/events?verbose=false`, {
-      headers: { Accept: 'text/event-stream', Authorization: `Bearer ${config.llm.apiKey}` },
+    const evRes = await fetch(`${cfg.url}/api/agent/runs/${runId}/events?verbose=false`, {
+      headers: { Accept: 'text/event-stream', Authorization: `Bearer ${cfg.apiKey}` },
       signal: combined.signal,
     });
     if (!evRes.ok) {
@@ -233,19 +262,19 @@ async function askYuxiRunsStream(query, threadId, onDelta, signal) {
 // 返回 SSE:每行 data: 是独立 JSON,payload.items[].stream_event.type=message_delta
 // 的 content 是增量文本,逐条累加成完整回复;thread_id 由事件带出,存作多轮上下文。
 // 流式:onDelta(增量文本)逐段回调,返回 thread_id 当 context。
-async function askYuxiChatStream(query, threadId, onDelta, signal) {
+async function askYuxiChatStream(query, threadId, onDelta, signal, cfg = config.llm) {
   const t = new Timing('yuxi-chat');
-  const combined = combineSignals(signal, config.llm.timeoutMs || 90000);
+  const combined = combineSignals(signal, cfg.timeoutMs || 90000);
   let res;
   try {
     res = await fetch(
-      `${config.llm.url}/yuxi/openapi/v1/agents/${config.llm.agentId}/chat`,
+      `${cfg.url}/yuxi/openapi/v1/agents/${cfg.agentId}/chat`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.llm.apiKey}` },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
         body: JSON.stringify({
           input: query,
-          user: config.llm.userId || 'external-user-001',
+          user: cfg.userId || 'external-user-001',
           stream: true,
           ...(threadId ? { thread_id: threadId } : {}),
         }),
@@ -326,4 +355,4 @@ async function readYuxiSse(body, onDelta) {
   return { text, threadId };
 }
 
-module.exports = { askStream };
+module.exports = { askStream, askOnce };

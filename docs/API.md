@@ -122,7 +122,9 @@
 3. `{ "type": "delta", "text": "..." }`（LLM 增量，供流式字幕）与 一个或多个**二进制帧**（裸 s16le PCM）交错推送。
 4. `{ "type": "done", "replyText": "完整回复", "speechText": "实际播报的精简文本" }`（TTS 队列全部合成完才发），或 `{ "type": "error", "message": "..." }`。
 
-> **显示文本 ≠ 播报文本**：`delta` 与 `done.replyText` 始终是 LLM 完整回复（弹窗/字幕照全文显示）；推给前端的 PCM 与 `done.speechText` 是配置 `speech.mode` 决定的播报文本。默认 `key-numbers`：只念含数字的片段（"库存总量为 12,345 件，其中原材料 5,678 件，此外建议关注临期物料" → 只念带数字的两段；纯叙述不念），整段回复一个数字都没有时兜底按句念完整回复，避免"有问无声"。`speech.mode: "full"` 则播报=完整回复。
+> **显示文本 ≠ 播报文本**（`speech.mode` 三选一）：
+> - `llm`（推荐）：主回答完整后，后端用**另一条独立 LLM 链路**（`speech.summary`，可用不同 provider/key/模型）带「数字人播报员」角色提示把它改写成 20~50 字口语播报（明确禁止念表格/Markdown/代码/编号），TTS 只念这段；弹窗/字幕拿到的仍是完整回答。改写失败自动退回规则精简。
+> - `key-numbers`（缺省）：`delta` 与 `done.replyText` 始终是 LLM 完整回复（弹窗/字幕照全文显示）；推给前端的 PCM 与 `done.speechText` 是配置 `speech.mode` 决定的播报文本。默认 `key-numbers`：只念含数字的片段（"库存总量为 12,345 件，其中原材料 5,678 件，此外建议关注临期物料" → 只念带数字的两段；纯叙述不念），整段回复一个数字都没有时兜底按句念完整回复，避免"有问无声"。`speech.mode: "full"` 则播报=完整回复。
 
 打断：直接 `ws.close()`；后端取消 LLM 请求（abort SSE）、停当前合成、清空队列并复位断句器。
 
