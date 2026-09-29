@@ -15,7 +15,7 @@
 //     onUserText(text),      // 识别到用户说的话(三路都触发)
 //     onReply(text),         // 得到回复文本(已自动 TTS 播放)
 //     onReplyDelta(text),    // 流式回复增量(文字问答/唤醒带问题,随 LLM 生成逐段回调;用于实时字幕)
-//     onWake(word, timeoutSeconds),  // 命中唤醒词;timeoutSeconds=唤醒窗口总秒数
+//     onWake(word, timeoutSeconds, followUp),  // 命中唤醒词;timeoutSeconds=窗口总秒数,followUp=true 表示"只说唤醒词"后的等待提问窗口
 //     onSleep(idleSeconds),          // 唤醒窗口超时;idleSeconds=实际静默秒数
 //     onInterrupt(),         // 开口打断正在播的回答
 //     onStateChange(state),  // 状态变化:idle/starting/waiting-activation/listening/wake-active/sleep/recording/speaking
@@ -543,9 +543,9 @@
             this._emit('interrupt');
           }
           break;
-        case 'wake': // 命中唤醒词,进入唤醒窗口;timeoutSeconds=窗口总秒数
+        case 'wake': // 命中唤醒词,进入唤醒窗口;timeoutSeconds=窗口总秒数,followUp=是否"只说唤醒词"的等待提问窗口
           this._armed = true;
-          this._emit('wake', msg.word, msg.timeoutSeconds);
+          this._emit('wake', msg.word, msg.timeoutSeconds, !!msg.followUp);
           break;
         case 'sleep': // 唤醒窗口超时,已休眠;idleSeconds=实际静默秒数
           this._armed = false;

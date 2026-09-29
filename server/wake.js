@@ -147,7 +147,7 @@ class WakeDetector {
     this.requireWake = !!requireWake;
     // 只说唤醒词（没带问题）时开的"等你提问"短窗口：这段时间内直接说话即可，不用再说唤醒词。
     // 单独配（默认 15s），不能复用 wakeTimeout（大屏配了 300s，会把环境闲聊都当问题）。
-    this.followUpMs = followUpMs > 0 ? followUpMs : 15000;
+    this.followUpMs = followUpMs > 0 ? followUpMs : 5000; // 唤醒后"等你提问"的窗口（秒级，不问就自动关）
     this.armedTimeoutMs = this.wakeTimeoutMs; // 当前窗口时长（手动唤醒=wakeTimeout，跟随=followUp）
     // 音节级模糊容错（口音/ASR 误识别）：默认开，可用 config.wakeFuzzyMatch=false 关掉
     this.fuzzy = fuzzyMatch !== false;
@@ -381,9 +381,9 @@ class WakeDetector {
           return;
         }
         // 唤醒词同时也是"打断词"：说到唤醒词就停掉正在播的回答，再按有没有带问题分流。
-        this.onEvent('wake', { word: m.word, timeoutSeconds: Math.round(this.wakeTimeoutMs / 1000) });
         if (m.rest) {
           // 唤醒词 + 问题（一句话问完）：直接答，不开窗口 —— 环境闲聊不会被当问题。
+          this.onEvent('wake', { word: m.word, timeoutSeconds: Math.round(this.wakeTimeoutMs / 1000) });
           if (!this.requireWake) {
             this.armed = true;
             this.armedTimeoutMs = this.wakeTimeoutMs;
@@ -394,7 +394,14 @@ class WakeDetector {
           if (this.requireWake) this.onEvent('sleep', { idleSeconds: 0 });
           return;
         }
-        // 只说唤醒词：先打断在播的回答，再开一个短窗口等提问（窗口内直接说话即可）。
+        // 只说唤醒词：先打断在播的回答，再开一个"等你提问"的短窗口（默认 5s）。
+        // wake 事件里带的是**这个窗口**的秒数（不是 wakeTimeout），前端据此显示倒数；
+        // 窗口内问就直接答(_scheduleSleep 续期)，一直不问就超时发 sleep 关掉唤醒状态。
+        this.onEvent('wake', {
+          word: m.word,
+          timeoutSeconds: Math.round(this.followUpMs / 1000),
+          followUp: true,
+        });
         this.onEvent('interrupt');
         this.armed = true;
         this.armedTimeoutMs = this.followUpMs;
