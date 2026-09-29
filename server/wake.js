@@ -8,16 +8,13 @@ const { pinyin } = require('pinyin-pro'); // 拼音模糊匹配,兼容 ASR 同�
 // 唤醒检测:前端常驻推 16k mono int16 PCM 块,这里用流式 Silero VAD 判"开口段",
 // 段结束送 ASR,归一化文本后与配置的唤醒词匹配(字符精确 + 拼音模糊,兼容同音字误识别)。
 // 命中后**自动回答**:去掉唤醒词,剩余文本直接送 LLM→TTS,音频经 WS 回传前端播放(免按键)。
-// 命中唤醒词即进入"唤醒窗口"(config 的 wakeTimeout,秒):窗口内再说话不用带唤醒词,
-// 直接回答;窗口超时自动休眠,需重新说唤醒词。
-// 窗口内免唤醒词会误答环境里的闲聊,大屏场景要"每次提问都带唤醒词"时把 config.wakeRequireWord
-// 打开:命中唤醒词只回答本句,不开窗口(见 requireWake)。
+// 默认带问题的唤醒只回答本句；只说唤醒词时开短跟随窗口。
+// 显式关闭 requireWake 才会用 wakeTimeout 长窗口连续问答。
 // 唤醒词来自 server/config/{profile}.json 的 wakeWords,可配置多个、可改。
 
 // VAD 开口/静音判定参数(threshold/startFrames/endFrames)由 config.vad 配置,默认见构造函数。
 const PAD_SAMPLES = 4800; // 段前后各保留 300ms 静音,防止掐头去尾(VAD 判开口有滞后,100ms 不够,开头的短促音易被切)
 const MAX_SEG_SAMPLES = 5 * 16000; // 单段上限 5s,超时强制截断
-const WAKE_REPLY = '我在，请讲'; // 只说唤醒词、没带问题时的固定问候回复(不走 LLM,不写进多轮历史)
 
 // 语义化打断词:VAD 攒段 → ASR 识别后,文本命中这些词(且整段够短)才发 interrupt,
 // 让"别说了/暂停"这类指令能停播,而环境噪音/无关音不再打断。
@@ -111,6 +108,25 @@ function fuzzyFindSubseq(syl, sub) {
   return -1;
 }
 
+// 播报被麦克风采回时，ASR 得到的文本通常是播报句子的片段（可能有错字）。
+// 只在播放期间用它过滤回声；真正不同的用户话语仍可打断。
+function looksLikeEcho(text, spoken) {
+  const a = normalize(text || '');
+  const b = normalize(spoken || '');
+  if (a.length < 4 || b.length < 4) return false;
+  if (b.includes(a)) return true;
+  const pairs = (s) => {
+    const out = new Set();
+    for (let i = 0; i < s.length - 1; i++) out.add(s.slice(i, i + 2));
+    return out;
+  };
+  const heard = pairs(a);
+  const said = pairs(b);
+  let common = 0;
+  for (const pair of heard) if (said.has(pair)) common++;
+  return common / heard.size >= 0.6;
+}
+
 // 环形缓冲:保留最近 PAD_SAMPLES 个样本,作为开口前/段尾的静音 padding。
 class Ring {
   constructor(n) {
@@ -135,7 +151,7 @@ class Ring {
 }
 
 class WakeDetector {
-  constructor(wakeWords, onEvent, wakeTimeoutMs, vad = {}, stopWords, stopMaxLen, requireWake = false, followUpMs = 0, fuzzyMatch = true) {
+  constructor(wakeWords, onEvent, wakeTimeoutMs, vad = {}, stopWords, stopMaxLen, requireWake = true, followUpMs = 0, fuzzyMatch = true) {
     this.wakeWords = wakeWords.map(normalize).filter(Boolean);
     this.wakeSyllables = this.wakeWords.map(toSyllables); // 拼音匹配用,构造时预计算一次
     // 打断词可配(config.wakeStopWords 覆盖默认),每个归一化 + 拼音预处理,供 matchStop 用。
@@ -147,18 +163,19 @@ class WakeDetector {
     this.requireWake = !!requireWake;
     // 只说唤醒词（没带问题）时开的"等你提问"短窗口：这段时间内直接说话即可，不用再说唤醒词。
     // 单独配（默认 15s），不能复用 wakeTimeout（大屏配了 300s，会把环境闲聊都当问题）。
-    this.followUpMs = followUpMs > 0 ? followUpMs : 8000; // 唤醒后"等你提问"的窗口（秒级，按静默计；不问就自动关）
-    this.armedTimeoutMs = this.wakeTimeoutMs; // 当前窗口时长（手动唤醒=wakeTimeout，跟随=followUp）
+    this.followUpMs = followUpMs > 0 ? followUpMs : 15000; // 单独唤醒后安静等待用户思考、提问
     // 音节级模糊容错（口音/ASR 误识别）：默认开，可用 config.wakeFuzzyMatch=false 关掉
     this.fuzzy = fuzzyMatch !== false;
     this.onEvent = onEvent; // 回调(type, payload):answer=回答、wake=命中唤醒词、sleep=已休眠
     this.wakeTimeoutMs = wakeTimeoutMs || 300000; // 唤醒窗口时长,默认 5 分钟
+    this.armedTimeoutMs = this.wakeTimeoutMs; // 当前窗口时长（手动唤醒=wakeTimeout，跟随=followUp）
     // VAD 开口/静音判定(config.vad 可覆盖)。门槛太低环境噪音误触发多,
     // 门槛太高开口判定滞后、开头第一个字易被切,默认取折中。
-    this.threshold = vad.threshold ?? 0.55; // 语音概率阈值,越高判语音越严格
-    this.startFrames = vad.startFrames ?? 3; // 连续语音帧数判开口,约 96ms
-    this.endFrames = vad.endFrames ?? 15; // 连续静音帧数判段结束,约 480ms
+    this.threshold = vad.threshold ?? 0.45; // 降低默认门槛，短促唤醒词更容易完整进入 ASR
+    this.startFrames = vad.startFrames ?? 2; // 约 64ms 判开口
+    this.endFrames = vad.endFrames ?? 12; // 约 384ms 判段结束，减少打断等待
     this.armed = false; // 唤醒窗口内 true:说话免唤醒词直接回答
+    this.followUpAwaiting = false; // 只说唤醒词后的单次提问窗口
     this.lastActiveAt = 0; // 上次唤醒/回答时间,每次回答刷新,休眠倒计时按它重新计时
     this.sleepTimer = null; // 唤醒窗口休眠定时器(准点触发,主动推 sleep)
     this.ring = new Ring(PAD_SAMPLES);
@@ -168,7 +185,11 @@ class WakeDetector {
     this.speechSamples = 0;
     this.speechStreak = 0;
     this.silentStreak = 0;
-    this.classifying = false; // 前一次 ASR 未完成时不启动新的,避免堆积
+    this.classifying = false; // 前一次 ASR 未完成时排队后续少量语音段
+    this.pendingSegments = []; // ASR 期间的下一句排队，避免“唤醒词”后紧跟问题被丢弃
+    this.playing = false;
+    this.playingText = '';
+    this.segmentPlayback = null;
   }
 
   // 匹配唤醒词:先按字符精确匹配(快路径),不中再按拼音匹配(忽略声调)。
@@ -286,16 +307,17 @@ class WakeDetector {
       if (isSpeech) {
         this.speechStreak++;
         if (this.speechStreak >= this.startFrames) {
-          // 判到开口(约 96ms)即进入攒段;不再"开口即断"——打断改为语义化:
+          // 判到开口(约 64ms)即进入攒段;不再"开口即断"——打断按 ASR 结果判断:
           // 段结束 ASR 识别出打断词(见 matchStop)才发 interrupt,避免环境噪音误断。
           this.state = 'speaking';
+          this.segmentPlayback = { playing: this.playing, text: this.playingText };
           // 窗口内只要开口就刷新倒计时：等待时间按"静默"算，不能因为用户正在说话
           // （VAD+ASR 还有 ~1s 延迟）而先超时，把整句问题丢掉。
           if (this.armed) {
             this.lastActiveAt = Date.now();
             this._scheduleSleep();
           }
-          // 段头 padding = 已缓存的最近 100ms
+          // 段头 padding = 已缓存的最近 300ms
           this.speechFrames = [this.ring.toArray()];
           this.speechSamples = this.ring.filled;
           this.silentStreak = 0;
@@ -319,7 +341,7 @@ class WakeDetector {
   }
 
   finalize() {
-    // 拼段:语音段 + 段尾 100ms padding(ring 里最近的静音)
+    // 拼段:语音段 + 段尾 300ms padding(ring 里最近的静音)
     const frames = this.speechFrames;
     const tail = this.ring.toArray();
     const total = frames.reduce((s, f) => s + f.length, 0) + tail.length;
@@ -342,13 +364,19 @@ class WakeDetector {
     this.speechStreak = 0;
     this.silentStreak = 0;
 
-    this.classify(wav);
+    const playback = this.segmentPlayback;
+    this.segmentPlayback = null;
+    this.classify(wav, playback);
   }
 
-  // ASR 慢(online ~1s),异步跑且串行:识别期间新段不重复发 ASR。打点 ASR 耗时。
-  classify(wav) {
-    if (this.classifying) return;
+  // ASR 慢时保留后续两段，按说话顺序处理；无限排队会让过时环境音延迟触发。
+  classify(wav, playback = null) {
+    if (this.classifying) {
+      if (this.pendingSegments.length < 2) this.pendingSegments.push({ wav, playback });
+      return;
+    }
     this.classifying = true;
+    const heardWhilePlaying = playback ? playback.playing : this.playing;
     const t = new Timing('wake');
     asr
       .recognizeBuffer(wav)
@@ -356,6 +384,14 @@ class WakeDetector {
         t.mark('ASR识别');
         t.log();
         const now = Date.now();
+        const spokenText = [playback && playback.text, this.playingText].filter(Boolean).join(' ');
+
+        const possibleWake = heardWhilePlaying ? this.match(text) : null;
+        if (heardWhilePlaying && looksLikeEcho(text, spokenText) &&
+            (!possibleWake || normalize(spokenText).includes(possibleWake.word))) {
+          console.log(`[wake] 忽略播报回声:「${text.slice(0, 30)}」`);
+          return;
+        }
 
         // 语义化打断:识别到打断词(如"别说了")即发 interrupt,不再"任意声音即断"。
         // 命中打断词不回 answer——否则会把"暂停"当新问题送 LLM,反而自问自答。
@@ -373,23 +409,48 @@ class WakeDetector {
           if (normalize(trimmed).length < 2) return;
           // 已唤醒:整句直接送 LLM,不用再带唤醒词。
           // 若还带着唤醒词(习惯性带上),剥掉再送(字符/拼音匹配均可)。
-          this.lastActiveAt = now;
-          this._scheduleSleep(); // 窗口内每次说话刷新休眠倒计时
           const m = this.match(trimmed);
-          this.answer(m ? m.rest : trimmed, m ? m.word : undefined);
+          const question = m ? m.rest : trimmed;
+          this.lastActiveAt = now;
+          if (this.followUpAwaiting && question) {
+            // 默认每问唤醒：短窗口只接一问，避免回答后又把环境语音当问题。
+            this.followUpAwaiting = false;
+            if (this.requireWake) {
+              this.armed = false;
+              if (this.sleepTimer) clearTimeout(this.sleepTimer);
+              this.sleepTimer = null;
+            } else {
+              this.armedTimeoutMs = this.wakeTimeoutMs;
+              this._scheduleSleep();
+            }
+          } else {
+            this._scheduleSleep();
+          }
+          if (heardWhilePlaying) this.onEvent('interrupt');
+          if (!question) return; // 窗口内重复说唤醒词只重置等待时间，不生成回答
+          this.answer(question);
+          if (this.requireWake && !this.armed) this.onEvent('sleep', { idleSeconds: 0 });
           return;
         }
 
         // 未唤醒:必须匹配唤醒词才回答,否则整段丢弃。
-        const m = this.match(text);
+        const m = possibleWake || this.match(text);
         if (!m) {
+          // 外放时 ASR 不一定能听清唤醒词；有明确的非回声发言先停播，
+          // 提问仍须再说唤醒词，不把环境谈话送给 LLM。
+          if (heardWhilePlaying && spokenText && normalize(text).length >= 2) {
+            this.onEvent('interrupt');
+            return;
+          }
           console.log(`[wake] 未命中唤醒词,识别为:「${text}」`);
           return;
         }
         // 唤醒词同时也是"打断词"：说到唤醒词就停掉正在播的回答，再按有没有带问题分流。
-        if (m.rest && !this.playing) {
-          // 唤醒词 + 问题（一句话问完）：直接答，不开窗口 —— 环境闲聊不会被当问题。
-          // 注意：正在播报时不能走这里（rest 可能是它自己的回声，见 this.playing 注释）。
+        // 唤醒词本身可能是真的，后半句却是扬声器回声；此时只进入等待窗口。
+        const question = heardWhilePlaying && looksLikeEcho(m.rest, spokenText) ? '' : m.rest;
+        if (question) {
+          // 播报期间若整句不是回声，保留同一句里的问题，直接打断并回答。
+          if (heardWhilePlaying) this.onEvent('interrupt');
           this.onEvent('wake', { word: m.word, timeoutSeconds: Math.round(this.wakeTimeoutMs / 1000) });
           if (!this.requireWake) {
             this.armed = true;
@@ -397,14 +458,12 @@ class WakeDetector {
             this.lastActiveAt = now;
             this._scheduleSleep();
           }
-          this.answer(m.rest, m.word);
+          this.answer(question);
           if (this.requireWake) this.onEvent('sleep', { idleSeconds: 0 });
           return;
         }
-        // 只说唤醒词（或播放中命中唤醒词，此时 rest 不可信）：先打断在播的回答，
-        // 再开一个"等你提问"的短窗口（默认 8s）。
-        // wake 事件里带的是**这个窗口**的秒数（不是 wakeTimeout），前端据此显示倒数；
-        // 窗口内问就直接答(_scheduleSleep 续期)，一直不问就超时发 sleep 关掉唤醒状态。
+        // 只说唤醒词：先打断在播的回答，再安静等待提问（默认 15s）。
+        // wake 事件带短窗口秒数，前端立即显示倒数；窗口内第一句问题才回答。
         this.onEvent('wake', {
           word: m.word,
           timeoutSeconds: Math.round(this.followUpMs / 1000),
@@ -412,15 +471,16 @@ class WakeDetector {
         });
         this.onEvent('interrupt');
         this.armed = true;
+        this.followUpAwaiting = true;
         this.armedTimeoutMs = this.followUpMs;
         this.lastActiveAt = now;
         this._scheduleSleep();
-        if (this.playing) console.log('[wake] 播放中命中唤醒词，按"只说唤醒词"处理（忽略可能混入的回声）');
-        this.answer('', m.word); // 回固定问候（"我在，请讲"），之后就是倾听状态
       })
       .catch((e) => console.error(`[wake] 唤醒段识别失败: ${e.message}`))
       .finally(() => {
         this.classifying = false;
+        const next = this.pendingSegments.shift();
+        if (next) this.classify(next.wav, next.playback);
       });
   }
 
@@ -432,6 +492,7 @@ class WakeDetector {
       this.sleepTimer = null;
       if (!this.armed) return;
       this.armed = false;
+      this.followUpAwaiting = false;
       this.onEvent('sleep', { idleSeconds: Math.round((Date.now() - this.lastActiveAt) / 1000) });
     }, ms || this.armedTimeoutMs || this.wakeTimeoutMs);
   }
@@ -442,30 +503,28 @@ class WakeDetector {
       clearTimeout(this.sleepTimer);
       this.sleepTimer = null;
     }
+    this.pendingSegments.length = 0;
   }
 
-  // 只说唤醒词、没带问题:直接回固定问候(带 replyText),不走 LLM,避免把「我在，请讲」当用户消息写进多轮历史。
-  // 带问题:不再整段调 LLM,只回 userText,由前端连 /api/chat_stream 流式问答(与语音路一致,共享多轮记忆)。
-  answer(question, word) {
-    if (!question) {
-      this.onEvent('answer', { userText: word || WAKE_REPLY, replyText: WAKE_REPLY });
-      return;
-    }
+  playbackEnded() { this.playing = false; }
+
+  // 只回 userText，由前端连 /api/chat_stream 流式问答（与语音路一致，共享多轮记忆）。
+  answer(question) {
     this.onEvent('answer', { userText: question });
   }
 }
 
 // 挂到共享 WebSocketServer(无 path,这里过滤 /api/wake)。前端连上后持续发二进制 int16 块。
 // requireWake=true 时每次提问都要带唤醒词(命中只答本句,不开窗口),见 WakeDetector。
-// 接入方也可按连接用 `?requireWake=1` 只对自己的连接开这个模式(大屏就是这种用法):
-// 配置是全局默认,查询参数是单连接覆盖,判定与执行都在服务端。
-function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen, requireWake = false, followUpSec = 0, fuzzyMatch = true) {
+// 接入方可按连接用 `?requireWake=1/0` 覆盖全局配置；判定与执行都在服务端。
+function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen, requireWake = true, followUpSec = 0, fuzzyMatch = true) {
   const words = Array.isArray(wakeWords) ? wakeWords : [];
   const timeoutMs = (wakeTimeoutSec && wakeTimeoutSec > 0 ? wakeTimeoutSec : 300) * 1000;
   wss.on('connection', (ws, req) => {
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname !== '/api/wake') return; // 非唤醒连接,交给其他 handler(如 /api/tts)
-    const requireWakeForConn = requireWake || url.searchParams.get('requireWake') === '1';
+    const requireWakeParam = url.searchParams.get('requireWake');
+    const requireWakeForConn = requireWakeParam === '0' ? false : (requireWake || requireWakeParam === '1');
     const detector = new WakeDetector(words, (type, payload) => {
       if (ws.readyState !== ws.OPEN) return;
       ws.send(JSON.stringify({ type, ...payload }));
@@ -495,11 +554,17 @@ function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen,
         // 用于唤醒词一直检测不到时兜底:点一下=说了唤醒词,窗口内直接说话即可回答。
         try {
           const msg = JSON.parse(data.toString());
-          // 前端 TTS 起播/结束：播放中命中唤醒词要按"只说唤醒词"处理（回声不可信）
-          if (msg && msg.type === 'playing') { detector.playing = true; return; }
-          if (msg && msg.type === 'idle') { detector.playing = false; return; }
+          // 前端上报实际播报文本，用于区分回声与用户打断。
+          if (msg && msg.type === 'playing') {
+            detector.playing = true;
+            detector.playingText = String(msg.text || '').slice(-2000);
+            return;
+          }
+          // 保留最后一段播报文本，供正在 ASR 中的迟到回声比对。
+          if (msg && msg.type === 'idle') { detector.playbackEnded(); return; }
           if (msg && msg.type === 'wake_manual') {
             detector.armed = true;
+            detector.followUpAwaiting = false;
             detector.armedTimeoutMs = detector.wakeTimeoutMs; // 手动唤醒=正常窗口
             detector.lastActiveAt = Date.now();
             detector._scheduleSleep(); // 重置窗口倒计时
@@ -526,4 +591,4 @@ function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen,
 }
 
 // 导出 attach 供 index.js 挂载;WakeDetector 与纯文本匹配函数导出供测试(test/)用,无副作用。
-module.exports = { attach, WakeDetector, _test: { normalize, toSyllables, findSubseq, syllableScore, fuzzyFindSubseq } };
+module.exports = { attach, WakeDetector, _test: { normalize, toSyllables, findSubseq, syllableScore, fuzzyFindSubseq, looksLikeEcho } };

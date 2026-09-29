@@ -170,8 +170,7 @@
 
     // ================= VoiceAgent SDK =================
     // 一个入口搞定三路问答 + 自动 TTS 播放。autoWake:true 页面加载即自动开始唤醒监听。
-    // 唤醒窗口倒计时:onWake 拿到 timeoutSeconds(窗口总秒数)后每秒递减,
-    // onReply(窗口内有回答)重置,sleep 归零。接入方可据此换成进度条/圆环等样式。
+    // 只说唤醒词时保持安静，从 onWake 起显示完整提问倒计时。
     let wakeTotalSec = 0;   // 窗口总秒数(wake 事件带回)
     let idleSec = 0;        // 最近一次休眠时的实际静默秒数(sleep 事件带回)
     let timerId = null;
@@ -201,7 +200,9 @@
         status.textContent = '回答完毕,可以继续提问';
         if (timerId) startCountdown(wakeTotalSec); // 窗口内每次回答重置倒计时
       },
-      onWake: (word, timeoutSeconds) => { if (timeoutSeconds) startCountdown(timeoutSeconds); },
+      onWake: (word, timeoutSeconds) => {
+        if (timeoutSeconds) startCountdown(timeoutSeconds);
+      },
       onSleep: (idleSeconds) => { idleSec = idleSeconds || 0; stopCountdown(); },
       onAudioStream: initTtsMeter,
       onStateChange: updateUI,
@@ -218,7 +219,7 @@
         case 'starting': wakeHint.textContent = '正在请求麦克风权限…'; break;
         case 'waiting-activation': wakeHint.textContent = '已授权,点击页面任意处以开始监听'; break;
         case 'listening': wakeHint.textContent = '待唤醒,说「你好小智 + 问题」'; break;
-        case 'wake-active': wakeHint.textContent = '已唤醒,窗口内可直接说话'; break;
+        case 'wake-active': wakeHint.textContent = '已唤醒，请在倒计时内提问'; break;
         case 'sleep': wakeHint.textContent = idleSec
           ? '已静默 ' + idleSec + ' 秒后休眠,说「你好小智」重新唤醒'
           : '已休眠,说「你好小智」重新唤醒'; break;

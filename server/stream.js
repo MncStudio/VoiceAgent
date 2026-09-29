@@ -17,12 +17,12 @@ const SENTENCE_GAP_MS = 120; // 句间停顿,避免连续句子连珠炮式播�
 //
 // 显示与播报在这里分流(见 speech.js):
 //   delta / done.replyText = LLM 完整回复 → 前端弹窗与字幕显示完整;
-//   推给前端的 PCM / done.speechText = 精简后的播报文本(config.speech.mode,默认只念含数字的片段)。
+//   推给前端的 PCM / done.speechText = config.speech.mode 决定的播报文本(默认 full)。
 //
 // 协议(服务端 → 客户端,严格按序):
 //   1. {type:'start', userText}
 //   2. {type:'meta', sampleRate, channels, bitsPerSample}(须在任何二进制帧之前)
-//   3. {type:'delta', text}(LLM 增量,完整文本,供流式字幕) 与 二进制帧(裸 s16le PCM)交错
+//   3. {type:'delta', text}(显示文本)、{type:'speech', text}(实际播报句)与二进制 PCM 帧交错
 //   4. {type:'done', replyText, speechText}(TTS 队列全部排空后发) 或 {type:'error', message}
 
 function attach(wss) {
@@ -249,6 +249,8 @@ class StreamPipeline {
     if (gen !== this.gen) return;
     const s = text.trim();
     if (!s) return;
+    // 告知前端实际要念的句子，供唤醒通道识别外放回声。
+    this._sendJson({ type: 'speech', text: s });
     this.queue.push(s);
     this._pump(gen);
   }

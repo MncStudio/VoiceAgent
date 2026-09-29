@@ -75,6 +75,7 @@ async function run(replyText) {
   assert.strictEqual(done.replyText, REPLY, 'done.replyText 是完整回复');
   assert.strictEqual(done.speechText, SPOKEN, 'done.speechText 是实际播报文本');
   assert.deepStrictEqual(synthesized, [SPOKEN], '只把含数字的片段送去合成');
+  assert.deepStrictEqual(ws.json('speech').map((f) => f.text), synthesized, '回声判定须拿到实际送去 TTS 的文本');
   assert.ok(
     ws.frames.some((f) => f.type === 'meta'),
     'meta 必须先于二进制帧下发'
@@ -160,6 +161,7 @@ async function run(replyText) {
     assert.strictEqual(ws.json('done')[0].replyText, REPLY, 'done.replyText 仍是完整回答');
     assert.strictEqual(ws.json('done')[0].speechText, SUMMARY, 'done.speechText = 改写后的播报文本');
     assert.deepStrictEqual(synthesized, [SUMMARY], 'TTS 只念改写后的文本');
+    assert.deepStrictEqual(ws.json('speech').map((f) => f.text), synthesized, '改写模式也应上报实际播报文本');
 
     // 改写失败 → 退回规则精简（不能因此没声音）
     llm.askOnce = async () => { throw new Error('改写超时'); };

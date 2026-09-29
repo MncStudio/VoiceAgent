@@ -33,8 +33,8 @@
 | 选项 | 类型 | 说明 |
 |---|---|---|
 | `baseUrl` | string | 后端地址，如 `http://192.168.1.5:3000`（带协议）。跨域/独立部署时必填；缺省用同源相对路径。 |
-| 播放状态上报 | — | SDK 在 TTS 起播/结束时向 `/api/wake` 发 `{type:'playing'}` / `{type:'idle'}`：**播放中命中唤醒词一律按「只说唤醒词」处理**（打断 + 「我在，请讲」+ 开等待窗口），因为播放时收音混着它自己的声音，唤醒词后面那句可能是回声乱码。 |
-| `wakeRequireWord` | boolean | `true` 则连 `/api/wake` 时带 `?requireWake=1`：**每次提问都要带唤醒词**（命中唤醒词只回答本句、不开"窗口内免唤醒词"的窗口；没说唤醒词的话整段丢弃）。判定仍在后端，见下文 /api/wake。缺省 `false`（唤醒窗口内免唤醒词）。 |
+| 播放状态上报 | — | SDK 向 `/api/wake` 发 `{type:'playing', text}` / `{type:'idle'}`，其中 `text` 为实际播报文本。后端过滤回声；播放中喊“唤醒词 + 问题”可直接打断并回答。 |
+| `wakeRequireWord` | boolean | 缺省 `true`，每次提问都需唤醒词；只说唤醒词后可在短窗口内直接提问。设为 `false` 时连接带 `?requireWake=0`，恢复长窗口连续问答。 |
 | `newSessionPerAsk` | boolean | `true` 则**每次提问换一个会话 id**（"每次提问都是新对话"，不带上一轮上下文；每次提问在后端各建一条对话记录）。缺省 `false` 沿用同一段多轮上下文。 |
 | `sessionId` | string | 单次对话的会话 id，语音/文字/唤醒三路共用。同一次对话内（同一 sessionId）连续问答共享上下文；不传则本次实例随机生成，刷新/重开即新对话，不跨会话持久化。要跨会话记忆就传固定 id。 |
 | `autoWake` | boolean | `true` 则构造后自动开始唤醒监听。 |
@@ -45,7 +45,7 @@
 |---|---|
 | `onUserText(text)` | 识别到用户说的话（三路都触发） |
 | `onReply(text)` | 得到回复文本（已自动 TTS 播放） |
-| `onWake(word, timeoutSeconds)` | 命中唤醒词；`timeoutSeconds` = 唤醒窗口总秒数（可画倒计时） |
+| `onWake(word, timeoutSeconds, followUp)` | 命中唤醒词；`followUp` 表示只说唤醒词后的短窗口 |
 | `onSleep(idleSeconds)` | 唤醒窗口超时休眠；`idleSeconds` = 实际静默秒数 |
 | `onInterrupt()` | 开口打断正在播的回答 |
 | `onAudioStream(stream)` | TTS 播放流创建后回调（`MediaStream`，供 Live2D 口型同步等消费）；另有 getter `agent.audioStream` |
@@ -85,14 +85,14 @@
 
 ### WS /api/wake — 唤醒词监听
 
-前端连上后**持续发送二进制 PCM 块**：16kHz、单声道、s16le（裸 int16）。后端用 VAD + ASR 检测唤醒词，命中自动回答（去掉唤醒词，剩余文本走 `/api/chat_stream` 流式问答；只说唤醒词回固定问候）。URL 参数 `?sessionId=xxx` 可选（会话 id，同一会话内连续问答共享上下文）。
+前端连上后**持续发送二进制 PCM 块**：16kHz、单声道、s16le（裸 int16）。后端用 VAD + ASR 检测唤醒词；同一句带问题时去掉唤醒词，剩余文本走 `/api/chat_stream` 流式问答；只说唤醒词时安静等待后续提问。URL 参数 `?sessionId=xxx` 可选（会话 id，同一会话内连续问答共享上下文）。
 
 后端回 JSON 文本帧：
 
 | type | payload | 说明 |
 |---|---|---|
-| `wake` | `{ word, timeoutSeconds }` | 命中唤醒词，进入唤醒窗口 |
-| `answer` | `{ userText, replyText }` | 自动回答 |
+| `wake` | `{ word, timeoutSeconds, followUp? }` | 命中唤醒词，进入唤醒窗口 |
+| `answer` | `{ userText }` | 识别到问题后请求回答 |
 | `interrupt` | — | 检测到你开口，打断正在播的回答 |
 | `sleep` | `{ idleSeconds }` | 唤醒窗口超时休眠 |
 
@@ -100,11 +100,12 @@
 
 唤醒词与窗口时长由后端配置：`server/config/local.json` 的 `wakeWords` / `wakeTimeout`。
 
-**每次提问都要唤醒词**（大屏/公共场景：窗口内免唤醒词会把环境里的闲聊当成问题）——全局开关是配置 `wakeRequireWord: true`，接入方也可以只对自己的连接开：`WS /api/wake?requireWake=1`（SDK 用 `new VoiceAgent({ wakeRequireWord: true })`）。开启后：
+**默认每次提问都要唤醒词**，避免长窗口内的环境闲聊进入 LLM。全局可用 `wakeRequireWord: false` 关闭；单连接可用 `/api/wake?requireWake=1/0` 或 SDK 选项覆盖。开启后：
 
 - 命中唤醒词只回答本句（`wake` → `answer`），**不开**"窗口内免唤醒词"的窗口，紧接着补一个 `sleep`（`idleSeconds: 0`）让前端的"已唤醒"指示与本轮一起复位；
 - 没说唤醒词的话整段丢弃，不进 LLM；
-- 手动唤醒（`wake_manual`）仍开一次窗口，保留"唤醒词检测不到"时的兜底路径。
+- 只说唤醒词会安静打开默认 15 秒的短跟随窗口，从识别到唤醒词时开始计时；默认每问唤醒模式下接到一个问题就关闭窗口。手动唤醒（`wake_manual`）仍开一次长窗口；
+- 播报期间带唤醒词提问会打断旧播报并直接回答。识别到非回声发言但没听清唤醒词时只停播，不自动问答。
 
 ### WS /api/chat_stream — 流式问答（LLM 增量 → 断句 → 逐句 TTS → 顺序播放）
 
@@ -120,7 +121,7 @@
 
 1. `{ "type": "start", "userText": "..." }` — 回显问题。
 2. `{ "type": "meta", "sampleRate": 24000, "channels": 1, "bitsPerSample": 16 }` — **必须先于首个二进制字节**，前端解码依它。
-3. `{ "type": "delta", "text": "..." }`（LLM 增量，供流式字幕）与 一个或多个**二进制帧**（裸 s16le PCM）交错推送。
+3. `{ "type": "delta", "text": "..." }`（LLM 增量，供流式字幕）、`{ "type": "speech", "text": "..." }`（本句实际送 TTS 的播报文本，供回声过滤）与一个或多个**二进制帧**（裸 s16le PCM）交错推送。
 4. `{ "type": "done", "replyText": "完整回复", "speechText": "实际播报的精简文本" }`（TTS 队列全部合成完才发），或 `{ "type": "error", "message": "..." }`。
 
 > **显示文本 ≠ 播报文本**（`speech.mode` 三选一）：

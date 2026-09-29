@@ -20,6 +20,8 @@ assert.strictEqual(findSubseq(['zhi'], ['xiao']), -1);
 
 // ---- 默认检测器 ----
 const det = new WakeDetector(['你好小智'], () => {}, 10000);
+assert.strictEqual(det.requireWake, true, '默认每次提问都需要唤醒词');
+assert.strictEqual(det.threshold, 0.45, '默认 VAD 门槛应兼顾短促唤醒词');
 
 // match:字符精确命中 + 剥词
 assert.deepStrictEqual(det.match('你好小智'), { word: '你好小智', rest: '' });
@@ -147,42 +149,94 @@ async function feed(det, text) {
     det.close();
   }
 
-  // 3) 只说唤醒词:先打断在播的回答,再回固定问候,并开一个"等你提问"的短窗口
+  // 3) 只说唤醒词:安静等待提问，不立即播报或调用问答
   {
     const events = [];
     const det = makeDetector(events, true);
     await feed(det, '你好小智');
-    assert.deepStrictEqual(events.map((e) => e.type), ['wake', 'interrupt', 'answer']);
-    assert.deepStrictEqual(events[0], { type: 'wake', word: '你好小智', timeoutSeconds: 8, followUp: true });
-    assert.deepStrictEqual(events[2], { type: 'answer', userText: '你好小智', replyText: '我在，请讲' });
+    assert.deepStrictEqual(events.map((e) => e.type), ['wake', 'interrupt']);
+    assert.deepStrictEqual(events[0], { type: 'wake', word: '你好小智', timeoutSeconds: 15, followUp: true });
     assert.strictEqual(det.armed, true, '只说唤醒词要开窗口等你提问');
-    assert.strictEqual(det.armedTimeoutMs, 8000, '窗口用 followUp 时长(默认 8s)，不是 5 分钟的 wakeTimeout');
+    assert.strictEqual(det.armedTimeoutMs, 15000, '窗口用 followUp 时长(默认 15s)，不是 5 分钟的 wakeTimeout');
+    const firstTimer = det.sleepTimer;
+    det.playbackEnded();
+    assert.strictEqual(det.sleepTimer, firstTimer, '旧回答结束不能重置思考时间');
+    events.length = 0;
+    await feed(det, '你好小智');
+    assert.deepStrictEqual(events, [], '窗口内重复喊唤醒词也不能立即回答');
+    assert.notStrictEqual(det.sleepTimer, firstTimer, '重复唤醒应重新给足等待时间');
     // 窗口内直接提问（不再说唤醒词）
     events.length = 0;
     await feed(det, '库存还有多少');
-    assert.deepStrictEqual(events, [{ type: 'answer', userText: '库存还有多少' }]);
+    assert.deepStrictEqual(events, [
+      { type: 'answer', userText: '库存还有多少' },
+      { type: 'sleep', idleSeconds: 0 },
+    ]);
+    assert.strictEqual(det.armed, false, '短窗口只接一问');
+    events.length = 0;
+    await feed(det, '旁边人的闲聊');
+    assert.deepStrictEqual(events, [], '回答后不能继续收环境语音');
     det.close();
   }
 
-  // 3a) 播放中命中唤醒词：识别出的"后半句"可能是它自己的回声，一律按"只说唤醒词"处理
+  // 3a) 播放中喊“唤醒词 + 问题”，保留问题并打断旧回答。
   {
     const events = [];
     const det = makeDetector(events, true);
-    det.playing = true; // 前端上报 {type:'playing'}
-    await feed(det, '你好小智 到货计划一条到货清单零条'); // 后半句其实是回声
-    assert.deepStrictEqual(events.map((e) => e.type), ['wake', 'interrupt', 'answer'], '播放中命中唤醒词要打断+问候');
-    assert.strictEqual(events[2].replyText, '我在，请讲');
-    assert.strictEqual(events[0].followUp, true, '并且要开等待窗口（timeoutSeconds=8）');
-    assert.strictEqual(det.armed, true);
-    // 紧接着（播放已停）直接问，窗口内免唤醒词
-    det.playing = false;
+    det.playing = true;
+    det.playingText = '今天到货计划一条，到货清单零条。';
+    await feed(det, '你好小智 库存多少');
+    assert.deepStrictEqual(events.map((e) => e.type), ['interrupt', 'wake', 'answer', 'sleep']);
+    assert.strictEqual(events[2].userText, '库存多少');
+    assert.strictEqual(det.armed, false, '直接问答后不能留下免唤醒窗口');
     events.length = 0;
-    await feed(det, '库存还有多少');
-    assert.deepStrictEqual(events, [{ type: 'answer', userText: '库存还有多少' }]);
+    await feed(det, '今天到货计划一条');
+    assert.deepStrictEqual(events, [], '外放回声不能引起新回答或打断');
     det.close();
   }
 
-  // 3b) 唤醒词 + 问题（一句话问完）：直接答、不开窗口
+  // 唤醒词是真实喊出的，但 ASR 把原播报接在后面时，不把回声当问题。
+  {
+    const events = [];
+    const det = makeDetector(events, true);
+    det.playing = true;
+    det.playingText = '到货计划一条，到货清单零条';
+    await feed(det, '你好小智 到货计划一条到货清单零条');
+    assert.deepStrictEqual(events.map((e) => e.type), ['wake', 'interrupt']);
+    det.close();
+  }
+
+  // 3b) 没听清唤醒词但用户确实开口时，可以停播；仍不自动问答。
+  {
+    const events = [];
+    const det = makeDetector(events, true);
+    det.playing = true;
+    det.playingText = '当前库存总量为一万两千件。';
+    await feed(det, '当前库存总量为一万两千件');
+    assert.deepStrictEqual(events, [], '自己的声音不该打断自己');
+    await feed(det, '等一下我有问题');
+    assert.deepStrictEqual(events, [{ type: 'interrupt' }]);
+    det.close();
+  }
+
+  // 3c) 只说唤醒词后，旧回答的播放状态尚未清除时也必须接住问题。
+  {
+    const events = [];
+    const det = makeDetector(events, true);
+    await feed(det, '你好小智');
+    events.length = 0;
+    det.playing = true;
+    det.playingText = '旧回答';
+    await feed(det, '库存还有多少');
+    assert.deepStrictEqual(events, [
+      { type: 'interrupt' },
+      { type: 'answer', userText: '库存还有多少' },
+      { type: 'sleep', idleSeconds: 0 },
+    ]);
+    det.close();
+  }
+
+  // 3d) 唤醒词 + 问题（一句话问完）：直接答、不开窗口
   {
     const events = [];
     const det = makeDetector(events, true);
@@ -213,6 +267,29 @@ async function feed(det, text) {
     await feed(det, '那入库呢');
     assert.deepStrictEqual(events, [{ type: 'answer', userText: '那入库呢' }]);
     det.close();
+  }
+
+  // 在线 ASR 正忙时，下一段不能直接丢掉（常见于先喊唤醒词、马上问问题）。
+  {
+    const events = [];
+    const det = makeDetector(events, true);
+    const pending = [];
+    asr.recognizeBuffer = () => new Promise((resolve) => pending.push(resolve));
+    det.classify(Buffer.from([1]));
+    det.classify(Buffer.from([2]));
+    assert.strictEqual(pending.length, 1);
+    assert.strictEqual(det.pendingSegments.length, 1);
+    pending.shift()('你好小智');
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual(pending.length, 1, '首段完成后应开始识别排队的下一段');
+    pending.shift()('库存多少');
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.ok(events.some((e) => e.type === 'answer' && e.userText === '库存多少'));
+    assert.strictEqual(det.pendingSegments.length, 0);
+    det.close();
+    asr.recognizeBuffer = async () => nextText;
   }
 
   console.log('wake.test.js 唤醒词/每次提问带唤醒词 全部通过');

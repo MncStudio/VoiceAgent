@@ -23,6 +23,8 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'voice-agen
   const optionLevels = [];
   const listenerLevels = [];
   const agent = new context.VoiceAgent({ onAudioLevel: (level) => optionLevels.push(level) });
+  assert.strictEqual(agent.wakeRequireWord, true, 'SDK 默认每次提问都带唤醒词');
+  assert.strictEqual(new context.VoiceAgent({ wakeRequireWord: false }).wakeRequireWord, false);
   agent.on('audioLevel', (level) => listenerLevels.push(level));
   agent._tts.onAudioLevel(0.35);
   assert.deepStrictEqual(optionLevels, [0.35]);
@@ -52,6 +54,29 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'voice-agen
   agent._tts._ttsWs = null;
   agent._tts._maybeFinish(agent._tts._playGen);
   assert.strictEqual(agent._tts.playing, false, '连接结束且最后音块播完后才能结束 speaking');
+
+  let followUp = '';
+  agent._streamReply = (text) => { followUp = text; };
+  agent._tts._setPlaying(true);
+  agent._onWakeMessage({ type: 'answer', userText: '库存还有多少' });
+  assert.strictEqual(followUp, '库存还有多少', '旧回答在播时不能丢掉新问题');
+  agent._tts._setPlaying(false);
+
+  const wakeMessages = [];
+  class FakeWebSocket {
+    static OPEN = 1;
+    constructor() { this.readyState = 1; FakeWebSocket.last = this; }
+    close() { this.readyState = 3; if (this.onclose) this.onclose(); }
+  }
+  context.WebSocket = FakeWebSocket;
+  agent._wakeWs = { readyState: 1, send: (data) => wakeMessages.push(JSON.parse(data)) };
+  agent._tts._ensureAudioCtx = async () => ({});
+  await agent._tts.playStream('ws://localhost/api/chat_stream', { type: 'chat', text: '库存多少' });
+  FakeWebSocket.last.onmessage({ data: JSON.stringify({ type: 'speech', text: '当前库存总量' }) });
+  FakeWebSocket.last.onmessage({ data: JSON.stringify({ type: 'speech', text: '一万两千件' }) });
+  assert.deepStrictEqual(wakeMessages.map((m) => m.text), ['', '当前库存总量', '当前库存总量一万两千件']);
+  agent._tts.stop();
+  assert.strictEqual(wakeMessages.at(-1).type, 'idle');
 
   console.log('voice-agent-audio.test.js 全部通过');
 })().catch((error) => { console.error(error); process.exit(1); });

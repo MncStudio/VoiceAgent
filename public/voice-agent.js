@@ -9,7 +9,7 @@
 //   const agent = new VoiceAgent({
 //     sessionId: '…',        // 可选;接入方传固定值则后端据此续 yuxi 多轮记忆(thread_id);不传则每次单轮
 //     newSessionPerAsk: true,// 可选;每次提问都换一个 sessionId("每次提问都是新对话",不带上一轮上下文)
-//     wakeRequireWord: true, // 可选;每次提问都要带唤醒词(后端 ?requireWake=1):命中只答本句,不开免唤醒词窗口
+//     wakeRequireWord: true, // 缺省 true；false 则允许长窗口内连续提问
 //     baseUrl: '…',          // 可选;后端地址(如 http://192.168.1.5:3000),跨域/独立部署时填;缺省同源相对路径
 //     autoWake: true,        // 可选;true 则构造后自动开始唤醒监听
 //     onUserText(text),      // 识别到用户说的话(三路都触发)
@@ -57,6 +57,8 @@
       this.onError = null;          // (msg:string) TTS 失败/连接异常
       this.onDone = null;           // () 可选,合成完成回调(playStream 下带 replyText)
       this.onReplyDelta = null;     // (text) 可选,流式字幕增量
+      this.onSpeakingText = null;   // 实际入队的播报文本变化
+      this.speakingText = '';
       this.onAudioStream = null;    // (stream:MediaStream) 可选,播放流创建后回调
       this.onAudioLevel = null;     // (level:0..1) 可选,按实际播放时刻回调 PCM 短时音量
     }
@@ -102,6 +104,7 @@
     _setPlaying(v) {
       if (this._playing === v) return;
       this._playing = v;
+      if (!v) this.speakingText = '';
       if (this.onStateChange) this.onStateChange(v);
     }
 
@@ -170,6 +173,7 @@
         return;
       }
       if (gen !== this._playGen) return;        // await 期间被打断,丢弃
+      this.speakingText = String(text || '');
       this._setPlaying(true);                   // 播放会话开始
       const url = this._baseUrl
         ? this._baseUrl.replace(/^http/, 'ws') + '/api/tts'
@@ -209,6 +213,7 @@
         return;
       }
       if (gen !== this._playGen) return;        // await 期间被打断,丢弃
+      this.speakingText = '';
       this._setPlaying(true);
       const ws = new WebSocket(wsUrl);
       ws.binaryType = 'arraybuffer';
@@ -220,9 +225,17 @@
           const msg = JSON.parse(e.data);
           if (msg.type === 'start') return;
           if (msg.type === 'meta') this._applyMeta(msg);
+          else if (msg.type === 'speech') {
+            this.speakingText += msg.text || '';
+            if (this.onSpeakingText) this.onSpeakingText();
+          }
           else if (msg.type === 'delta') { if (this.onReplyDelta) this.onReplyDelta(msg.text); }
           else if (msg.type === 'error') { if (this.onError) this.onError(msg.message); }
-          else if (msg.type === 'done') { ws.close(); if (this.onDone) this.onDone(msg.replyText); }
+          else if (msg.type === 'done') {
+            if (msg.speechText) this.speakingText = msg.speechText;
+            ws.close();
+            if (this.onDone) this.onDone(msg.replyText);
+          }
           return;
         }
         this._consumePcm(gen, ctx, e.data);
@@ -285,8 +298,8 @@
       this.sessionId = opts.sessionId; // 可选:接入方传固定值则后端据此续 yuxi 多轮记忆;不传则每次单轮
       // 每次提问换新 sessionId:后端按 sessionId 映射 yuxi thread_id,换新即"每次提问都是新对话"。
       this.newSessionPerAsk = !!opts.newSessionPerAsk;
-      // 每次提问都要唤醒词:连 /api/wake 时带 ?requireWake=1,后端命中唤醒词只回答本句、不开免唤醒词窗口。
-      this.wakeRequireWord = !!opts.wakeRequireWord;
+      // 默认每问唤醒；显式 false 才使用长窗口连续问答。
+      this.wakeRequireWord = opts.wakeRequireWord !== false;
       this.baseUrl = String(opts.baseUrl || '').replace(/\/+$/, ''); // 跨域部署:后端地址(如 http://host:port)
 
       this._on = {
@@ -308,6 +321,7 @@
         this._notifyWakePlaying(playing);
         this._refreshState();
       };
+      this._tts.onSpeakingText = () => this._notifyWakePlaying(true);
       this._tts.onAudioStream = (stream) => this._emit('audioStream', stream);
       this._tts.onAudioLevel = (level) => this._emit('audioLevel', level);
 
@@ -351,17 +365,20 @@
 
     get wakeActive() { return this._wakeOn; }
 
-    // 告诉 /api/wake "我正在播报"：播放中收音必然混着它自己的声音，后端据此把
-    // 唤醒词后面那句不可信的识别结果当回声丢弃（只走"只说唤醒词"：打断+问候+等待窗口），
-    // 避免把回声乱码当问题回答、还顺手关掉等待窗口。
+    // 告诉 /api/wake 当前实际送 TTS 的文本，供后端过滤回声并保留真实的打断提问。
     _notifyWakePlaying(playing) {
       const ws = this._wakeWs;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      if (this._playingSent === !!playing) return;
+      const text = playing ? this._tts.speakingText.slice(-2000) : '';
+      if (this._playingWsSent !== ws) {
+        this._playingWsSent = ws;
+        this._playingSent = undefined;
+        this._playingTextSent = undefined;
+      }
+      if (this._playingSent === !!playing && this._playingTextSent === text) return;
       this._playingSent = !!playing;
-      try {
-        ws.send(JSON.stringify({ type: playing ? 'playing' : 'idle' }));
-      } catch {}
+      this._playingTextSent = text;
+      try { ws.send(JSON.stringify({ type: playing ? 'playing' : 'idle', text })); } catch {}
     }
 
     // 生成一个全新的会话键(不落盘):配合 newSessionPerAsk 每轮提问单独开一段对话。
@@ -474,7 +491,7 @@
       this._ctxRunning = ctx.state === 'running';
 
       // requireWake=1:大屏等公共场景要求"每次提问都说唤醒词",不做窗口内免唤醒词(判定在服务端)。
-      const wsUrl = this._wsUrl('/api/wake' + (this.wakeRequireWord ? '?requireWake=1' : ''));
+      const wsUrl = this._wsUrl('/api/wake?requireWake=' + (this.wakeRequireWord ? '1' : '0'));
       const ws = new WebSocket(wsUrl);
       this._wakeWs = ws;
 
@@ -500,6 +517,7 @@
       };
 
       ws.onmessage = (e) => this._onWakeMessage(JSON.parse(e.data));
+      ws.onopen = () => { if (this._tts.playing) this._notifyWakePlaying(true); };
       ws.onerror = () => { if (this._wakeOn) this.stopWake(); this._emit('error', '唤醒连接异常'); };
       ws.onclose = () => { if (this._wakeOn) this.stopWake(); };
 
@@ -535,22 +553,16 @@
 
     _onWakeMessage(msg) {
       switch (msg.type) {
-        case 'answer': // 唤醒自动回答:只说唤醒词时 replyText=固定问候(走 /api/tts 全篇);带问题则走 /api/chat_stream 流式
+        case 'answer': // 识别到问题后走 /api/chat_stream 流式问答；兼容旧服务端的 replyText 回包
           this._armed = true;
           if (msg.replyText) {
-            // 只说唤醒词:固定问候,全篇播放(无 LLM),会打断正在播的话。
+            // 兼容旧服务端直接返回的回复文本。
             this._tts.onDone = null;
             if (msg.userText) this._emit('userText', msg.userText);
             this._emit('reply', msg.replyText);
             this._tts.play(msg.replyText);
-          } else if (this._tts.playing) {
-            // 正在播上一轮回答时又采到语音——多半是用户正跟旁人说话(旁人声音不受 AEC 消除、会被采回),
-            // 也可能残留外放回声。此刻不当新问题打断重答,否则回答一开口就被掐断、甚至"外放回答被采回
-            // → 再当新问题"循环重答。真正的打断只走后端打断词 → interrupt 静默停播。
-            // 此处不动 onDone,保证当前回答播完仍能回调 onReply;也不回 userText,避免把旁人话误记为用户输入。
-            return;
           } else {
-            this._streamReply(msg.userText); // 带问题:流式问答,完整回复经 onDone → onReply 回
+            this._streamReply(msg.userText); // 后端已过滤回声；用户提问可打断旧回答
           }
           break;
         case 'interrupt': // 后端识别到打断词(如"别说了"):停止正在播的回答;没在播则忽略,不误报 onInterrupt

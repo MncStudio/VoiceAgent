@@ -36,16 +36,16 @@ npm start                 # 固定加载 server/config/local.json
 | `profile` | string | 仅作标识，固定为 `local` 便于人读；不影响加载逻辑（启动固定加载 `local.json`，除非 `VA_PROFILE` 显式指定别的文件）。 |
 | `wakeWords` | string[] | 唤醒词列表：命中任意一个即唤醒（**唤醒词同时也是打断词**：在播回答时说到它就停播）。匹配三层：① 归一化后字面子串；② **拼音逐音节**（忽略声调，覆盖同音字：超包/超保/潮宝/朝宝…）；③ **音节级模糊**（声母或韵母相同算半像，首音节必须一致、平均 ≥0.75，覆盖现场实测的「你要抄本 / 你好超本 / 你好超板」这类不同音误识别）。示例见 `local.json`。 |
 | `wakeFuzzyMatch` | boolean | 缺省 `true`。关掉（`false`）后只剩字面 + 拼音两层匹配，叫不醒的情况会变多，但误触概率更低。 |
-| 播放状态上报 | — | （无需配置）前端在 TTS 起播/结束时通过 `/api/wake` 发 `{type:'playing'}` / `{type:'idle'}`；**播放中命中唤醒词一律按「只说唤醒词」处理**（打断 + 「我在，请讲」+ 开等待窗口）——播放时收音里混着它自己的声音，唤醒词后面那句可能是回声乱码，直接回答不但答错，还会顺手把等待窗口关掉。 |
-| `wakeFollowUpTimeout` | number（秒） | **只说唤醒词（没带问题）时**：打断在播回答后开的"等你提问"窗口（缺省 8 秒），窗口内直接说话即可，不用再说唤醒词；窗口过期又要重新叫唤醒词。带问题的唤醒（「你好超宝，库存多少」）不开窗口。 |
+| 播放状态上报 | — | （无需配置）前端经 `/api/wake` 上报 `{type:'playing', text}` / `{type:'idle'}`，`text` 是实际送 TTS 的播报文本。后端过滤外放回声；播放中识别到「唤醒词 + 问题」直接打断并回答，只说唤醒词则打开跟随窗口。没听清唤醒词但识别到非回声发言时只停播，不自动问答。 |
+| `wakeFollowUpTimeout` | number（秒） | **只说唤醒词（没带问题）时**：安静打开“等你提问”的短窗口，缺省 15 秒，从识别到唤醒词时开始计时。窗口内直接说话即可；默认每问唤醒模式下，这个窗口只接一问。带问题的唤醒（「你好超宝，库存多少」）不开窗口。 |
 | `wakeTimeout` | number（秒） | 唤醒窗口总秒数：命中唤醒词后这段时间内免唤醒词连续问答；随 `/api/wake` 的 `wake` 事件 `timeoutSeconds` 下发给前端。开了 `wakeRequireWord` 后只有手动唤醒会用到这个窗口。 |
-| `wakeRequireWord` | boolean | 全局默认 `false`；`true` = **每次提问都要带唤醒词**（接入方也可按连接用 `/api/wake?requireWake=1` 单独开启，大屏就是这种用法）：命中唤醒词只回答本句、不开免唤醒词窗口（紧接着回 `sleep` 让前端复位），没说唤醒词的话整段丢弃。大屏/公共场景避免把环境闲聊当问题。缺省 `false`（窗口内免唤醒词）。 |
+| `wakeRequireWord` | boolean | 缺省 `true`：每次提问都带唤醒词，命中后只回答本句并发 `sleep` 复位；只说唤醒词会开启短跟随窗口。配置 `false` 可恢复长窗口内免唤醒词问答；单连接可用 `?requireWake=1/0` 覆盖。 |
 | `speech` | object | 播报文本策略，见下两行。 |
 | `speech.mode` | string | `full`（缺省）**数字人与对话框用同一个 LLM，LLM 答什么数字人就念什么**（只清掉 HTML/Markdown 排版噪声，不会念出表格竖线/# 号）；`key-numbers` 规则精简，只念「数字+单位」的关键片段；`llm` 再起一条独立 LLM 链路把回答改写成 20~50 字口语（角色=数字人播报员，不念表格/代码/Markdown）。弹窗/字幕**始终**是完整回答（`delta`/`done.replyText`），只有 TTS 用播报文本。 |
 | `speech.summary` | object | `mode: "llm"` 时这条独立链路的 LLM 配置，字段与顶层 `llm` 相同（`provider`/`baseUrl`/`apiKey`/`model`/`url`/`agentSlug`/`agentId`/`timeoutMs`），另可加 `system` 覆盖默认角色提示。**建议 `openai-compatible`**（不建会话线程）；用 yuxi 会为每次改写建一条会话。留空或失败自动退回 `key-numbers`，再不行播完整回复。 |
 | `wakeStopWords` | string[] | 语义化打断词：唤醒窗口内识别到这些词（如"别说了/暂停"）即静默停止正在播的回答（不再"一听到声音就断"）。缺省用内置默认表。 |
 | `wakeStopMaxLen` | number | 命中打断词前的归一化文本长度上限，挡住正常长句问题，避免把"为什么停止"当打断。缺省 6。 |
-| `vad` | object | 唤醒检测的 VAD 判定参数：`threshold`(语音概率阈值)、`startFrames`(连续语音帧数判开口)、`endFrames`(连续静音帧数判段结束)。缺省 0.55/3/15。门槛越低越不丢开头字、但环境噪音误触发多;越高反之。 |
+| `vad` | object | 唤醒检测的 VAD 判定参数：`threshold`(语音概率阈值)、`startFrames`(连续语音帧数判开口)、`endFrames`(连续静音帧数判段结束)。缺省 0.45/2/12；门槛越低越容易收进短促唤醒词，也会增加送 ASR 的环境音。 |
 
 ## server
 
