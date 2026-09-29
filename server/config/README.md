@@ -36,10 +36,10 @@ npm start                 # 固定加载 server/config/local.json
 | `profile` | string | 仅作标识，固定为 `local` 便于人读；不影响加载逻辑（启动固定加载 `local.json`，除非 `VA_PROFILE` 显式指定别的文件）。 |
 | `wakeWords` | string[] | 唤醒词列表：命中任意一个即唤醒（**唤醒词同时也是打断词**：在播回答时说到它就停播）。匹配三层：① 归一化后字面子串；② **拼音逐音节**（忽略声调，覆盖同音字：超包/超保/潮宝/朝宝…）；③ **音节级模糊**（声母或韵母相同算半像，首音节必须一致、平均 ≥0.75，覆盖现场实测的「你要抄本 / 你好超本 / 你好超板」这类不同音误识别）。示例见 `local.json`。 |
 | `wakeFuzzyMatch` | boolean | 缺省 `true`。关掉（`false`）后只剩字面 + 拼音两层匹配，叫不醒的情况会变多，但误触概率更低。 |
-| 播放状态上报 | — | （无需配置）前端经 `/api/wake` 上报 `{type:'playing', text}` / `{type:'idle'}`，`text` 是实际送 TTS 的播报文本。后端过滤外放回声；播放中识别到「唤醒词 + 问题」直接打断并回答，只说唤醒词则打开跟随窗口。没听清唤醒词但识别到非回声发言时只停播，不自动问答。 |
-| `wakeFollowUpTimeout` | number（秒） | **只说唤醒词（没带问题）时**：安静打开“等你提问”的短窗口，缺省 15 秒，从识别到唤醒词时开始计时。窗口内直接说话即可；默认每问唤醒模式下，这个窗口只接一问。带问题的唤醒（「你好超宝，库存多少」）不开窗口。 |
+| 播放状态上报 | — | （无需配置）前端经 `/api/wake` 上报 `{type:'playing', text}` / `{type:'idle'}`，`text` 是实际送 TTS 的播报文本。后端过滤外放回声；播放中识别到唤醒词会先打断并打开提问窗口，下一段说话才回答。没听清唤醒词但识别到非回声发言时只停播，不自动问答。 |
+| `wakeFollowUpTimeout` | number（秒） | 唤醒后“等你提问”的短窗口，缺省 5 秒；唤醒词所在语音段只负责唤醒，同段 ASR 尾字不当问题。5 秒内开始说下一段话就会等待整句和 ASR 完成并立即回答；没有开口则休眠。默认每问唤醒模式下，这个窗口只接一问。 |
 | `wakeTimeout` | number（秒） | 唤醒窗口总秒数：命中唤醒词后这段时间内免唤醒词连续问答；随 `/api/wake` 的 `wake` 事件 `timeoutSeconds` 下发给前端。开了 `wakeRequireWord` 后只有手动唤醒会用到这个窗口。 |
-| `wakeRequireWord` | boolean | 缺省 `true`：每次提问都带唤醒词，命中后只回答本句并发 `sleep` 复位；只说唤醒词会开启短跟随窗口。配置 `false` 可恢复长窗口内免唤醒词问答；单连接可用 `?requireWake=1/0` 覆盖。 |
+| `wakeRequireWord` | boolean | 缺省 `true`：每轮先说唤醒词，下一段在短窗口提问，回答后发 `sleep` 复位。配置 `false` 可在首问后恢复长窗口内连续问答；单连接可用 `?requireWake=1/0` 覆盖。 |
 | `speech` | object | 播报文本策略，见下两行。 |
 | `speech.mode` | string | `full`（缺省）**数字人与对话框用同一个 LLM，LLM 答什么数字人就念什么**（只清掉 HTML/Markdown 排版噪声，不会念出表格竖线/# 号）；`key-numbers` 规则精简，只念「数字+单位」的关键片段；`llm` 再起一条独立 LLM 链路把回答改写成 20~50 字口语（角色=数字人播报员，不念表格/代码/Markdown）。弹窗/字幕**始终**是完整回答（`delta`/`done.replyText`），只有 TTS 用播报文本。 |
 | `speech.summary` | object | `mode: "llm"` 时这条独立链路的 LLM 配置，字段与顶层 `llm` 相同（`provider`/`baseUrl`/`apiKey`/`model`/`url`/`agentSlug`/`agentId`/`timeoutMs`），另可加 `system` 覆盖默认角色提示。**建议 `openai-compatible`**（不建会话线程）；用 yuxi 会为每次改写建一条会话。留空或失败自动退回 `key-numbers`，再不行播完整回复。 |

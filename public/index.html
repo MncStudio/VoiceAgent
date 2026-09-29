@@ -75,9 +75,8 @@
       <div class="api-desc">
         连接 <code>/api/wake</code>,持续发送 16k mono int16 PCM 块(二进制)。
         后端用 VAD+ASR 检测唤醒词(可改 <code>server/config/*.json</code> 的 <code>wakeWords</code>),
-        命中后去掉唤醒词、剩余文本送 LLM,自动回答并经 <code>/api/tts</code> 流式播放。
-        命中即进入唤醒窗口(<code>wakeTimeout</code> 秒):窗口内说话<b>免唤醒词</b>直接回答,
-        超时自动休眠,需重新说唤醒词。页面加载即自动开始监听。
+        命中唤醒词后安静等待 5 秒,下一段话说完即发送并流式播放回答。
+        若 5 秒内没有开口则自动休眠,需重新说唤醒词。页面加载即自动开始监听。
       </div>
       <div class="row">
         <button id="wakeBtn" class="secondary">开始监听</button>
@@ -218,7 +217,7 @@
       switch (s) {
         case 'starting': wakeHint.textContent = '正在请求麦克风权限…'; break;
         case 'waiting-activation': wakeHint.textContent = '已授权,点击页面任意处以开始监听'; break;
-        case 'listening': wakeHint.textContent = '待唤醒,说「你好小智 + 问题」'; break;
+        case 'listening': wakeHint.textContent = '待唤醒，先说唤醒词，再提问'; break;
         case 'wake-active': wakeHint.textContent = '已唤醒，请在倒计时内提问'; break;
         case 'sleep': wakeHint.textContent = idleSec
           ? '已静默 ' + idleSec + ' 秒后休眠,说「你好小智」重新唤醒'

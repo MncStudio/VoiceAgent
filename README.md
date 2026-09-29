@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | 语音问答 | `POST /api/chat?stream=1` → `WS /api/chat_stream` | 先上传录音识别成文本,再连流式通道问答(两跳) |
 | 文字问答 | `WS /api/chat_stream` | 直接发文本,后端一条龙流式 LLM→TTS |
-| 唤醒词免按键 | `WS /api/wake` | 前端常驻推 16k int16 PCM，默认每次提问都要带唤醒词；只喊唤醒词后安静等待提问 15 秒，播放中带问题唤醒可直接打断并回答 |
+| 唤醒词免按键 | `WS /api/wake` | 前端常驻推 16k int16 PCM；先单独喊唤醒词，安静等待提问最多 5 秒；下一段话说完即发送，回答后休眠 |
 
 **流式问答(文字/语音)**:经 `WS /api/chat_stream` 后端一条龙 `LLM 流式增量 → 断句器切句 → 逐句 TTS → 顺序推 PCM`,首句音频不必等整段回复生成完,降低首字延迟。回复文本分两路:**弹窗/字幕拿 LLM 完整回复**(`delta`/`done.replyText`);**语音只念 `speech.mode` 决定的播报文本**(`done.speechText` 回带):默认 `full`——**数字人与对话框用同一个 LLM,LLM 答什么数字人就念什么**(只清掉 HTML/Markdown 排版噪声);另可选 `key-numbers`(规则只念「数字+单位」)与 `llm`(再起一条独立链路改写成口语)。见 `server/speech.js` 与 `server/stream.js`。
 

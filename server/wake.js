@@ -7,8 +7,7 @@ const { pinyin } = require('pinyin-pro'); // 拼音模糊匹配,兼容 ASR 同�
 
 // 唤醒检测:前端常驻推 16k mono int16 PCM 块,这里用流式 Silero VAD 判"开口段",
 // 段结束送 ASR,归一化文本后与配置的唤醒词匹配(字符精确 + 拼音模糊,兼容同音字误识别)。
-// 命中后**自动回答**:去掉唤醒词,剩余文本直接送 LLM→TTS,音频经 WS 回传前端播放(免按键)。
-// 默认带问题的唤醒只回答本句；只说唤醒词时开短跟随窗口。
+// 唤醒词所在的语音段只负责唤醒；下一段实际提问才自动回答，避免 ASR 尾字误触发。
 // 显式关闭 requireWake 才会用 wakeTimeout 长窗口连续问答。
 // 唤醒词来自 server/config/{profile}.json 的 wakeWords,可配置多个、可改。
 
@@ -161,9 +160,9 @@ class WakeDetector {
     // 每次提问都要求带唤醒词(config.wakeRequireWord):命中唤醒词只回答本句,不开"窗口内免唤醒词"的窗口。
     // 手动唤醒(config 之外的用户主动操作)仍开窗口,保留"唤醒词检测不到"时的兜底路径。
     this.requireWake = !!requireWake;
-    // 只说唤醒词（没带问题）时开的"等你提问"短窗口：这段时间内直接说话即可，不用再说唤醒词。
-    // 单独配（默认 15s），不能复用 wakeTimeout（大屏配了 300s，会把环境闲聊都当问题）。
-    this.followUpMs = followUpMs > 0 ? followUpMs : 15000; // 单独唤醒后安静等待用户思考、提问
+    // 唤醒词所在语音段之后开的"等你提问"短窗口：下一段直接说话即可。
+    // 单独配（默认 5s），不能复用 wakeTimeout（大屏配了 300s，会把环境闲聊都当问题）。
+    this.followUpMs = followUpMs > 0 ? followUpMs : 5000; // 唤醒后安静等待用户思考、提问
     // 音节级模糊容错（口音/ASR 误识别）：默认开，可用 config.wakeFuzzyMatch=false 关掉
     this.fuzzy = fuzzyMatch !== false;
     this.onEvent = onEvent; // 回调(type, payload):answer=回答、wake=命中唤醒词、sleep=已休眠
@@ -175,7 +174,7 @@ class WakeDetector {
     this.startFrames = vad.startFrames ?? 2; // 约 64ms 判开口
     this.endFrames = vad.endFrames ?? 12; // 约 384ms 判段结束，减少打断等待
     this.armed = false; // 唤醒窗口内 true:说话免唤醒词直接回答
-    this.followUpAwaiting = false; // 只说唤醒词后的单次提问窗口
+    this.followUpAwaiting = false; // 唤醒后的单次提问窗口
     this.lastActiveAt = 0; // 上次唤醒/回答时间,每次回答刷新,休眠倒计时按它重新计时
     this.sleepTimer = null; // 唤醒窗口休眠定时器(准点触发,主动推 sleep)
     this.ring = new Ring(PAD_SAMPLES);
@@ -313,7 +312,12 @@ class WakeDetector {
           this.segmentPlayback = { playing: this.playing, text: this.playingText };
           // 窗口内只要开口就刷新倒计时：等待时间按"静默"算，不能因为用户正在说话
           // （VAD+ASR 还有 ~1s 延迟）而先超时，把整句问题丢掉。
-          if (this.armed) {
+          if (this.armed && this.followUpAwaiting) {
+            // 5 秒只限制开口时间；用户已开口就等这句话结束和 ASR 完成。
+            if (this.sleepTimer) clearTimeout(this.sleepTimer);
+            this.sleepTimer = null;
+            this.lastActiveAt = Date.now();
+          } else if (this.armed) {
             this.lastActiveAt = Date.now();
             this._scheduleSleep();
           }
@@ -376,6 +380,10 @@ class WakeDetector {
       return;
     }
     this.classifying = true;
+    if (this.armed && this.followUpAwaiting && this.sleepTimer) {
+      clearTimeout(this.sleepTimer);
+      this.sleepTimer = null;
+    }
     const heardWhilePlaying = playback ? playback.playing : this.playing;
     const t = new Timing('wake');
     asr
@@ -445,25 +453,9 @@ class WakeDetector {
           console.log(`[wake] 未命中唤醒词,识别为:「${text}」`);
           return;
         }
-        // 唤醒词同时也是"打断词"：说到唤醒词就停掉正在播的回答，再按有没有带问题分流。
-        // 唤醒词本身可能是真的，后半句却是扬声器回声；此时只进入等待窗口。
-        const question = heardWhilePlaying && looksLikeEcho(m.rest, spokenText) ? '' : m.rest;
-        if (question) {
-          // 播报期间若整句不是回声，保留同一句里的问题，直接打断并回答。
-          if (heardWhilePlaying) this.onEvent('interrupt');
-          this.onEvent('wake', { word: m.word, timeoutSeconds: Math.round(this.wakeTimeoutMs / 1000) });
-          if (!this.requireWake) {
-            this.armed = true;
-            this.armedTimeoutMs = this.wakeTimeoutMs;
-            this.lastActiveAt = now;
-            this._scheduleSleep();
-          }
-          this.answer(question);
-          if (this.requireWake) this.onEvent('sleep', { idleSeconds: 0 });
-          return;
-        }
-        // 只说唤醒词：先打断在播的回答，再安静等待提问（默认 15s）。
-        // wake 事件带短窗口秒数，前端立即显示倒数；窗口内第一句问题才回答。
+        // 唤醒词所在的整段只负责唤醒；ASR 多识别出的尾字不能直接触发 LLM。
+        // 下一段开口才是提问，最多等 5 秒；开始说话后立即等待该段结束并识别。
+        if (m.rest) console.log(`[wake] 唤醒段余文暂不作问题:「${m.rest.slice(0, 30)}」`);
         this.onEvent('wake', {
           word: m.word,
           timeoutSeconds: Math.round(this.followUpMs / 1000),
@@ -481,6 +473,7 @@ class WakeDetector {
         this.classifying = false;
         const next = this.pendingSegments.shift();
         if (next) this.classify(next.wav, next.playback);
+        else if (this.armed && this.followUpAwaiting && !this.sleepTimer) this._scheduleSleep();
       });
   }
 
