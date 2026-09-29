@@ -116,13 +116,29 @@ async function feed(det, text) {
     det.close();
   }
 
-  // 3) 只说唤醒词:仍回固定问候
+  // 3) 只说唤醒词:先打断在播的回答,再回固定问候,并开一个"等你提问"的短窗口
   {
     const events = [];
     const det = makeDetector(events, true);
     await feed(det, '你好小智');
-    assert.strictEqual(events[0].type, 'wake');
-    assert.deepStrictEqual(events[1], { type: 'answer', userText: '你好小智', replyText: '我在，请讲' });
+    assert.deepStrictEqual(events.map((e) => e.type), ['wake', 'interrupt', 'answer']);
+    assert.deepStrictEqual(events[2], { type: 'answer', userText: '你好小智', replyText: '我在，请讲' });
+    assert.strictEqual(det.armed, true, '只说唤醒词要开窗口等你提问');
+    assert.strictEqual(det.armedTimeoutMs, 15000, '窗口用 followUp 时长，不是 5 分钟的 wakeTimeout');
+    // 窗口内直接提问（不再说唤醒词）
+    events.length = 0;
+    await feed(det, '库存还有多少');
+    assert.deepStrictEqual(events, [{ type: 'answer', userText: '库存还有多少' }]);
+    det.close();
+  }
+
+  // 3b) 唤醒词 + 问题（一句话问完）：直接答、不开窗口
+  {
+    const events = [];
+    const det = makeDetector(events, true);
+    await feed(det, '你好小智 库存还有多少');
+    assert.deepStrictEqual(events.map((e) => e.type), ['wake', 'answer', 'sleep']);
+    assert.strictEqual(det.armed, false);
     det.close();
   }
 

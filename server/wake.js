@@ -84,7 +84,7 @@ class Ring {
 }
 
 class WakeDetector {
-  constructor(wakeWords, onEvent, wakeTimeoutMs, vad = {}, stopWords, stopMaxLen, requireWake = false) {
+  constructor(wakeWords, onEvent, wakeTimeoutMs, vad = {}, stopWords, stopMaxLen, requireWake = false, followUpMs = 0) {
     this.wakeWords = wakeWords.map(normalize).filter(Boolean);
     this.wakeSyllables = this.wakeWords.map(toSyllables); // 拼音匹配用,构造时预计算一次
     // 打断词可配(config.wakeStopWords 覆盖默认),每个归一化 + 拼音预处理,供 matchStop 用。
@@ -94,6 +94,10 @@ class WakeDetector {
     // 每次提问都要求带唤醒词(config.wakeRequireWord):命中唤醒词只回答本句,不开"窗口内免唤醒词"的窗口。
     // 手动唤醒(config 之外的用户主动操作)仍开窗口,保留"唤醒词检测不到"时的兜底路径。
     this.requireWake = !!requireWake;
+    // 只说唤醒词（没带问题）时开的"等你提问"短窗口：这段时间内直接说话即可，不用再说唤醒词。
+    // 单独配（默认 15s），不能复用 wakeTimeout（大屏配了 300s，会把环境闲聊都当问题）。
+    this.followUpMs = followUpMs > 0 ? followUpMs : 15000;
+    this.armedTimeoutMs = this.wakeTimeoutMs; // 当前窗口时长（手动唤醒=wakeTimeout，跟随=followUp）
     this.onEvent = onEvent; // 回调(type, payload):answer=回答、wake=命中唤醒词、sleep=已休眠
     this.wakeTimeoutMs = wakeTimeoutMs || 300000; // 唤醒窗口时长,默认 5 分钟
     // VAD 开口/静音判定(config.vad 可覆盖)。门槛太低环境噪音误触发多,
@@ -309,16 +313,27 @@ class WakeDetector {
           console.log(`[wake] 未命中唤醒词,识别为:「${text}」`);
           return;
         }
-        // 每次提问都带唤醒词(requireWake):只回答本句,不开窗口 —— 窗口内免唤醒词会让
-        // 环境里的闲聊被当成问题。给前端补一个 sleep,让"已唤醒"指示与本轮一起复位。
-        if (!this.requireWake) {
-          this.armed = true;
-          this.lastActiveAt = now;
-          this._scheduleSleep();
-        }
+        // 唤醒词同时也是"打断词"：说到唤醒词就停掉正在播的回答，再按有没有带问题分流。
         this.onEvent('wake', { word: m.word, timeoutSeconds: Math.round(this.wakeTimeoutMs / 1000) });
-        this.answer(m.rest, m.word);
-        if (this.requireWake) this.onEvent('sleep', { idleSeconds: 0 });
+        if (m.rest) {
+          // 唤醒词 + 问题（一句话问完）：直接答，不开窗口 —— 环境闲聊不会被当问题。
+          if (!this.requireWake) {
+            this.armed = true;
+            this.armedTimeoutMs = this.wakeTimeoutMs;
+            this.lastActiveAt = now;
+            this._scheduleSleep();
+          }
+          this.answer(m.rest, m.word);
+          if (this.requireWake) this.onEvent('sleep', { idleSeconds: 0 });
+          return;
+        }
+        // 只说唤醒词：先打断在播的回答，再开一个短窗口等提问（窗口内直接说话即可）。
+        this.onEvent('interrupt');
+        this.armed = true;
+        this.armedTimeoutMs = this.followUpMs;
+        this.lastActiveAt = now;
+        this._scheduleSleep();
+        this.answer('', m.word); // 回固定问候（"我在，请讲"），之后就是倾听状态
       })
       .catch((e) => console.error(`[wake] 唤醒段识别失败: ${e.message}`))
       .finally(() => {
@@ -328,14 +343,14 @@ class WakeDetector {
 
   // 唤醒窗口休眠倒计时:命中唤醒词或窗口内每次回答都会重置。到点主动推 sleep,
   // 不用等用户下一句开口才判超时(旧行为:静默超时后前端已显示休眠,后端却还没真正睡)。
-  _scheduleSleep() {
+  _scheduleSleep(ms) {
     if (this.sleepTimer) clearTimeout(this.sleepTimer);
     this.sleepTimer = setTimeout(() => {
       this.sleepTimer = null;
       if (!this.armed) return;
       this.armed = false;
       this.onEvent('sleep', { idleSeconds: Math.round((Date.now() - this.lastActiveAt) / 1000) });
-    }, this.wakeTimeoutMs);
+    }, ms || this.armedTimeoutMs || this.wakeTimeoutMs);
   }
 
   // 连接关闭时清掉休眠定时器,避免残留回调。
@@ -361,7 +376,7 @@ class WakeDetector {
 // requireWake=true 时每次提问都要带唤醒词(命中只答本句,不开窗口),见 WakeDetector。
 // 接入方也可按连接用 `?requireWake=1` 只对自己的连接开这个模式(大屏就是这种用法):
 // 配置是全局默认,查询参数是单连接覆盖,判定与执行都在服务端。
-function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen, requireWake = false) {
+function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen, requireWake = false, followUpSec = 0) {
   const words = Array.isArray(wakeWords) ? wakeWords : [];
   const timeoutMs = (wakeTimeoutSec && wakeTimeoutSec > 0 ? wakeTimeoutSec : 300) * 1000;
   wss.on('connection', (ws, req) => {
@@ -371,7 +386,7 @@ function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen,
     const detector = new WakeDetector(words, (type, payload) => {
       if (ws.readyState !== ws.OPEN) return;
       ws.send(JSON.stringify({ type, ...payload }));
-    }, timeoutMs, vad, stopWords, stopMaxLen, requireWakeForConn);
+    }, timeoutMs, vad, stopWords, stopMaxLen, requireWakeForConn, followUpSec > 0 ? followUpSec * 1000 : 0);
     // init 异步加载 ONNX 模型(数百 ms),消息到达时等它就绪再喂,避免丢帧
     const ready = detector.init().catch((e) => {
       console.error('[wake] 初始化失败:', e.message);
@@ -399,6 +414,7 @@ function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen,
           const msg = JSON.parse(data.toString());
           if (msg && msg.type === 'wake_manual') {
             detector.armed = true;
+            detector.armedTimeoutMs = detector.wakeTimeoutMs; // 手动唤醒=正常窗口
             detector.lastActiveAt = Date.now();
             detector._scheduleSleep(); // 重置窗口倒计时
             if (ws.readyState === ws.OPEN) {
