@@ -304,7 +304,10 @@
 
       this._tts = new TtsPlayer(this.baseUrl);
       this._tts.onError = (msg) => this._emit('error', 'TTS 失败:' + msg);
-      this._tts.onStateChange = () => this._refreshState();
+      this._tts.onStateChange = (playing) => {
+        this._notifyWakePlaying(playing);
+        this._refreshState();
+      };
       this._tts.onAudioStream = (stream) => this._emit('audioStream', stream);
       this._tts.onAudioLevel = (level) => this._emit('audioLevel', level);
 
@@ -347,6 +350,19 @@
     }
 
     get wakeActive() { return this._wakeOn; }
+
+    // 告诉 /api/wake "我正在播报"：播放中收音必然混着它自己的声音，后端据此把
+    // 唤醒词后面那句不可信的识别结果当回声丢弃（只走"只说唤醒词"：打断+问候+等待窗口），
+    // 避免把回声乱码当问题回答、还顺手关掉等待窗口。
+    _notifyWakePlaying(playing) {
+      const ws = this._wakeWs;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (this._playingSent === !!playing) return;
+      this._playingSent = !!playing;
+      try {
+        ws.send(JSON.stringify({ type: playing ? 'playing' : 'idle' }));
+      } catch {}
+    }
 
     // 生成一个全新的会话键(不落盘):配合 newSessionPerAsk 每轮提问单独开一段对话。
     _makeSessionId() {

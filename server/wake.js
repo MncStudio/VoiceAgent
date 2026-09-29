@@ -387,8 +387,9 @@ class WakeDetector {
           return;
         }
         // 唤醒词同时也是"打断词"：说到唤醒词就停掉正在播的回答，再按有没有带问题分流。
-        if (m.rest) {
+        if (m.rest && !this.playing) {
           // 唤醒词 + 问题（一句话问完）：直接答，不开窗口 —— 环境闲聊不会被当问题。
+          // 注意：正在播报时不能走这里（rest 可能是它自己的回声，见 this.playing 注释）。
           this.onEvent('wake', { word: m.word, timeoutSeconds: Math.round(this.wakeTimeoutMs / 1000) });
           if (!this.requireWake) {
             this.armed = true;
@@ -400,7 +401,8 @@ class WakeDetector {
           if (this.requireWake) this.onEvent('sleep', { idleSeconds: 0 });
           return;
         }
-        // 只说唤醒词：先打断在播的回答，再开一个"等你提问"的短窗口（默认 5s）。
+        // 只说唤醒词（或播放中命中唤醒词，此时 rest 不可信）：先打断在播的回答，
+        // 再开一个"等你提问"的短窗口（默认 8s）。
         // wake 事件里带的是**这个窗口**的秒数（不是 wakeTimeout），前端据此显示倒数；
         // 窗口内问就直接答(_scheduleSleep 续期)，一直不问就超时发 sleep 关掉唤醒状态。
         this.onEvent('wake', {
@@ -413,6 +415,7 @@ class WakeDetector {
         this.armedTimeoutMs = this.followUpMs;
         this.lastActiveAt = now;
         this._scheduleSleep();
+        if (this.playing) console.log('[wake] 播放中命中唤醒词，按"只说唤醒词"处理（忽略可能混入的回声）');
         this.answer('', m.word); // 回固定问候（"我在，请讲"），之后就是倾听状态
       })
       .catch((e) => console.error(`[wake] 唤醒段识别失败: ${e.message}`))
@@ -492,6 +495,9 @@ function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen,
         // 用于唤醒词一直检测不到时兜底:点一下=说了唤醒词,窗口内直接说话即可回答。
         try {
           const msg = JSON.parse(data.toString());
+          // 前端 TTS 起播/结束：播放中命中唤醒词要按"只说唤醒词"处理（回声不可信）
+          if (msg && msg.type === 'playing') { detector.playing = true; return; }
+          if (msg && msg.type === 'idle') { detector.playing = false; return; }
           if (msg && msg.type === 'wake_manual') {
             detector.armed = true;
             detector.armedTimeoutMs = detector.wakeTimeoutMs; // 手动唤醒=正常窗口

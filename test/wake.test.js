@@ -164,6 +164,24 @@ async function feed(det, text) {
     det.close();
   }
 
+  // 3a) 播放中命中唤醒词：识别出的"后半句"可能是它自己的回声，一律按"只说唤醒词"处理
+  {
+    const events = [];
+    const det = makeDetector(events, true);
+    det.playing = true; // 前端上报 {type:'playing'}
+    await feed(det, '你好小智 到货计划一条到货清单零条'); // 后半句其实是回声
+    assert.deepStrictEqual(events.map((e) => e.type), ['wake', 'interrupt', 'answer'], '播放中命中唤醒词要打断+问候');
+    assert.strictEqual(events[2].replyText, '我在，请讲');
+    assert.strictEqual(events[0].followUp, true, '并且要开等待窗口（timeoutSeconds=8）');
+    assert.strictEqual(det.armed, true);
+    // 紧接着（播放已停）直接问，窗口内免唤醒词
+    det.playing = false;
+    events.length = 0;
+    await feed(det, '库存还有多少');
+    assert.deepStrictEqual(events, [{ type: 'answer', userText: '库存还有多少' }]);
+    det.close();
+  }
+
   // 3b) 唤醒词 + 问题（一句话问完）：直接答、不开窗口
   {
     const events = [];
