@@ -147,7 +147,7 @@ class WakeDetector {
     this.requireWake = !!requireWake;
     // 只说唤醒词（没带问题）时开的"等你提问"短窗口：这段时间内直接说话即可，不用再说唤醒词。
     // 单独配（默认 15s），不能复用 wakeTimeout（大屏配了 300s，会把环境闲聊都当问题）。
-    this.followUpMs = followUpMs > 0 ? followUpMs : 5000; // 唤醒后"等你提问"的窗口（秒级，不问就自动关）
+    this.followUpMs = followUpMs > 0 ? followUpMs : 8000; // 唤醒后"等你提问"的窗口（秒级，按静默计；不问就自动关）
     this.armedTimeoutMs = this.wakeTimeoutMs; // 当前窗口时长（手动唤醒=wakeTimeout，跟随=followUp）
     // 音节级模糊容错（口音/ASR 误识别）：默认开，可用 config.wakeFuzzyMatch=false 关掉
     this.fuzzy = fuzzyMatch !== false;
@@ -289,6 +289,12 @@ class WakeDetector {
           // 判到开口(约 96ms)即进入攒段;不再"开口即断"——打断改为语义化:
           // 段结束 ASR 识别出打断词(见 matchStop)才发 interrupt,避免环境噪音误断。
           this.state = 'speaking';
+          // 窗口内只要开口就刷新倒计时：等待时间按"静默"算，不能因为用户正在说话
+          // （VAD+ASR 还有 ~1s 延迟）而先超时，把整句问题丢掉。
+          if (this.armed) {
+            this.lastActiveAt = Date.now();
+            this._scheduleSleep();
+          }
           // 段头 padding = 已缓存的最近 100ms
           this.speechFrames = [this.ring.toArray()];
           this.speechSamples = this.ring.filled;

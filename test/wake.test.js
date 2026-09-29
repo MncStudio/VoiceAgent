@@ -153,10 +153,10 @@ async function feed(det, text) {
     const det = makeDetector(events, true);
     await feed(det, '你好小智');
     assert.deepStrictEqual(events.map((e) => e.type), ['wake', 'interrupt', 'answer']);
-    assert.deepStrictEqual(events[0], { type: 'wake', word: '你好小智', timeoutSeconds: 5, followUp: true });
+    assert.deepStrictEqual(events[0], { type: 'wake', word: '你好小智', timeoutSeconds: 8, followUp: true });
     assert.deepStrictEqual(events[2], { type: 'answer', userText: '你好小智', replyText: '我在，请讲' });
     assert.strictEqual(det.armed, true, '只说唤醒词要开窗口等你提问');
-    assert.strictEqual(det.armedTimeoutMs, 5000, '窗口用 followUp 时长(默认 5s)，不是 5 分钟的 wakeTimeout');
+    assert.strictEqual(det.armedTimeoutMs, 8000, '窗口用 followUp 时长(默认 8s)，不是 5 分钟的 wakeTimeout');
     // 窗口内直接提问（不再说唤醒词）
     events.length = 0;
     await feed(det, '库存还有多少');
