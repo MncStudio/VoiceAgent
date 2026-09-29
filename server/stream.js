@@ -141,9 +141,13 @@ class StreamPipeline {
     const mode = this.speechMode;
     if (mode === 'llm') return; // 播报文本交给 _speakSummary 整段改写，这里不逐句播
     if (mode === 'full') {
+      // full = LLM 答什么就念什么，但**排版标记要清掉**（`**加粗**`、`#`、表格竖线、HTML），
+      // 否则语音会把星号、竖线一起念出来（线上实测到过 `**1 条**`）。
+      const clean = speech.stripMarkup(sentence);
+      if (!clean) return;
       this.spokenAny = true;
-      this.speechText += sentence;
-      this._enqueue(gen, sentence);
+      this.speechText += clean;
+      this._enqueue(gen, clean);
       return;
     }
     const { withUnit, plain } = speech.speechParts(sentence, mode);

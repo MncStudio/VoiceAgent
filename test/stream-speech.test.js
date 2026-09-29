@@ -98,6 +98,22 @@ async function run(replyText) {
   assert.deepStrictEqual(synthesized, ['到货计划 0 条，到货清单 0 条。'], '表格行/ID 不该被念，只念带单位的关键数字');
   assert.strictEqual(ws.json('done')[0].speechText, '到货计划 0 条，到货清单 0 条。');
 
+  // ---- 3c) full 模式要清掉排版标记（弹窗保留原文，语音不念星号/竖线/HTML）----
+  {
+    const prev = config.speech;
+    config.speech = { mode: 'full' };
+    try {
+      const MD_REPLY = '## 结果\n今天到货计划 **1 条**，到货清单 0 条。';
+      synthesized = stub(MD_REPLY);
+      ws = await run(MD_REPLY);
+      assert.strictEqual(ws.json('done')[0].replyText, MD_REPLY, '弹窗/回复保持原文');
+      assert.strictEqual(ws.json('done')[0].speechText, '结果今天到货计划 1 条，到货清单 0 条。', '播报要清掉 ## 与 **，且不留空格');
+      assert.ok(!/[*#|]/.test(synthesized.join('')), `TTS 不该收到排版符号：${JSON.stringify(synthesized)}`);
+    } finally {
+      config.speech = prev;
+    }
+  }
+
   // ---- 4) 整段都没有带单位的关键数字:退回播"纯数字片段"(而不是把整段念完) ----
   const PLAIN_REPLY = '业务日期 2026-09-29，编号 kb_c0c1jyi65t。';
   synthesized = stub(PLAIN_REPLY);
