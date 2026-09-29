@@ -111,6 +111,30 @@ function fuzzyFindSubseq(syl, sub) {
   return -1;
 }
 
+// ---- 回声判定：分辨"这段识别文字是不是数字人自己在念的内容" ----
+// 外放时麦克风会把它自己的声音收回来，ASR 转出来的就是它正在念的话（还常带错字）。
+// 打断不再要求"必须识别到唤醒词"，而是：识别到的这段话**不是它自己在说的话**就打断。
+// 判据用字符二元组重合率（Dice 变体）：回声即使有错字，二字组重合度依然很高。
+function bigrams(s) {
+  const out = new Set();
+  for (let i = 0; i + 2 <= s.length; i++) out.add(s.slice(i, i + 2));
+  return out;
+}
+
+/** text 是否像是 playingText（数字人正在念的内容）的回声 */
+function looksLikeEcho(text, playingText) {
+  const a = normalize(text);
+  const b = normalize(playingText || '');
+  if (a.length < 4 || b.length < 4) return false; // 太短不判，避免"嗯/啊"误打断
+  if (b.includes(a)) return true; // 整段就是它正在说的话
+  const A = bigrams(a);
+  const B = bigrams(b);
+  if (!A.size) return false;
+  let hit = 0;
+  for (const g of A) if (B.has(g)) hit++;
+  return hit / A.size >= 0.5; // 一半以上二字组能在"正在念的文本"里找到 → 判为回声
+}
+
 // 环形缓冲:保留最近 PAD_SAMPLES 个样本,作为开口前/段尾的静音 padding。
 class Ring {
   constructor(n) {
@@ -135,7 +159,7 @@ class Ring {
 }
 
 class WakeDetector {
-  constructor(wakeWords, onEvent, wakeTimeoutMs, vad = {}, stopWords, stopMaxLen, requireWake = false, followUpMs = 0, fuzzyMatch = true) {
+  constructor(wakeWords, onEvent, wakeTimeoutMs, vad = {}, stopWords, stopMaxLen, requireWake = false, followUpMs = 0, fuzzyMatch = true, bargeIn = true) {
     this.wakeWords = wakeWords.map(normalize).filter(Boolean);
     this.wakeSyllables = this.wakeWords.map(toSyllables); // 拼音匹配用,构造时预计算一次
     // 打断词可配(config.wakeStopWords 覆盖默认),每个归一化 + 拼音预处理,供 matchStop 用。
@@ -151,6 +175,10 @@ class WakeDetector {
     this.armedTimeoutMs = this.wakeTimeoutMs; // 当前窗口时长（手动唤醒=wakeTimeout，跟随=followUp）
     // 音节级模糊容错（口音/ASR 误识别）：默认开，可用 config.wakeFuzzyMatch=false 关掉
     this.fuzzy = fuzzyMatch !== false;
+    // 说话即打断（barge-in）：数字人正在念的时候，只要识别到"不是它自己在念的内容"就发 interrupt。
+    // 前端在 TTS 起播/结束时通过 {type:'playing'|'idle'} 告诉这里"正在念什么"（见 playingText）。
+    this.bargeIn = bargeIn !== false;
+    this.playingText = '';
     this.onEvent = onEvent; // 回调(type, payload):answer=回答、wake=命中唤醒词、sleep=已休眠
     this.wakeTimeoutMs = wakeTimeoutMs || 300000; // 唤醒窗口时长,默认 5 分钟
     // VAD 开口/静音判定(config.vad 可覆盖)。门槛太低环境噪音误触发多,
@@ -374,9 +402,19 @@ class WakeDetector {
           return;
         }
 
-        // 未唤醒:必须匹配唤醒词才回答,否则整段丢弃。
+        // 未唤醒:必须匹配唤醒词才回答。
         const m = this.match(text);
         if (!m) {
+          // 说话即打断：正在念的时候，识别到的"不是它自己在念的内容"就打断（外放回声不误触）。
+          if (this.bargeIn && this.playingText) {
+            if (looksLikeEcho(text, this.playingText)) {
+              console.log(`[wake] 判为回声(它自己在念),忽略:「${text.slice(0, 30)}」`);
+              return;
+            }
+            console.log(`[wake] 说话即打断,识别为:「${text}」`);
+            this.onEvent('interrupt');
+            return;
+          }
           console.log(`[wake] 未命中唤醒词,识别为:「${text}」`);
           return;
         }
@@ -450,7 +488,7 @@ class WakeDetector {
 // requireWake=true 时每次提问都要带唤醒词(命中只答本句,不开窗口),见 WakeDetector。
 // 接入方也可按连接用 `?requireWake=1` 只对自己的连接开这个模式(大屏就是这种用法):
 // 配置是全局默认,查询参数是单连接覆盖,判定与执行都在服务端。
-function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen, requireWake = false, followUpSec = 0, fuzzyMatch = true) {
+function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen, requireWake = false, followUpSec = 0, fuzzyMatch = true, bargeIn = true) {
   const words = Array.isArray(wakeWords) ? wakeWords : [];
   const timeoutMs = (wakeTimeoutSec && wakeTimeoutSec > 0 ? wakeTimeoutSec : 300) * 1000;
   wss.on('connection', (ws, req) => {
@@ -460,7 +498,7 @@ function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen,
     const detector = new WakeDetector(words, (type, payload) => {
       if (ws.readyState !== ws.OPEN) return;
       ws.send(JSON.stringify({ type, ...payload }));
-    }, timeoutMs, vad, stopWords, stopMaxLen, requireWakeForConn, followUpSec > 0 ? followUpSec * 1000 : 0, fuzzyMatch);
+    }, timeoutMs, vad, stopWords, stopMaxLen, requireWakeForConn, followUpSec > 0 ? followUpSec * 1000 : 0, fuzzyMatch, bargeIn);
     // init 异步加载 ONNX 模型(数百 ms),消息到达时等它就绪再喂,避免丢帧
     const ready = detector.init().catch((e) => {
       console.error('[wake] 初始化失败:', e.message);
@@ -486,6 +524,16 @@ function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen,
         // 用于唤醒词一直检测不到时兜底:点一下=说了唤醒词,窗口内直接说话即可回答。
         try {
           const msg = JSON.parse(data.toString());
+          // 前端 TTS 起播/结束：把"正在念的文本"告诉这里，用于回声判定与说话即打断
+          if (msg && msg.type === 'playing') {
+            detector.playingText = String(msg.text || '');
+            console.log(`[wake] 开始播报(${detector.playingText.length} 字),说话即打断已就绪`);
+            return;
+          }
+          if (msg && msg.type === 'idle') {
+            detector.playingText = '';
+            return;
+          }
           if (msg && msg.type === 'wake_manual') {
             detector.armed = true;
             detector.armedTimeoutMs = detector.wakeTimeoutMs; // 手动唤醒=正常窗口
@@ -514,4 +562,8 @@ function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen,
 }
 
 // 导出 attach 供 index.js 挂载;WakeDetector 与纯文本匹配函数导出供测试(test/)用,无副作用。
-module.exports = { attach, WakeDetector, _test: { normalize, toSyllables, findSubseq, syllableScore, fuzzyFindSubseq } };
+module.exports = {
+  attach,
+  WakeDetector,
+  _test: { normalize, toSyllables, findSubseq, syllableScore, fuzzyFindSubseq, looksLikeEcho },
+};
