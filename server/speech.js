@@ -103,15 +103,10 @@ function shortenClause(clause) {
   return cut(clause.slice(start, end));
 }
 
-/** 挑选要播报的片段：优先带业务单位的数字片段，其次任意含数字片段；按顺序累加到长度上限 */
-function pickSpeechClauses(cleanText) {
-  const clauses = splitClauses(cleanText)
-    .map(cleanClause)
-    .filter((c) => c && NUMBER.test(c) && !STYLE_NOISE.test(c));
-  const withUnit = clauses.filter((c) => BUSINESS_UNIT.test(c));
-  const picked = withUnit.length ? withUnit : clauses;
+/** 把片段拼成播报文本：按顺序累加到长度上限，片段间补逗号，收尾补句号 */
+function joinClauses(clauses) {
   let out = '';
-  for (const clause of picked) {
+  for (const clause of clauses) {
     const piece = shortenClause(clause);
     if (!piece) continue;
     if (out && out.length + piece.length + 1 > MAX_SPEECH_CHARS) break;
@@ -120,6 +115,26 @@ function pickSpeechClauses(cleanText) {
   }
   if (!out) return '';
   return /[。！？…]$/.test(out) ? out : out + '。'; // 收尾给 TTS 一个停顿
+}
+
+/**
+ * 拆出两类播报片段：
+ *   withUnit —— 带业务单位的数字片段（要念的正文）；
+ *   plain    —— 只有数字、没单位的片段（表格行/ID/日期/序号）。
+ * 调用方（stream.js）按**整段回复**决定：有 withUnit 就只念 withUnit；
+ * 整段都没有 withUnit 时才拿 plain 兜底——否则表格里的 kb_xxx、2026-09-29 会被逐句念出来。
+ */
+function speechParts(text, mode) {
+  const clean = stripMarkup(text);
+  if (!clean) return { withUnit: '', plain: '' };
+  if (normalizeMode(mode) === 'full') return { withUnit: clean, plain: '' };
+  const clauses = splitClauses(clean)
+    .map(cleanClause)
+    .filter((c) => c && NUMBER.test(c) && !STYLE_NOISE.test(c));
+  return {
+    withUnit: joinClauses(clauses.filter((c) => BUSINESS_UNIT.test(c))),
+    plain: joinClauses(clauses.filter((c) => !BUSINESS_UNIT.test(c))),
+  };
 }
 
 /** 按标点把文本切成片段（每段带自己的尾标点） */
@@ -153,11 +168,10 @@ function hasNumber(text) {
  * @param {string} [mode] 'key-numbers' | 'full'，缺省/非法值按 'key-numbers'
  * @returns {string} 播报文本；精简模式下该句不含数字时返回 ''（调用方据此跳过该句 TTS）
  */
+/** 单句场景（含单测）：优先带单位的片段，没有才退回纯数字片段 */
 function toSpeechText(text, mode) {
-  const clean = stripMarkup(text);
-  if (!clean) return '';
-  if (normalizeMode(mode) === 'full') return clean;
-  return pickSpeechClauses(clean);
+  const { withUnit, plain } = speechParts(text, mode);
+  return withUnit || plain;
 }
 
 module.exports = {
@@ -166,5 +180,5 @@ module.exports = {
   toSpeechText,
   hasNumber,
   stripMarkup,
-  pickSpeechClauses,
+  speechParts,
 };

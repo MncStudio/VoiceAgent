@@ -83,7 +83,24 @@ async function run(replyText) {
   assert.strictEqual(ws.json('done')[0].replyText, CHITCHAT);
   assert.deepStrictEqual(synthesized, ['好的，我明白了。', '请随时吩咐。'], '没数字时兜底按句播完整回复');
 
-  // ---- 3) speech.mode = 'full':播报 = 完整回复 ----
+  // ---- 3) 表格行/ID 这类"只有数字没单位"的句子:整段有关键数字时不念 ----
+  const TABLE_REPLY =
+    '| 数据源 | 核查内容 | 结果 |\n' +
+    '| 聚能医工知识库（kb_c0c1jyi65t） | 检索库存 | 无仓储数据 |\n' +
+    '综上所述，到货计划 0 条，到货清单 0 条。';
+  synthesized = stub(TABLE_REPLY);
+  ws = await run(TABLE_REPLY);
+  assert.deepStrictEqual(synthesized, ['到货计划 0 条，到货清单 0 条。'], '表格行/ID 不该被念，只念带单位的关键数字');
+  assert.strictEqual(ws.json('done')[0].speechText, '到货计划 0 条，到货清单 0 条。');
+
+  // ---- 4) 整段都没有带单位的关键数字:退回播"纯数字片段"(而不是把整段念完) ----
+  const PLAIN_REPLY = '业务日期 2026-09-29，编号 kb_c0c1jyi65t。';
+  synthesized = stub(PLAIN_REPLY);
+  ws = await run(PLAIN_REPLY);
+  assert.strictEqual(synthesized.length, 1, `纯数字兜底应合成 1 句：${JSON.stringify(synthesized)}`);
+  assert.ok(/2026-09-29/.test(synthesized[0]), `兜底要念出数字：${synthesized[0]}`);
+
+  // ---- 5) speech.mode = 'full':播报 = 完整回复 ----
   const prevMode = config.speech && config.speech.mode;
   config.speech = { mode: 'full' };
   try {

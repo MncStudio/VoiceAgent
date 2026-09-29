@@ -57,7 +57,8 @@ class StreamPipeline {
     this.llmController = null;
     this.replyText = '';   // 完整回复(显示用)
     this.speechText = '';  // 实际播报文本(精简后,可能为空→走兜底)
-    this.spokenAny = false;// 是否已产出过播报文本
+    this.spokenAny = false;// 是否已产出过带单位的关键数字(正文播报)
+    this.plainFallback = []; // 只有数字没单位的片段(表格行/ID/日期),整段没有关键数字时才兜底播
     this._t = null;        // 本轮 Timing(chat_stream),用于链路耗时打点
     this._firstDelta = false;
     this._firstChunk = false;
@@ -75,6 +76,7 @@ class StreamPipeline {
     this.replyText = '';
     this.speechText = '';
     this.spokenAny = false;
+    this.plainFallback = [];
     const gen = this.gen;
 
     this._sendJson({ type: 'start', userText: text });
@@ -124,22 +126,50 @@ class StreamPipeline {
     for (const s of this.splitter.flush()) this._enqueueSpeech(gen, s);
   }
 
-  // 一句显示文本 → 播报文本后入队。精简模式下该句不含数字则整句不播(返回空,不入队)。
+  // 一句显示文本 → 播报文本后入队。
+  // 带业务单位的"关键数字"立刻播（保住流式低延迟）；只有数字没单位的片段（表格行/ID/日期/序号）
+  // 先攒进 plainFallback——整段回复都没有关键数字时才拿出来兜底，否则它们会被逐句念出来。
   _enqueueSpeech(gen, sentence) {
     if (gen !== this.gen) return;
     const mode = this.speechMode;
-    const spoken = mode === 'full' ? sentence : speech.toSpeechText(sentence, mode);
-    if (!spoken) return;
-    this.spokenAny = true;
-    this.speechText += spoken;
-    this._enqueue(gen, spoken);
+    if (mode === 'full') {
+      this.spokenAny = true;
+      this.speechText += sentence;
+      this._enqueue(gen, sentence);
+      return;
+    }
+    const { withUnit, plain } = speech.speechParts(sentence, mode);
+    if (withUnit) {
+      this.spokenAny = true;
+      this.speechText += withUnit;
+      this._enqueue(gen, withUnit);
+      return;
+    }
+    if (plain) this.plainFallback.push(plain);
   }
 
-  // 兜底:精简模式下整段回复一个数字都没有(纯寒暄/纯文字结论)时,按句播完整回复,
-  // 否则会出现"有问无声"。speech = 'full' 时每句都已入队,这里直接跳过。
+  // 兜底(两级),避免"有问无声",也避免把表格行念一堆:
+  //   1) 整段没有带单位的关键数字,但有纯数字片段 → 播这些纯数字（已是精简后的）;
+  //   2) 连数字都没有(纯寒暄/纯文字结论) → 按句播完整回复。
+  // speech = 'full' 或已经有正文播报时直接跳过。
   _fallbackSpeakFull(gen) {
     if (gen !== this.gen) return;
     if (this.speechMode === 'full' || this.spokenAny) return;
+    const plain = (this.plainFallback || []).join('').trim();
+    if (plain) {
+      const buf = new SentenceBuffer({
+        maxLen: config.llm?.maxSentenceLen || 80,
+        minLen: config.llm?.minSentenceLen || 5,
+      });
+      const parts = buf.push(plain);
+      parts.push(...buf.flush());
+      for (const s of parts.length ? parts : [plain]) {
+        this.spokenAny = true;
+        this.speechText += s;
+        this._enqueue(gen, s);
+      }
+      return;
+    }
     const full = speech.toSpeechText(this.replyText, 'full');
     if (!full) return;
     const tail = new SentenceBuffer({
