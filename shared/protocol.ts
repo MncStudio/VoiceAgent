@@ -23,7 +23,15 @@ export const clientEventSchema = z.discriminatedUnion('type', [
     heardChars: z.number().int().min(0).max(20000).optional(),
   }),
   z.object({ type: z.literal('vad'), speaking: z.boolean(), target: z.boolean() }),
-  z.object({ type: z.literal('speaker'), locked: z.boolean(), match: z.boolean() }),
+  z.object({
+    type: z.literal('speaker'),
+    locked: z.boolean(),
+    match: z.boolean(),
+    /** 整句说完后的最终声纹结果（相似度与有效语音时长），用于追问放行判断。 */
+    final: z.boolean().optional(),
+    score: z.number().min(-1).max(1).optional(),
+    speechMs: z.number().min(0).max(600000).optional(),
+  }),
   z.object({
     type: z.literal('playback'),
     turnId: z.string(),

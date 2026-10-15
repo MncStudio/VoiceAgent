@@ -82,6 +82,7 @@ app.post('/api/sessions', (_req, res) => {
     {
       wakeWord: config.WAKE_WORD,
       followupMs: config.FOLLOWUP_MS,
+      speakerReject: Math.max(0, config.SPEAKER_THRESHOLD - 0.15),
       semantic,
       speculative: config.SPECULATIVE === 'true',
     },

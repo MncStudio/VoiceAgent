@@ -306,7 +306,7 @@ function App() {
               <h2>{countdown && state === 'IDLE' ? '还想聊点什么？' : labels[state]}</h2>
               <p>
                 {countdown && state === 'IDLE'
-                  ? `可继续追问 · ${countdown}s${audio?.speaker === '目标说话人已锁定' ? '' : ' · 请点按开始'}`
+                  ? `可继续追问 · ${countdown}s`
                   : voice
                     ? '随时呼唤，也可以随时打断'
                     : '连接麦克风，开启语音对话'}
@@ -533,7 +533,7 @@ function App() {
             </label>
             <p className="settings-hint">
               VRM
-              仅在浏览器内读取。未锁定声纹时，连续对话和免唤醒打断需要点按；口型目前按音频能量驱动，字级时间戳为估算。
+              仅在浏览器内读取。追问无需唤醒词，锁定声纹后明显不是本人的话会被忽略；免唤醒打断需要声纹匹配。口型目前按音频能量驱动，字级时间戳为估算。
             </p>
           </section>
         </div>

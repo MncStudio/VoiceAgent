@@ -144,19 +144,14 @@ describe('打断、追问与播报体验', () => {
     const { c, opened } = harness();
     c.handle({ type: 'text', text: '你好' });
     await wait(30);
-    expect(c.state).toBe('IDLE');
-    c.handle({ type: 'speaker', locked: true, match: false }); // 已锁定声纹，需等待确认
+    c.handle({ type: 'speaker', locked: true, match: true });
     for (let i = 0; i < 100; i++) c.ingest(Buffer.alloc(640)); // 2 秒音频
+    // 已锁定声纹也不等声纹确认，开口即开始识别
     c.handle({ type: 'vad', speaking: true, target: false });
     await wait(20);
-    expect(c.state).toBe('IDLE');
-    await wait(1200); // 模拟声纹确认耗时
-    c.handle({ type: 'speaker', locked: true, match: true });
-    c.handle({ type: 'vad', speaking: true, target: true });
-    await wait(20);
     expect(c.state).toBe('LISTENING');
-    // 至少回放 1.2s（开口至今）+ 0.4s 余量
-    expect(opened[0].written).toBeGreaterThanOrEqual(1.5 * 32000);
+    // 至少回放 0.7s，覆盖 VAD 的 300ms 前置判定和句首
+    expect(opened[0].written).toBeGreaterThanOrEqual(0.7 * 32000);
   });
   it('未锁定声纹时也能免唤醒追问', async () => {
     const { c } = harness();
@@ -260,5 +255,86 @@ describe('本地 FunASR 结果归一', () => {
       { text: '你好超宝', final: false },
       { text: '你好，超宝。', final: true },
     ]);
+  });
+});
+describe('追问灵敏度', () => {
+  it('已锁定声纹时短句追问不等声纹，直接识别并作答', async () => {
+    const { c, opened, events } = harness();
+    c.handle({ type: 'text', text: '今天天气' });
+    await wait(30);
+    c.handle({ type: 'speaker', locked: true, match: true });
+    c.handle({ type: 'vad', speaking: true, target: false });
+    await wait(20);
+    expect(c.state).toBe('LISTENING');
+    opened[0].result({ text: '那明天呢', final: true });
+    c.handle({ type: 'vad', speaking: false, target: false });
+    // 短句声纹分数不可靠：不拒绝
+    c.handle({
+      type: 'speaker',
+      locked: true,
+      match: false,
+      final: true,
+      score: 0.3,
+      speechMs: 600,
+    });
+    await wait(1000);
+    expect(c.history.some((m) => m.role === 'user' && m.content === '那明天呢')).toBe(true);
+    expect(events.some((e) => e.type === 'done')).toBe(true);
+  });
+  it('明显是他人的长句追问被忽略，但追问窗口保留', async () => {
+    const { c, opened, events } = harness();
+    c.handle({ type: 'text', text: '今天天气' });
+    await wait(30);
+    c.handle({ type: 'speaker', locked: true, match: true });
+    c.handle({ type: 'vad', speaking: true, target: false });
+    await wait(20);
+    opened[0].result({ text: '妈你看到我的钥匙了吗', final: true });
+    c.handle({ type: 'vad', speaking: false, target: false });
+    c.handle({
+      type: 'speaker',
+      locked: true,
+      match: false,
+      final: true,
+      score: 0.1,
+      speechMs: 2000,
+    });
+    await wait(1000);
+    expect(c.history.some((m) => m.content === '妈你看到我的钥匙了吗')).toBe(false);
+    expect(c.state).toBe('IDLE');
+    const last = events.filter((e) => e.type === 'state').at(-1) as { followupUntil?: number };
+    expect(last.followupUntil ?? 0).toBeGreaterThan(Date.now());
+    // 本人随后追问仍然生效
+    c.handle({ type: 'vad', speaking: true, target: false });
+    await wait(20);
+    expect(c.state).toBe('LISTENING');
+  });
+  it('追问窗口到期时正在说的话不会被丢弃', async () => {
+    const { c, opened } = harness({ followupMs: 300 });
+    c.handle({ type: 'text', text: '你好' });
+    await wait(250);
+    c.handle({ type: 'vad', speaking: true, target: false });
+    await wait(200); // 窗口已过期，用户还在说
+    opened[0].result({ text: '再讲一个笑话吧', final: true });
+    c.handle({ type: 'vad', speaking: false, target: false });
+    await wait(800);
+    expect(c.history.some((m) => m.content === '再讲一个笑话吧')).toBe(true);
+  });
+  it('播报结束后的残余回声不会被当成追问', async () => {
+    const { c, opened } = harness(
+      {},
+      {
+        async *chat() {
+          yield '今天北京晴朗，适合出门。';
+        },
+      },
+    );
+    c.handle({ type: 'text', text: '天气' });
+    await wait(30);
+    c.handle({ type: 'vad', speaking: true, target: false });
+    await wait(20);
+    opened[0].result({ text: '适合出门', final: true });
+    c.handle({ type: 'vad', speaking: false, target: false });
+    await wait(800);
+    expect(c.history.filter((m) => m.role === 'user')).toHaveLength(1);
   });
 });

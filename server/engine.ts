@@ -60,6 +60,8 @@ export class Conversation {
   private speakerLocked = false;
   private speakerMatch = false;
   private followupListening = false;
+  /** 当前这句话说完后的整句声纹结果。 */
+  private verdict?: { match: boolean; score?: number; speechMs?: number };
   private noSpeechMs = 6000;
   private decisionEpoch = 0;
   private decisionAbort?: AbortController;
@@ -73,6 +75,8 @@ export class Conversation {
       followupMs: number;
       semantic?: SemanticPolicy;
       speculative?: boolean;
+      /** 整句声纹低于该分数且时长足够时才判为他人；默认 0.35。 */
+      speakerReject?: number;
     },
     private audio?: AudioOutput,
   ) {}
@@ -101,6 +105,7 @@ export class Conversation {
     if (event.type === 'speaker') {
       this.speakerLocked = event.locked;
       this.speakerMatch = event.match;
+      if (event.final) this.verdict = event;
       return;
     }
     this.processing = this.processing
@@ -330,7 +335,55 @@ export class Conversation {
       if (!this.userSpeaking) this.scheduleEndpoint(this.transcript);
     }
   }
+  /**
+   * 已锁定声纹时判断这句话是否放行。只有“足够长且明显不像本人”才拒绝；
+   * 短句、边缘分数或声纹未算完一律放行，避免本人追问被误拒。
+   */
+  private async speakerAccepted() {
+    if (!this.speakerLocked || this.speakerMatch) return true;
+    const start = performance.now();
+    while (!this.verdict && performance.now() - start < 400) await delay(30);
+    const v = this.verdict;
+    if (!v || v.match) return true;
+    return !(
+      (v.speechMs ?? 0) >= 1000 &&
+      v.score !== undefined &&
+      v.score < (this.opts.speakerReject ?? 0.35)
+    );
+  }
+  private lastAnswer() {
+    for (let i = this.history.length - 1; i >= 0; i--)
+      if (this.history[i].role === 'assistant') return this.history[i].content;
+    return '';
+  }
+  /** 丢弃这句话并回到待机；追问窗口剩余时间保留，本人仍可继续追问。 */
+  private dropUtterance() {
+    const until = this.followupUntil;
+    this.cancel();
+    this.closeRecognizer();
+    this.transcript = '';
+    this.committed = '';
+    this.emit({ type: 'transcript', text: '', final: false });
+    const left = until - Date.now();
+    this.followupUntil = left > 0 ? until : 0;
+    if (left > 0)
+      this.timeout = setTimeout(() => {
+        this.followupUntil = 0;
+        this.setState('IDLE');
+      }, left);
+    this.setState('IDLE');
+  }
   private finishListening() {
+    // 用户还在说（例如追问开头被短暂静音分隔），不因“无结果”超时结束聆听。
+    if (
+      !this.candidate &&
+      this.userSpeaking &&
+      this.state === 'LISTENING' &&
+      performance.now() - this.speechAt < 10000
+    ) {
+      this.armNoSpeech(1000);
+      return;
+    }
     const text = this.transcript;
     if (!text || this.candidate) {
       this.cancel();
@@ -365,11 +418,17 @@ export class Conversation {
       if (stale()) return;
       await this.settle();
       if (stale()) return;
-      if (this.speakerLocked && !this.speakerMatch) {
-        this.abortSpeculation();
-        this.transcript = '';
-        this.committed = '';
-        this.emit({ type: 'transcript', text: '', final: false });
+      if (!(await this.speakerAccepted()) || stale()) {
+        if (!stale()) this.dropUtterance();
+        return;
+      }
+      if (
+        this.followupListening &&
+        this.transcript.length >= 4 &&
+        isEcho(this.transcript, this.lastAnswer())
+      ) {
+        // 播报结束后的残余回声被识别成了“追问”。
+        this.dropUtterance();
         return;
       }
       if (this.followupListening && this.opts.semantic) {
@@ -382,10 +441,7 @@ export class Conversation {
           );
           if (decision !== this.decisionEpoch) return;
           if (!directed) {
-            this.cancel();
-            this.transcript = '';
-            this.emit({ type: 'transcript', text: '', final: false });
-            this.setState('IDLE');
+            this.dropUtterance();
             return;
           }
         } catch {
@@ -471,6 +527,7 @@ export class Conversation {
     if (this.speakerLocked && !speaking) this.speakerMatch = target;
     if (started) {
       this.speechAt = performance.now();
+      this.verdict = undefined;
       // 用户一开口就预热识别连接；唤醒词说完时握手已完成。
       if (!this.asr && !this.asrReady) this.p.asr.warm?.();
     }
@@ -491,11 +548,12 @@ export class Conversation {
       speaking &&
       this.state === 'IDLE' &&
       Date.now() < this.followupUntil &&
-      !this.followupListening &&
-      // 已锁定声纹时只接受目标说话人；未锁定时先接收，再由语义判断过滤闲聊。
-      (target || !this.speakerLocked)
+      !this.followupListening
     ) {
+      // 追问窗口内一开口就开始识别，不等声纹（短句根本攒不够声纹片段）；
+      // 是否本人在整句说完后用整句声纹判断，明显是他人才丢弃。
       this.followupListening = true;
+      clearTimeout(this.timeout); // 窗口到期不能打断正在说的追问
       this.setState('LISTENING');
       void this.listen('query', this.preRoll(), 3000).catch((e) => this.fail(e));
     }

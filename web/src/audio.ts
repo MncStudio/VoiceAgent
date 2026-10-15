@@ -163,11 +163,13 @@ export class MicrophonePipeline {
             // 立即上报说话结束，断句不再等待声纹推理；整段声纹结果随后单独更新。
             this.send({ type: 'vad', speaking: false, target: this.lastMatch });
             if (!this.speaker || !this.locked) return;
+            const speechMs = Math.max(0, Math.round(audio.length / 16) - 300);
             void this.speaker
-              .matches(audio, this.locked, this.policy.speakerThreshold)
-              .then((match) => {
-                if (!this.stopped && epoch === this.voiceEpoch)
-                  this.send({ type: 'speaker', locked: true, match });
+              .similarity(audio, this.locked)
+              .then((score) => {
+                if (this.stopped || epoch !== this.voiceEpoch) return;
+                const match = score >= this.policy.speakerThreshold;
+                this.send({ type: 'speaker', locked: true, match, final: true, score, speechMs });
               })
               .catch(() => {});
           },

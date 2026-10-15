@@ -271,7 +271,16 @@ describe('真实会话编排', () => {
     await flush();
     c.handle({ type: 'speaker', locked: true, match: false });
     result({ text: '旁人的问题。', final: true });
-    await new Promise((r) => setTimeout(r, 520));
+    // 整句声纹足够长且明显不像本人
+    c.handle({
+      type: 'speaker',
+      locked: true,
+      match: false,
+      final: true,
+      score: 0.1,
+      speechMs: 2000,
+    });
+    await new Promise((r) => setTimeout(r, 900));
     expect(chat).not.toHaveBeenCalled();
   });
 });
