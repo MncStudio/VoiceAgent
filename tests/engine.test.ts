@@ -1,0 +1,277 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Conversation } from '../server/engine';
+import type { Providers, Transcript } from '../server/providers/types';
+import type { ServerEvent } from '../shared/protocol';
+import { SemanticPolicy } from '../server/semantic';
+const active: Conversation[] = [];
+afterEach(() => {
+  active.forEach((c) => c.close());
+  active.length = 0;
+  vi.useRealTimers();
+});
+function harness(
+  llm?: Providers['llm'],
+  audio = false,
+  options: Partial<ConstructorParameters<typeof Conversation>[2]> = {},
+  tts?: Providers['tts'],
+) {
+  const events: ServerEvent[] = [];
+  let result: ((r: Transcript) => void) | undefined;
+  let aborted = false;
+  const p: Providers = {
+    demo: false,
+    asr: {
+      async open(onResult, _error, signal) {
+        result = onResult;
+        signal.addEventListener('abort', () => (aborted = true));
+        return { write() {}, finish() {}, close() {} };
+      },
+    },
+    llm: llm ?? {
+      async *chat() {
+        yield '你好。';
+      },
+    },
+    tts: tts ?? {
+      async *synth() {
+        yield Buffer.alloc(960);
+      },
+    },
+  };
+  const c = new Conversation(
+    p,
+    (e) => events.push(e),
+    { wakeWord: '你好超宝', followupMs: 8000, ...options },
+    audio ? { async write() {}, async drain() {}, clear() {} } : undefined,
+  );
+  active.push(c);
+  return { c, events, result: (r: Transcript) => result?.(r), aborted: () => aborted };
+}
+const flush = async () => {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+};
+describe('真实会话编排', () => {
+  it('旧 TTS 延迟报错不能取消新的回答', async () => {
+    const { c, events } = harness(
+      {
+        async *chat(messages, signal) {
+          const text = messages.at(-1)!.content;
+          if (text === '新问题') await new Promise((r) => setTimeout(r, 120));
+          signal.throwIfAborted();
+          yield text === '旧问题' ? '旧回答。' : '新回答。';
+        },
+      },
+      true,
+      {},
+      {
+        async *synth(text, signal) {
+          if (text.includes('旧'))
+            await new Promise((_, reject) =>
+              signal.addEventListener(
+                'abort',
+                () => setTimeout(() => reject(new Error('旧请求取消')), 40),
+                { once: true },
+              ),
+            );
+          else yield Buffer.alloc(960);
+        },
+      },
+    );
+    c.handle({ type: 'text', text: '旧问题' });
+    await flush();
+    c.handle({ type: 'text', text: '新问题' });
+    await new Promise((r) => setTimeout(r, 250));
+    expect(events.filter((e) => e.type === 'done')).toHaveLength(1);
+    expect(c.history.at(-1)?.content).toBe('新回答。');
+    expect(events.some((e) => e.type === 'error')).toBe(false);
+  });
+  it('清空后不把中断前的助手内容带回新会话', async () => {
+    let release: () => void = () => {};
+    const wait = new Promise<void>((r) => (release = r));
+    const { c, events } = harness(
+      {
+        async *chat(messages) {
+          yield messages.at(-1)?.content === '旧问题' ? '旧回答。' : '新回答。';
+          if (messages.at(-1)?.content === '旧问题') await wait;
+        },
+      },
+      true,
+    );
+    c.handle({ type: 'text', text: '旧问题' });
+    await flush();
+    const old = events.find((e) => e.type === 'delta');
+    if (old?.type === 'delta') c.handle({ type: 'playback', turnId: old.turnId, heardChars: 2 });
+    c.handle({ type: 'reset' });
+    await flush();
+    release();
+    c.handle({ type: 'text', text: '新问题' });
+    await flush();
+    expect(c.history).toEqual([
+      { role: 'user', content: '新问题' },
+      { role: 'assistant', content: '新回答。' },
+    ]);
+  });
+  it('文字流式回答按句合成并进入追问窗口', async () => {
+    const { c, events } = harness(undefined, true);
+    c.handle({ type: 'text', text: '你好' });
+    await flush();
+    expect(c.history).toEqual([
+      { role: 'user', content: '你好' },
+      { role: 'assistant', content: '你好。' },
+    ]);
+    expect(events.some((e) => e.type === 'utterance')).toBe(true);
+    expect(events.filter((e) => e.type === 'transcript')).toHaveLength(1);
+    expect(events.at(-1)).toMatchObject({ type: 'state', state: 'IDLE' });
+  });
+  it('唤醒复核失败不调用 LLM', async () => {
+    const chat = vi.fn(async function* () {
+      yield '错误回答';
+    });
+    const { c, result, events } = harness({ chat });
+    c.handle({ type: 'wake', source: 'kws' });
+    await flush();
+    result({ text: '你好宝宝', final: true });
+    await flush();
+    expect(chat).not.toHaveBeenCalled();
+    expect(c.state).toBe('CANDIDATE');
+    expect(events.some((e) => e.type === 'delta')).toBe(false);
+  });
+  it('唤醒后带命令只把命令送入上下文', async () => {
+    const { c, result } = harness();
+    c.handle({ type: 'wake', source: 'kws' });
+    await flush();
+    result({ text: '你好，超宝，介绍一下自己。', final: true });
+    await new Promise((resolve) => setTimeout(resolve, 520));
+    expect(c.history[0]).toEqual({ role: 'user', content: '介绍一下自己。' });
+  });
+  it('播报打断取消请求且只保留听到的文字', async () => {
+    let finish: () => void = () => {};
+    const wait = new Promise<void>((r) => (finish = r));
+    let signal: AbortSignal | undefined;
+    const { c, events } = harness(
+      {
+        async *chat(_messages, s) {
+          signal = s;
+          yield '这是第一句话。';
+          await wait;
+          if (!s.aborted) yield '这是第二句话。';
+        },
+      },
+      true,
+    );
+    c.handle({ type: 'text', text: '说两句话' });
+    await flush();
+    const delta = events.find((e) => e.type === 'delta');
+    expect(delta?.type).toBe('delta');
+    c.handle({
+      type: 'playback',
+      turnId: delta!.type === 'delta' ? delta!.turnId : '',
+      heardChars: 2,
+    });
+    c.handle({ type: 'interrupt', reason: 'stop' });
+    finish();
+    await flush();
+    expect(signal?.aborted).toBe(true);
+    expect(c.history).toEqual([
+      { role: 'user', content: '说两句话' },
+      { role: 'assistant', content: '这是' },
+    ]);
+    expect(c.state).toBe('IDLE');
+    expect(events.some((e) => e.type === 'done')).toBe(false);
+  });
+  it('未锁定说话人不能免唤醒打断', async () => {
+    const { c } = harness();
+    c.state = 'SPEAKING';
+    c.handle({ type: 'vad', speaking: true, target: false });
+    expect(c.state).toBe('SPEAKING');
+  });
+  it('断句不会在 VAD 仍检测到说话时抢答', async () => {
+    const chat = vi.fn(async function* () {
+      yield '你好。';
+    });
+    const { c, result } = harness({ chat });
+    c.handle({ type: 'wake', source: 'button' });
+    await flush();
+    c.handle({ type: 'vad', speaking: true, target: false });
+    result({ text: '我还没说完', final: false });
+    await new Promise((resolve) => setTimeout(resolve, 520));
+    expect(chat).not.toHaveBeenCalled();
+    c.handle({ type: 'vad', speaking: false, target: false });
+    await new Promise((resolve) => setTimeout(resolve, 520));
+    expect(chat).toHaveBeenCalledOnce();
+  });
+  it('投机请求在确认断句后复用，不重复调用 LLM', async () => {
+    const chat = vi.fn(async function* () {
+      yield '有效回答。';
+    });
+    const { c, result } = harness({ chat }, false, { speculative: true });
+    c.handle({ type: 'wake', source: 'button' });
+    await flush();
+    result({ text: '完整问题。', final: true });
+    await new Promise((r) => setTimeout(r, 520));
+    expect(chat).toHaveBeenCalledOnce();
+    expect(c.history.at(-1)?.content).toBe('有效回答。');
+  });
+  it('继续说话立即丢弃投机内容，不输出旧回答', async () => {
+    const signals: AbortSignal[] = [];
+    const { c, result, events } = harness(
+      {
+        async *chat(messages, signal) {
+          signals.push(signal);
+          yield `回答${messages.at(-1)?.content}。`;
+        },
+      },
+      false,
+      { speculative: true },
+    );
+    c.handle({ type: 'wake', source: 'button' });
+    await flush();
+    result({ text: '第一部分', final: false });
+    await new Promise((r) => setTimeout(r, 250));
+    expect(events.some((e) => e.type === 'delta')).toBe(false);
+    c.handle({ type: 'vad', speaking: true, target: false });
+    expect(signals[0]?.aborted).toBe(true);
+    result({ text: '完整的新问题。', final: true });
+    c.handle({ type: 'vad', speaking: false, target: false });
+    await new Promise((r) => setTimeout(r, 520));
+    expect(
+      events
+        .filter((e) => e.type === 'delta')
+        .map((e) => (e.type === 'delta' ? e.text : ''))
+        .join(''),
+    ).toBe('回答完整的新问题。。');
+  });
+  it('过时的语义断句结果不能在恢复说话后抢答', async () => {
+    let resolve: (v: boolean) => void = () => {};
+    const semantic = new SemanticPolicy({
+      async *chat() {
+        yield '1';
+      },
+    });
+    vi.spyOn(semantic, 'complete').mockImplementation(() => new Promise((r) => (resolve = r)));
+    const chat = vi.fn(async function* () {
+      yield '不该输出';
+    });
+    const { c, result } = harness({ chat }, false, { semantic });
+    c.handle({ type: 'wake', source: 'button' });
+    await flush();
+    result({ text: '还没说完', final: false });
+    await new Promise((r) => setTimeout(r, 250));
+    c.handle({ type: 'vad', speaking: true, target: false });
+    resolve(true);
+    await flush();
+    expect(chat).not.toHaveBeenCalled();
+  });
+  it('非目标说话人转写不能触发回答', async () => {
+    const chat = vi.fn(async function* () {
+      yield '错误响应';
+    });
+    const { c, result } = harness({ chat });
+    c.handle({ type: 'wake', source: 'button' });
+    await flush();
+    c.handle({ type: 'speaker', locked: true, match: false });
+    result({ text: '旁人的问题。', final: true });
+    await new Promise((r) => setTimeout(r, 520));
+    expect(chat).not.toHaveBeenCalled();
+  });
+});

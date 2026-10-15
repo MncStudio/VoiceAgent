@@ -1,0 +1,18 @@
+import { readFileSync, writeFileSync } from 'node:fs';
+const speech = readFileSync('.runtime/speech-24k.pcm');
+const pcm = Buffer.concat([Buffer.alloc(24000 * 2 * 7), speech, Buffer.alloc(24000 * 2 * 16)]);
+const header = Buffer.alloc(44);
+header.write('RIFF');
+header.writeUInt32LE(36 + pcm.length, 4);
+header.write('WAVEfmt ', 8);
+header.writeUInt32LE(16, 16);
+header.writeUInt16LE(1, 20);
+header.writeUInt16LE(1, 22);
+header.writeUInt32LE(24000, 24);
+header.writeUInt32LE(48000, 28);
+header.writeUInt16LE(2, 32);
+header.writeUInt16LE(16, 34);
+header.write('data', 36);
+header.writeUInt32LE(pcm.length, 40);
+writeFileSync('.runtime/microphone.wav', Buffer.concat([header, pcm]));
+console.log('已生成合成语音输入：7 秒静音 + 唤醒与指令 + 16 秒静音。');
