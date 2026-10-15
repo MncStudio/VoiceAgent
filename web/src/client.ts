@@ -17,6 +17,7 @@ export type AppConfig = {
   ttsModel: string;
   turnModel: string;
   speculative: boolean;
+  speakerThreshold?: number;
   assets: { kws: boolean; vad: boolean; speaker: boolean };
 };
 export class AssistantClient {
@@ -32,7 +33,9 @@ export class AssistantClient {
   private closed = false;
   private heard = 0;
   private activeTurn?: string;
+  private state = 'IDLE';
   private utterances: {
+    text: string;
     turnId: string;
     offset: number;
     length: number;
@@ -45,7 +48,16 @@ export class AssistantClient {
     private onEvent: (e: ServerEvent) => void,
     private onAudio: (s: AudioStatus) => void,
     private onLevel: (level: number) => void,
+    /** 控制连接或语音连接意外断开时回调，由界面负责自动重连。 */
+    private onLost: () => void = () => {},
   ) {}
+  /** 正在（或即将）播报的句子里是否包含该词，用于识别命令词 / 唤醒词的回声误触发。 */
+  private echoing(word: string) {
+    const now = performance.now();
+    return this.utterances.some(
+      (u) => now >= u.start - 300 && now <= u.start + u.duration + 800 && u.text.includes(word),
+    );
+  }
   async connect() {
     const response = await fetch('/api/sessions', { method: 'POST' });
     const result = await response.json();
@@ -56,6 +68,7 @@ export class AssistantClient {
     );
     this.ws.onmessage = ({ data }) => {
       const event = JSON.parse(data) as ServerEvent;
+      if (event.type === 'state') this.state = event.state;
       if (event.type === 'duck') this.setVolume(event.active ? 0.2 : 1);
       if (event.type === 'wake-confirmed') {
         void this.pipeline?.confirmWake();
@@ -75,6 +88,7 @@ export class AssistantClient {
         this.setVolume(1);
         const previous = this.utterances.at(-1);
         this.utterances.push({
+          text: event.text,
           turnId: event.turnId,
           offset: event.offset,
           length: event.text.length,
@@ -103,8 +117,7 @@ export class AssistantClient {
       this.onEvent(event);
     };
     this.ws.onclose = () => {
-      if (!this.closed)
-        this.onEvent({ type: 'error', message: '会话连接断开，请断开后重新连接。' });
+      if (!this.closed) this.onLost();
     };
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('会话连接超时。')), 10000);
@@ -214,10 +227,7 @@ export class AssistantClient {
         source.connect(this.analyser);
       });
       this.room.on(RoomEvent.Disconnected, () => {
-        if (!this.closed) {
-          this.mic?.stop();
-          this.onEvent({ type: 'error', message: '语音连接已断开，请重新连接。' });
-        }
+        if (!this.closed && !this.disabling) this.onLost();
       });
       await this.room.connect(data.url, data.token);
       await this.room.startAudio();
@@ -230,6 +240,12 @@ export class AssistantClient {
           this.setVolume(0.2);
         },
         () => this.stopPlayback(),
+        {
+          allowCommand: (keyword) =>
+            (this.state === 'SPEAKING' || this.state === 'THINKING') && !this.echoing(keyword),
+          allowWake: () => !this.echoing(config.wakeWord),
+          speakerThreshold: config.speakerThreshold ?? 0.5,
+        },
       );
       await this.pipeline.start(new MediaStream([this.mic.mediaStreamTrack]), config.assets);
     } catch (error) {
@@ -237,7 +253,9 @@ export class AssistantClient {
       throw error;
     }
   }
+  private disabling = false;
   private async disableVoice() {
+    this.disabling = true;
     await this.pipeline?.close();
     this.pipeline = undefined;
     this.mic?.stop();
@@ -249,6 +267,7 @@ export class AssistantClient {
     await this.context?.close();
     this.context = undefined;
     this.analyser = undefined;
+    this.disabling = false;
   }
   async close() {
     this.closed = true;

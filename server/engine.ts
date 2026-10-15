@@ -1,25 +1,48 @@
 import { randomUUID } from 'node:crypto';
 import type { AssistantState, ClientEvent, Message, ServerEvent } from '../shared/protocol.js';
 import type { Providers, ASRStream } from './providers/types.js';
-import { AudioRing, estimatedMarks, incomplete, isBackchannel, stripWake } from './audio.js';
+import {
+  AudioRing,
+  estimatedMarks,
+  hasWake,
+  incomplete,
+  isBackchannel,
+  isEcho,
+  nextSegment,
+  stripWake,
+} from './audio.js';
 import type { SemanticPolicy } from './semantic.js';
-import { AsyncQueue } from './providers/queue.js';
+import { AsyncQueue, Semaphore } from './providers/queue.js';
 export interface AudioOutput {
   write(pcm: Buffer, signal: AbortSignal): Promise<void>;
   drain(): Promise<void>;
   clear(): void;
 }
+/**
+ * 识别通道的用途：
+ * - verify：空闲时 KWS 候选，用环形缓冲复核唤醒词；
+ * - verify-speaking：播报/思考中 KWS 候选，复核通过后直接沿用这条识别流聆听；
+ * - barge：播报中检测到目标说话人，先压低音量再判断是否真的打断；
+ * - query：普通聆听（点按唤醒、追问、打断后）。
+ */
+type ListenMode = 'verify' | 'verify-speaking' | 'barge' | 'query';
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export class Conversation {
   state: AssistantState = 'IDLE';
   readonly ring = new AudioRing();
   readonly history: Message[] = [];
   private generation = 0;
+  /** 回答（LLM / TTS）生命周期。 */
   private abort = new AbortController();
+  /** 识别生命周期，与回答分开：打断时停止回答但保留正在进行的识别。 */
+  private listenAbort = new AbortController();
   private asr?: ASRStream;
   private asrReady?: Promise<void>;
   private pendingAudio: Buffer[] = [];
   private transcript = '';
   private committed = '';
+  private lastFinal = false;
+  private lastResultAt = 0;
   private candidate = false;
   private barge = false;
   private turnId?: string;
@@ -37,6 +60,7 @@ export class Conversation {
   private speakerLocked = false;
   private speakerMatch = false;
   private followupListening = false;
+  private noSpeechMs = 6000;
   private decisionEpoch = 0;
   private decisionAbort?: AbortController;
   private speculative?: { text: string; queue: AsyncQueue<string>; abort: AbortController };
@@ -109,15 +133,20 @@ export class Conversation {
     else if (this.asrReady && this.pendingAudio.length < 150)
       this.pendingAudio.push(Buffer.from(pcm));
   }
-  private cancel() {
-    this.generation++;
-    this.abort.abort();
-    this.abort = new AbortController();
+  private closeRecognizer() {
     this.recognizerEpoch++;
+    this.listenAbort.abort();
+    this.listenAbort = new AbortController();
     this.asr?.close();
     this.asr = undefined;
     this.asrReady = undefined;
     this.pendingAudio = [];
+  }
+  private cancel() {
+    this.generation++;
+    this.abort.abort();
+    this.abort = new AbortController();
+    this.closeRecognizer();
     clearTimeout(this.endpoint);
     clearTimeout(this.timeout);
     clearTimeout(this.duckTimer);
@@ -131,6 +160,24 @@ export class Conversation {
     this.barge = false;
     this.followupListening = false;
   }
+  /** 停止当前回答（LLM / TTS / 播放），保留正在进行的识别流。 */
+  private stopResponse() {
+    const turnId = this.turnId,
+      heardChars = this.heardChars;
+    this.generation++;
+    this.abort.abort();
+    this.abort = new AbortController();
+    clearTimeout(this.duckTimer);
+    clearTimeout(this.timeout);
+    this.abortSpeculation();
+    this.audio?.clear();
+    this.emit({ type: 'duck', active: false });
+    this.barge = false;
+    this.candidate = false;
+    this.retainHeard();
+    this.followupUntil = 0;
+    this.emit({ type: 'interrupted', turnId, heardChars });
+  }
   private retainHeard() {
     if (this.turnId && this.answer) {
       const heard = this.answer.slice(0, this.heardChars);
@@ -139,6 +186,11 @@ export class Conversation {
     this.answer = '';
     this.turnId = undefined;
     this.heardChars = 0;
+  }
+  /** 回放起点从 VAD 判定开口前约 400ms 开始，避免截掉句首。 */
+  private preRoll(minimum = 700) {
+    if (!this.speechAt) return minimum;
+    return Math.min(3000, Math.max(minimum, performance.now() - this.speechAt + 400));
   }
   private interrupt(reason: string, heard?: number) {
     if (heard !== undefined) this.heardChars = Math.min(heard, this.answer.length);
@@ -154,7 +206,8 @@ export class Conversation {
       return;
     }
     this.setState('LISTENING');
-    void this.listen(false, false, reason === 'wake' ? 3000 : 700).catch((e) => this.fail(e));
+    // 点按打断时缓冲里多是播报回声，只回放很短的一段。
+    void this.listen('query', reason === 'wake' ? 300 : 700).catch((e) => this.fail(e));
   }
   private async wake(source: 'button' | 'kws') {
     if (this.state === 'SPEAKING' || this.state === 'THINKING') {
@@ -162,10 +215,17 @@ export class Conversation {
         this.interrupt('wake');
         return;
       }
-      // KWS 候选先静音，复核失败恢复；不让候选直接污染历史。
+      // KWS 候选先压低音量，复核失败恢复；不让候选直接污染历史。
       this.emit({ type: 'duck', active: true });
       this.candidate = true;
-      if (!this.asr && !this.asrReady) await this.listen(true, true);
+      if (this.asr || this.asrReady) {
+        // 免唤醒打断的识别流已在运行，直接用它复核唤醒词。
+        clearTimeout(this.duckTimer);
+        this.duckTimer = setTimeout(() => this.finishBarge(), 2500);
+        return;
+      }
+      this.p.asr.warm?.();
+      await this.listen('verify-speaking');
       return;
     }
     this.cancel();
@@ -177,97 +237,101 @@ export class Conversation {
       this.emit({ type: 'notice', message: '演示模式：请在下方输入文字。' });
       return;
     }
-    await this.listen(source === 'kws');
+    await this.listen(source === 'kws' ? 'verify' : 'query');
   }
-  private async listen(verify: boolean, keepGeneration = false, preRollMs = 700) {
+  private armNoSpeech(ms = this.noSpeechMs) {
+    this.noSpeechMs = ms;
+    clearTimeout(this.timeout);
+    this.timeout = setTimeout(() => this.finishListening(), ms);
+  }
+  private async listen(mode: ListenMode, preRollMs = 700, noSpeechMs = 6000) {
     if (this.p.demo) return;
-    this.asr?.close();
-    this.asr = undefined;
-    const recognizerEpoch = ++this.recognizerEpoch;
+    this.closeRecognizer();
+    const recognizerEpoch = this.recognizerEpoch,
+      signal = this.listenAbort.signal,
+      verify = mode === 'verify' || mode === 'verify-speaking';
     this.transcript = '';
     this.committed = '';
-    const generation = this.generation,
-      signal = this.abort.signal;
+    this.lastFinal = false;
+    this.lastResultAt = performance.now();
+    this.noSpeechMs = noSpeechMs;
     const initial = this.ring.snapshot();
     this.pendingAudio = [];
-    this.asrReady = (async () => {
+    const ready = (async () => {
       const stream = await this.p.asr.open(
         (result) => {
-          if (
-            generation !== this.generation ||
-            signal.aborted ||
-            recognizerEpoch !== this.recognizerEpoch
-          )
-            return;
-          const raw = result.text;
-          if (verify && this.candidate) {
-            if (!raw.replace(/[\s，。！？、]/gu, '').includes(this.opts.wakeWord)) return;
-            this.candidate = false;
-            if (keepGeneration) {
-              this.interrupt('wake');
-              this.emit({ type: 'wake-confirmed' });
-              return;
-            }
-            this.setState('LISTENING');
-            this.emit({ type: 'wake-confirmed' });
-            this.emit({ type: 'notice', message: '我在，请说。' });
-            clearTimeout(this.timeout);
-            this.timeout = setTimeout(() => this.finishListening(), 12000);
-          }
-          if (this.barge) {
-            if (isBackchannel(raw)) {
-              this.finishBarge();
-              return;
-            }
-            this.interrupt('speech');
-            this.transcript = raw;
-            this.committed = result.final ? raw : '';
-            this.emit({ type: 'transcript', text: raw, final: false });
-            this.scheduleEndpoint(raw);
-            return;
-          }
-          const clean = stripWake(raw, this.opts.wakeWord);
-          this.transcript = this.committed + clean;
-          if (result.final) this.committed = this.transcript;
-          if (this.transcript) {
-            this.emit({ type: 'transcript', text: this.transcript, final: false });
-            if (!this.userSpeaking) this.scheduleEndpoint(this.transcript);
-          }
+          if (recognizerEpoch !== this.recognizerEpoch || signal.aborted) return;
+          this.onTranscript(result.text, result.final, mode);
         },
         (error) => {
-          if (generation === this.generation && recognizerEpoch === this.recognizerEpoch)
-            this.fail(error);
+          if (recognizerEpoch === this.recognizerEpoch) this.fail(error);
         },
         signal,
       );
-      if (
-        generation !== this.generation ||
-        signal.aborted ||
-        recognizerEpoch !== this.recognizerEpoch
-      ) {
+      if (recognizerEpoch !== this.recognizerEpoch || signal.aborted) {
         stream.close();
         return;
       }
       this.asr = stream;
-      stream.write(verify ? initial : initial.subarray(-Math.floor(preRollMs * 32)));
+      const bytes = Math.floor(preRollMs * 16) * 2;
+      stream.write(verify ? initial : initial.subarray(Math.max(0, initial.length - bytes)));
       for (const pcm of this.pendingAudio) stream.write(pcm);
       this.pendingAudio = [];
       this.asrReady = undefined;
     })();
-    await this.asrReady;
-    if (generation !== this.generation) return;
-    clearTimeout(this.timeout);
-    this.timeout = setTimeout(
-      () => {
-        if (this.candidate && keepGeneration) this.finishBarge();
-        else this.finishListening();
-      },
-      verify ? 2500 : 12000,
-    );
+    this.asrReady = ready;
+    await ready;
+    if (recognizerEpoch !== this.recognizerEpoch) return;
+    // 超时从识别连接就绪后开始计算，握手时间不再吃掉判断窗口。
+    if (mode === 'verify' && this.candidate) {
+      clearTimeout(this.timeout);
+      this.timeout = setTimeout(() => this.finishListening(), 2500);
+    } else if (mode === 'verify-speaking' && this.candidate) {
+      clearTimeout(this.duckTimer);
+      this.duckTimer = setTimeout(() => this.finishBarge(), 2500);
+    } else if (mode === 'barge' && this.barge) {
+      clearTimeout(this.duckTimer);
+      this.duckTimer = setTimeout(() => this.finishBarge(), 1200);
+    } else if (mode === 'query') this.armNoSpeech(noSpeechMs);
+  }
+  private onTranscript(raw: string, final: boolean, mode: ListenMode) {
+    this.lastResultAt = performance.now();
+    const speakingNow = this.state === 'SPEAKING' || this.state === 'THINKING';
+    if (this.candidate) {
+      if (!hasWake(raw, this.opts.wakeWord)) return;
+      // 播报内容本身含唤醒词时，残余回声不能算唤醒。
+      if (speakingNow && hasWake(this.answer, this.opts.wakeWord) && isEcho(raw, this.answer))
+        return;
+      this.candidate = false;
+      if (speakingNow || mode === 'verify-speaking' || mode === 'barge') this.stopResponse();
+      this.barge = false;
+      this.setState('LISTENING');
+      this.emit({ type: 'wake-confirmed' });
+      this.emit({ type: 'notice', message: '我在，请说。' });
+      this.armNoSpeech(6000);
+    } else if (this.barge) {
+      if (isEcho(raw, this.answer)) return;
+      if (isBackchannel(raw)) {
+        if (final) this.finishBarge();
+        return;
+      }
+      // 确认是真实打断：停止播报，沿用这条识别流继续聆听，不重新建连、不丢句首。
+      this.stopResponse();
+      this.setState('LISTENING');
+      this.armNoSpeech(6000);
+    } else if (mode !== 'query' && this.state !== 'LISTENING') return;
+    const clean = stripWake(raw, this.opts.wakeWord);
+    this.transcript = this.committed + clean;
+    this.lastFinal = final;
+    if (final) this.committed = this.transcript;
+    if (this.state === 'LISTENING') this.armNoSpeech();
+    if (this.transcript) {
+      this.emit({ type: 'transcript', text: this.transcript, final: false });
+      if (!this.userSpeaking) this.scheduleEndpoint(this.transcript);
+    }
   }
   private finishListening() {
     const text = this.transcript;
-    this.asr?.finish();
     if (!text || this.candidate) {
       this.cancel();
       this.setState('IDLE');
@@ -275,21 +339,32 @@ export class Conversation {
     }
     void this.respond(text);
   }
+  /** 等识别结果稳定：拿到句末 final，或 250ms 内没有新结果，最多等 maxMs。 */
+  private async settle(maxMs = 400) {
+    const start = performance.now();
+    while (
+      !this.lastFinal &&
+      performance.now() - start < maxMs &&
+      performance.now() - this.lastResultAt < 250
+    )
+      await delay(40);
+  }
   private scheduleEndpoint(text: string) {
     clearTimeout(this.endpoint);
     clearTimeout(this.speculationTimer);
     this.decisionAbort?.abort();
     const decision = ++this.decisionEpoch;
     if (this.opts.speculative && !incomplete(text))
-      this.speculationTimer = setTimeout(() => this.startSpeculation(text), 200);
+      this.speculationTimer = setTimeout(() => this.startSpeculation(text), 120);
     const commit = async () => {
-      if (
+      const stale = () =>
         decision !== this.decisionEpoch ||
         this.userSpeaking ||
         this.candidate ||
-        this.state !== 'LISTENING'
-      )
-        return;
+        this.state !== 'LISTENING';
+      if (stale()) return;
+      await this.settle();
+      if (stale()) return;
       if (this.speakerLocked && !this.speakerMatch) {
         this.abortSpeculation();
         this.transcript = '';
@@ -301,7 +376,7 @@ export class Conversation {
         this.decisionAbort = new AbortController();
         try {
           const directed = await this.opts.semantic.directed(
-            text,
+            this.transcript,
             this.history,
             AbortSignal.any([this.decisionAbort.signal, AbortSignal.timeout(1000)]),
           );
@@ -314,11 +389,8 @@ export class Conversation {
             return;
           }
         } catch {
+          // 判断超时不拒答：已通过声纹 / VAD 门控的追问默认视为对助手说的。
           if (decision !== this.decisionEpoch) return;
-          this.cancel();
-          this.setState('IDLE');
-          this.emit({ type: 'notice', message: '追问判断超时，请点按后再说。' });
-          return;
         }
       }
       this.followupListening = false;
@@ -334,7 +406,7 @@ export class Conversation {
       void this.opts
         .semantic!.complete(
           text,
-          AbortSignal.any([this.decisionAbort.signal, AbortSignal.timeout(700)]),
+          AbortSignal.any([this.decisionAbort.signal, AbortSignal.timeout(600)]),
         )
         .catch(() => !incomplete(text))
         .then((complete) => {
@@ -351,7 +423,7 @@ export class Conversation {
   private prompt(): Message {
     return {
       role: 'system',
-      content: `你是超宝，一个友善、简洁的中文语音助手。回答适合朗读，优先在80字以内，避免Markdown。不能假装执行未提供的工具，也不能编造实时信息。当前北京时间：${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}。`,
+      content: `你是超宝，一个友善、简洁的中文语音助手。回答会被直接朗读：第一句尽量简短（15字以内），整体优先在80字以内，口语化，不用Markdown、列表、表情符号。不能假装执行未提供的工具，也不能编造实时信息。当前北京时间：${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}。`,
     };
   }
   private abortSpeculation() {
@@ -372,6 +444,7 @@ export class Conversation {
     const abort = new AbortController(),
       queue = new AsyncQueue<string>();
     this.speculative = { text, abort, queue };
+    this.p.tts.warm?.();
     void (async () => {
       try {
         let size = 0;
@@ -393,10 +466,15 @@ export class Conversation {
     })();
   }
   private vad(speaking: boolean, target: boolean) {
+    const started = speaking && !this.userSpeaking;
     this.userSpeaking = speaking;
     if (this.speakerLocked && !speaking) this.speakerMatch = target;
-    if (speaking) {
+    if (started) {
       this.speechAt = performance.now();
+      // 用户一开口就预热识别连接；唤醒词说完时握手已完成。
+      if (!this.asr && !this.asrReady) this.p.asr.warm?.();
+    }
+    if (speaking) {
       clearTimeout(this.endpoint);
       clearTimeout(this.speculationTimer);
       this.abortSpeculation();
@@ -408,19 +486,22 @@ export class Conversation {
     if (speaking && target && this.state === 'SPEAKING' && !this.barge && !this.candidate) {
       this.barge = true;
       this.emit({ type: 'duck', active: true });
-      void this.listen(false, true).catch((e) => this.fail(e));
-      this.duckTimer = setTimeout(() => this.finishBarge(), 700);
-    } else if (speaking && target && this.state === 'IDLE' && Date.now() < this.followupUntil) {
+      void this.listen('barge', this.preRoll()).catch((e) => this.fail(e));
+    } else if (
+      speaking &&
+      this.state === 'IDLE' &&
+      Date.now() < this.followupUntil &&
+      !this.followupListening &&
+      // 已锁定声纹时只接受目标说话人；未锁定时先接收，再由语义判断过滤闲聊。
+      (target || !this.speakerLocked)
+    ) {
       this.followupListening = true;
       this.setState('LISTENING');
-      void this.listen(false).catch((e) => this.fail(e));
+      void this.listen('query', this.preRoll(), 3000).catch((e) => this.fail(e));
     }
   }
   private finishBarge() {
-    this.recognizerEpoch++;
-    this.asr?.close();
-    this.asr = undefined;
-    this.asrReady = undefined;
+    this.closeRecognizer();
     this.barge = false;
     this.candidate = false;
     clearTimeout(this.duckTimer);
@@ -434,6 +515,7 @@ export class Conversation {
     if (speculative) this.speculative = undefined;
     if (this.turnId && this.answer) this.retainHeard();
     this.cancel();
+    this.p.tts.warm?.();
     const generation = this.generation,
       controller = this.abort,
       signal = controller.signal;
@@ -455,22 +537,49 @@ export class Conversation {
     this.setState('THINKING');
     const start = performance.now();
     let firstAudio = true;
-    const sentences = new AsyncQueue<string>();
-    let sentence = '',
-      offset = 0;
+    // 每句话一拿到就开始合成（最多 2 句并行），播放按顺序进行；
+    // 下一句在上一句播放期间已合成好，句间不再出现“建连 + 首包”的空白。
+    type Job = { text: string; audio: AsyncQueue<Buffer> };
+    const jobs = new AsyncQueue<Job>(),
+      slots = new Semaphore(2);
+    const synthesize = (text: string) => {
+      const audio = new AsyncQueue<Buffer>();
+      jobs.push({ text, audio });
+      if (this.p.demo || !this.audio) {
+        audio.end();
+        return;
+      }
+      void (async () => {
+        await slots.acquire();
+        try {
+          if (signal.aborted) return audio.end();
+          for await (const pcm of this.p.tts.synth(text, signal)) audio.push(pcm);
+          audio.end();
+        } catch (e) {
+          audio.end(
+            signal.aborted ? undefined : e instanceof Error ? e : new Error('TTS 合成失败。'),
+          );
+        } finally {
+          slots.release();
+        }
+      })();
+    };
+    let buffer = '',
+      offset = 0,
+      firstSegment = true;
     const speaking = (async () => {
-      for await (const text of sentences) {
+      for await (const job of jobs) {
         if (generation !== this.generation) return;
         let first = true,
           bytes = 0;
         if (this.p.demo || !this.audio) {
           if (!this.p.demo)
             this.emit({ type: 'notice', message: '语音尚未连接，本次仅显示文字。' });
-          this.heardChars += text.length;
-          offset += text.length;
+          this.heardChars += job.text.length;
+          offset += job.text.length;
           continue;
         }
-        for await (const pcm of this.p.tts.synth(text, signal)) {
+        for await (const pcm of job.audio) {
           signal.throwIfAborted();
           if (first) {
             this.setState('SPEAKING');
@@ -484,11 +593,11 @@ export class Conversation {
             }
             this.emit({
               type: 'utterance',
-              text,
+              text: job.text,
               turnId,
               offset,
-              marks: estimatedMarks(text, text.length * 190),
-              durationMs: text.length * 190,
+              marks: estimatedMarks(job.text, job.text.length * 190),
+              durationMs: job.text.length * 190,
               estimated: true,
             });
             first = false;
@@ -496,17 +605,18 @@ export class Conversation {
           bytes += pcm.length;
           await this.audio.write(pcm, signal);
         }
+        signal.throwIfAborted();
         if (!bytes) throw new Error('TTS 未返回音频，请检查音色权限。');
         const durationMs = bytes / 48;
         this.emit({
           type: 'alignment',
           turnId,
           offset,
-          marks: estimatedMarks(text, durationMs),
+          marks: estimatedMarks(job.text, durationMs),
           durationMs,
           estimated: true,
         });
-        offset += text.length;
+        offset += job.text.length;
       }
       await this.audio?.drain();
     })();
@@ -514,7 +624,7 @@ export class Conversation {
     let speechError: unknown;
     const safeSpeaking = speaking.catch((e) => {
       speechError = e;
-      sentences.end();
+      jobs.end();
       controller.abort();
     });
     try {
@@ -522,19 +632,27 @@ export class Conversation {
         this.p.llm.chat([this.prompt(), ...this.history], signal)) {
         signal.throwIfAborted();
         if (generation !== this.generation) return;
+        if (firstAudio && !this.answer)
+          this.emit({
+            type: 'metrics',
+            name: 'firstToken',
+            ms: Math.round(performance.now() - start),
+          });
         this.answer += delta;
-        sentence += delta;
+        buffer += delta;
         this.emit({ type: 'delta', text: delta, turnId });
         for (;;) {
-          const match = sentence.match(/^([\s\S]*?[。！？；!?\n])/u);
-          if (!match && sentence.length < 100) break;
-          const part = match?.[1] ?? sentence.slice(0, 100);
-          sentence = sentence.slice(part.length);
-          if (part.trim()) sentences.push(part);
+          const part = nextSegment(buffer, firstSegment);
+          if (!part) break;
+          buffer = buffer.slice(part.length);
+          if (part.trim()) {
+            synthesize(part);
+            firstSegment = false;
+          }
         }
       }
-      if (sentence.trim()) sentences.push(sentence);
-      sentences.end();
+      if (buffer.trim()) synthesize(buffer);
+      jobs.end();
       await safeSpeaking;
       if (speechError) throw speechError;
       if (generation !== this.generation || signal.aborted) return;
@@ -550,12 +668,12 @@ export class Conversation {
         this.setState('IDLE');
       }, this.opts.followupMs);
     } catch (error) {
-      sentences.end();
+      jobs.end();
       await safeSpeaking;
       if (generation === this.generation && (speechError || !signal.aborted))
         this.fail(speechError ?? error);
     } finally {
-      sentences.end();
+      jobs.end();
       signal.removeEventListener('abort', stopSpeculation);
       stopSpeculation();
     }
@@ -575,5 +693,7 @@ export class Conversation {
     this.disposed = true;
     this.cancel();
     this.ring.clear();
+    this.p.asr.close?.();
+    this.p.tts.close?.();
   }
 }

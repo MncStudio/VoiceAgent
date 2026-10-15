@@ -45,6 +45,7 @@ app.get('/api/config', (_req, res) =>
     ttsModel: config.TTS_MODEL,
     turnModel: config.TURN_MODEL,
     speculative: config.SPECULATIVE === 'true',
+    speakerThreshold: config.SPEAKER_THRESHOLD,
     configured: config.PROVIDER !== 'dashscope' || !!config.DASHSCOPE_API_KEY,
     assets: {
       kws: [
@@ -184,8 +185,11 @@ if (existsSync(web)) {
   app.use(express.static(web));
   app.get('/{*path}', (_req, res) => res.sendFile(path.join(web, 'index.html')));
 }
+// 只回收没有控制连接的会话；常驻使用的助手只要连接还在就不会被定时删除。
+// 有连接的会话在连接关闭 10 秒后由 close 回调回收。
 const cleanup = setInterval(() => {
-  for (const [id, s] of sessions) if (Date.now() - s.created > 2 * 60 * 60 * 1000) void remove(id);
+  for (const [id, s] of sessions)
+    if (!s.events.size && Date.now() - s.created > 5 * 60 * 1000) void remove(id);
 }, 60000);
 cleanup.unref();
 server.listen(config.PORT, config.HOST, () =>

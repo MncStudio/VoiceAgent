@@ -91,6 +91,13 @@ function App() {
   const client = useRef<AssistantClient | undefined>(undefined),
     list = useRef<HTMLDivElement>(null);
   const activeAnswer = useRef<string | undefined>(undefined);
+  // 断线自动重连需要读取最新的配置与语音开关，不能依赖渲染时的闭包。
+  const configRef = useRef<AppConfig | undefined>(undefined),
+    voiceRef = useRef(false),
+    recovering = useRef(false),
+    unmounted = useRef(false);
+  configRef.current = config;
+  voiceRef.current = voice;
   useEffect(() => {
     fetch('/api/config')
       .then((r) => r.json())
@@ -98,6 +105,7 @@ function App() {
       .catch(() => setError('无法连接服务端，请检查 npm run dev 是否已启动。'));
     const timer = setInterval(() => setNow(Date.now()), 100);
     return () => {
+      unmounted.current = true;
       clearInterval(timer);
       void client.current?.close();
     };
@@ -139,9 +147,35 @@ function App() {
     if (e.type === 'notice') setNotice(e.message);
     if (e.type === 'error') setError(e.message);
   };
+  const recover = async () => {
+    if (recovering.current || unmounted.current) return;
+    recovering.current = true;
+    const old = client.current;
+    client.current = undefined;
+    setConnected(false);
+    setState('IDLE');
+    await old?.close().catch(() => {});
+    for (let attempt = 0; !unmounted.current; attempt++) {
+      setNotice('连接中断，正在自动重连…');
+      await new Promise((r) => setTimeout(r, Math.min(15000, 1000 * 2 ** attempt)));
+      const next = new AssistantClient(onEvent, setAudio, setLevel, () => void recover());
+      try {
+        await next.connect();
+        if (voiceRef.current && configRef.current) await next.enableVoice(configRef.current);
+        client.current = next;
+        setConnected(true);
+        setError('');
+        setNotice('已重新连接。');
+        break;
+      } catch {
+        await next.close().catch(() => {});
+      }
+    }
+    recovering.current = false;
+  };
   const ensure = async () => {
     if (client.current && connected) return client.current;
-    const next = new AssistantClient(onEvent, setAudio, setLevel);
+    const next = new AssistantClient(onEvent, setAudio, setLevel, () => void recover());
     await next.connect();
     client.current = next;
     setConnected(true);

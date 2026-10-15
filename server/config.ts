@@ -8,6 +8,12 @@ const schema = z.object({
   LLM_MODEL: z.string().default('qwen-plus'),
   ASR_MODEL: z.string().default('paraformer-realtime-v2'),
   ASR_VOCABULARY_ID: z.string().default(''),
+  // 百炼 Paraformer v2 的 VAD 断句静音阈值（ms），0 表示使用服务默认值。
+  ASR_MAX_SENTENCE_SILENCE: z.coerce.number().min(0).max(6000).default(500),
+  // 本地 FunASR 热词，格式：词:权重,词:权重
+  ASR_HOTWORDS: z.string().default('超宝:20'),
+  // 声纹余弦相似度阈值，需用真实录音标定。
+  SPEAKER_THRESHOLD: z.coerce.number().min(0).max(1).default(0.5),
   TTS_MODEL: z.string().default('cosyvoice-v2'),
   TTS_VOICE: z.string().default('longxiaochun_v2'),
   LIVEKIT_URL: z.url().default('ws://127.0.0.1:7880'),

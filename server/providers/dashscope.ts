@@ -7,21 +7,75 @@ type Packet = {
   header: { event?: string; error_code?: string };
   payload?: { output?: { sentence?: { text?: string; sentence_end?: boolean } } };
 };
-function connect(url: string, key: string, signal: AbortSignal) {
+function connect(url: string, key: string, signal?: AbortSignal) {
   return new Promise<WebSocket>((resolve, reject) => {
-    signal.throwIfAborted();
+    signal?.throwIfAborted();
     const ws = new WebSocket(url, {
       headers: { Authorization: `Bearer ${key}` },
       handshakeTimeout: 10000,
       agent: speechProxy,
     });
-    const cancel = () => ws.close();
-    signal.addEventListener('abort', cancel, { once: true });
-    ws.once('close', () => signal.removeEventListener('abort', cancel));
+    if (signal) bindAbort(ws, signal);
     ws.once('open', () => resolve(ws));
     ws.once('error', () => reject(new Error('百炼语音连接失败，请检查网络、地域和密钥。')));
     ws.once('close', () => reject(new Error('语音连接已关闭。')));
   });
+}
+function bindAbort(ws: WebSocket, signal: AbortSignal) {
+  const cancel = () => ws.close();
+  signal.addEventListener('abort', cancel, { once: true });
+  ws.once('close', () => signal.removeEventListener('abort', cancel));
+}
+/**
+ * 预热连接：在用户开口 / 开始回答时提前完成 WebSocket 握手，真正需要时直接取用。
+ * 每次只保留一个空闲连接，超过 30 秒未使用就丢弃重连，避免拿到被服务端回收的连接。
+ */
+class WarmSocket {
+  private spare?: { ws: WebSocket; at: number };
+  private pending?: Promise<void>;
+  constructor(
+    private url: string,
+    private key: string,
+  ) {}
+  private fresh() {
+    return (
+      !!this.spare &&
+      this.spare.ws.readyState === WebSocket.OPEN &&
+      Date.now() - this.spare.at < 30000
+    );
+  }
+  warm() {
+    if (this.pending || this.fresh()) return;
+    this.spare?.ws.close();
+    this.spare = undefined;
+    this.pending = connect(this.url, this.key)
+      .then((ws) => {
+        ws.on('error', () => {});
+        ws.once('close', () => {
+          if (this.spare?.ws === ws) this.spare = undefined;
+        });
+        this.spare = { ws, at: Date.now() };
+      })
+      .catch(() => {})
+      .finally(() => {
+        this.pending = undefined;
+      });
+  }
+  async take(signal: AbortSignal) {
+    if (!this.fresh() && this.pending) await this.pending;
+    signal.throwIfAborted();
+    const spare = this.fresh() ? this.spare : undefined;
+    this.spare = undefined;
+    if (spare) {
+      bindAbort(spare.ws, signal);
+      return spare.ws;
+    }
+    return connect(this.url, this.key, signal);
+  }
+  close() {
+    this.spare?.ws.close();
+    this.spare = undefined;
+  }
 }
 function command(ws: WebSocket, id: string, action: string, payload: object) {
   if (ws.readyState === WebSocket.OPEN)
@@ -33,13 +87,23 @@ export class DashScopeASR implements ASRProvider {
     private key: string,
     private model: string,
     private vocabularyId = '',
-  ) {}
+    private maxSentenceSilence = 0,
+  ) {
+    this.socket = new WarmSocket(url, key);
+  }
+  private socket: WarmSocket;
+  warm() {
+    this.socket.warm();
+  }
+  close() {
+    this.socket.close();
+  }
   async open(
     onResult: (v: Transcript) => void,
     onError: (e: Error) => void,
     signal: AbortSignal,
   ): Promise<ASRStream> {
-    const ws = await connect(this.url, this.key, signal);
+    const ws = await this.socket.take(signal);
     const id = randomUUID();
     let ready = false,
       finished = false,
@@ -95,6 +159,10 @@ export class DashScopeASR implements ASRProvider {
         format: 'pcm',
         sample_rate: 16000,
         ...(this.vocabularyId ? { vocabulary_id: this.vocabularyId } : {}),
+        // VAD 断句静音阈值：交互场景调短，句子更快给出 final 结果（仅 v2 模型支持）。
+        ...(this.maxSentenceSilence && /v2/u.test(this.model)
+          ? { max_sentence_silence: this.maxSentenceSilence }
+          : {}),
       },
       input: {},
     });
@@ -130,9 +198,20 @@ export class DashScopeTTS implements TTSProvider {
     private key: string,
     private model: string,
     private voice: string,
-  ) {}
+  ) {
+    this.socket = new WarmSocket(url, key);
+  }
+  private socket: WarmSocket;
+  warm() {
+    this.socket.warm();
+  }
+  close() {
+    this.socket.close();
+  }
   async *synth(text: string, signal: AbortSignal) {
-    const ws = await connect(this.url, this.key, signal);
+    const ws = await this.socket.take(signal);
+    // 同一轮回答的下一句通常紧接着需要连接，提前预热。
+    this.socket.warm();
     const id = randomUUID();
     const queue = new AsyncQueue<Buffer>();
     let done = false;

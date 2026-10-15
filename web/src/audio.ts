@@ -29,11 +29,21 @@ export class MicrophonePipeline {
   private speaker?: import('./speaker').SpeakerEncoder;
   private voiceEpoch = 0;
   private speaking = false;
+  /** 本段语音已持续的采样数（16kHz），用于只取开口之后的音频做声纹比对。 */
+  private speechSamples = 0;
+  /** 本段语音最近一次滚动比对的结果，说话结束时立即随 VAD 事件发出。 */
+  private lastMatch = false;
   constructor(
     private send: (event: ClientEvent) => void,
     private update: (s: AudioStatus) => void,
     private onWake: () => void,
     private onStop: () => void,
+    private policy: {
+      /** 命令词只在播报/思考时生效，且不能是正在播报内容的回声。 */
+      allowCommand: (keyword: string) => boolean;
+      allowWake: () => boolean;
+      speakerThreshold: number;
+    } = { allowCommand: () => true, allowWake: () => true, speakerThreshold: 0.5 },
   ) {}
   private report(patch: Partial<AudioStatus>) {
     Object.assign(this.status, patch);
@@ -73,6 +83,7 @@ export class MicrophonePipeline {
       this.report({ level: Math.min(1, Math.sqrt(energy / pcm.length) * 8) });
       this.recent.push(pcm.slice());
       if (this.recent.length > 94) this.recent.shift();
+      if (this.speaking) this.speechSamples += pcm.length;
       if (this.worker) this.worker.postMessage({ type: 'audio', pcm }, [pcm.buffer]);
     };
     if (assets.speaker) {
@@ -92,12 +103,18 @@ export class MicrophonePipeline {
         if (data.type === 'keyword') {
           if (Date.now() - this.lastWake < 1600) return;
           if (data.keyword === '你好超宝') {
+            if (!this.policy.allowWake()) return;
             this.lastWake = Date.now();
             this.onWake();
             this.send({ type: 'wake', source: 'kws', at: Date.now() });
+            // 只用唤醒词本身（命中前约 1.5 秒）锁定声纹，避免混入旁人说话和播报回声。
             if (this.speaker)
-              this.pendingLock = this.speaker.encode(this.window()).catch(() => new Float32Array());
+              this.pendingLock = this.speaker
+                .encode(this.window(24000))
+                .catch(() => new Float32Array());
           } else {
+            if (!this.policy.allowCommand(data.keyword)) return;
+            this.lastWake = Date.now();
             this.onStop();
             this.send({ type: 'interrupt', reason: data.keyword === '下一个' ? 'next' : 'stop' });
           }
@@ -107,7 +124,11 @@ export class MicrophonePipeline {
       this.worker.postMessage({
         type: 'init',
         keywords:
-          'n ǐ h ǎo ch āo b ǎo @你好超宝\nb ié sh uō l e @别说了\nz àn t íng @暂停\nx ià y ī g è @下一个',
+          'n ǐ h ǎo ch āo b ǎo @你好超宝\n' +
+          // 命令词短、易误报：单独提高触发阈值、降低加权。
+          'b ié sh uō l e :1.0 #0.35 @别说了\n' +
+          'z àn t íng :1.0 #0.45 @暂停\n' +
+          'x ià y ī g è :1.0 #0.4 @下一个',
       });
     } else this.report({ kws: '未安装 · 请点按唤醒' });
     if (assets.vad) {
@@ -126,6 +147,8 @@ export class MicrophonePipeline {
           preSpeechPadMs: 300,
           onSpeechStart: () => {
             this.speaking = true;
+            this.speechSamples = 4800; // 含 preSpeechPadMs 的 300ms
+            this.lastMatch = false;
             this.voiceEpoch++;
             this.send({ type: 'vad', speaking: true, target: false });
           },
@@ -137,14 +160,16 @@ export class MicrophonePipeline {
           onSpeechEnd: (audio) => {
             this.speaking = false;
             const epoch = this.voiceEpoch;
-            void (async () => {
-              const target =
-                this.speaker && this.locked
-                  ? await this.speaker.matches(audio, this.locked)
-                  : false;
-              if (!this.stopped && epoch === this.voiceEpoch)
-                this.send({ type: 'vad', speaking: false, target });
-            })();
+            // 立即上报说话结束，断句不再等待声纹推理；整段声纹结果随后单独更新。
+            this.send({ type: 'vad', speaking: false, target: this.lastMatch });
+            if (!this.speaker || !this.locked) return;
+            void this.speaker
+              .matches(audio, this.locked, this.policy.speakerThreshold)
+              .then((match) => {
+                if (!this.stopped && epoch === this.voiceEpoch)
+                  this.send({ type: 'speaker', locked: true, match });
+              })
+              .catch(() => {});
           },
           onFrameProcessed: (probability) => {
             // Compare a rolling segment while speech is active, not after the entire utterance.
@@ -168,13 +193,26 @@ export class MicrophonePipeline {
   private checking = false;
   private checkedAt = 0;
   private async checkTarget() {
-    if (this.checking || Date.now() - this.checkedAt < 500 || !this.locked || !this.speaker) return;
+    if (
+      this.checking ||
+      Date.now() - this.checkedAt < 400 ||
+      !this.locked ||
+      !this.speaker ||
+      this.speechSamples < 12000
+    )
+      return;
     this.checking = true;
     this.checkedAt = Date.now();
     const epoch = this.voiceEpoch;
     try {
-      const match = await this.speaker.matches(this.window(24000), this.locked);
+      // 只取开口之后的音频，避免把开口前的播报回声算进声纹。
+      const match = await this.speaker.matches(
+        this.window(Math.min(32000, this.speechSamples)),
+        this.locked,
+        this.policy.speakerThreshold,
+      );
       if (!this.stopped && this.speaking && epoch === this.voiceEpoch) {
+        this.lastMatch = match;
         this.send({ type: 'speaker', locked: true, match });
         if (match) this.send({ type: 'vad', speaking: true, target: true });
       }

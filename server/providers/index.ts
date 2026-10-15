@@ -4,6 +4,14 @@ import type { Providers } from './types.js';
 import { OpenAILLM } from './llm.js';
 import { DashScopeASR, DashScopeTTS } from './dashscope.js';
 import { FunASR, CosyVoiceLocal } from './local.js';
+export function parseHotwords(value: string) {
+  const words: Record<string, number> = {};
+  for (const item of value.split(',')) {
+    const [word, weight] = item.split(':').map((x) => x.trim());
+    if (word) words[word] = Number(weight) || 20;
+  }
+  return words;
+}
 export function createProviders(c: Config): Providers {
   if (c.PROVIDER === 'demo')
     return {
@@ -31,12 +39,13 @@ export function createProviders(c: Config): Providers {
     demo: false,
     asr:
       c.PROVIDER === 'local'
-        ? new FunASR(c.LOCAL_ASR_URL)
+        ? new FunASR(c.LOCAL_ASR_URL, parseHotwords(c.ASR_HOTWORDS))
         : new DashScopeASR(
             c.DASHSCOPE_WS_URL,
             c.DASHSCOPE_API_KEY,
             c.ASR_MODEL,
             c.ASR_VOCABULARY_ID,
+            c.ASR_MAX_SENTENCE_SILENCE,
           ),
     llm: new OpenAILLM(
       c.LLM_BASE_URL,

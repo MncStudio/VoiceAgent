@@ -11,10 +11,20 @@ export function fbank(audio: Float32Array) {
   const out = new Float32Array(n * bins),
     fft = new FFT(size),
     spectrum = fft.createComplexArray();
-  const hz = (m: number) => 700 * (Math.exp(m / 1127) - 1),
-    mel = (h: number) => 1127 * Math.log(1 + h / 700);
-  const edges = Array.from({ length: bins + 2 }, (_, i) =>
-    hz(mel(20) + ((mel(7600) - mel(20)) * i) / (bins + 1)),
+  const mel = (h: number) => 1127 * Math.log(1 + h / 700);
+  // 与 Kaldi / torchaudio.compliance.kaldi.fbank 一致：low_freq=20，high_freq=奈奎斯特(8000)，
+  // 三角滤波在 mel 域线性插值，FFT 取 0..N/2-1 个频点。特征不一致会系统性拉低相似度。
+  const low = mel(20),
+    high = mel(8000);
+  const edges = Array.from({ length: bins + 2 }, (_, i) => low + ((high - low) * i) / (bins + 1));
+  const weights = Array.from({ length: bins }, (_, b) =>
+    Float64Array.from({ length: size / 2 }, (_, k) => {
+      const m = mel((k * 16000) / size);
+      if (m <= edges[b] || m >= edges[b + 2]) return 0;
+      return m <= edges[b + 1]
+        ? (m - edges[b]) / (edges[b + 1] - edges[b])
+        : (edges[b + 2] - m) / (edges[b + 2] - edges[b + 1]);
+    }),
   );
   for (let t = 0; t < n; t++) {
     const windowed = new Float64Array(size);
@@ -30,17 +40,9 @@ export function fbank(audio: Float32Array) {
     fft.realTransform(spectrum, windowed);
     for (let b = 0; b < bins; b++) {
       let energy = 0;
-      for (let k = 1; k <= size / 2; k++) {
-        const freq = (k * 16000) / size;
-        const weight = Math.max(
-          0,
-          Math.min(
-            (freq - edges[b]) / (edges[b + 1] - edges[b]),
-            (edges[b + 2] - freq) / (edges[b + 2] - edges[b + 1]),
-          ),
-        );
-        energy += weight * (spectrum[2 * k] ** 2 + spectrum[2 * k + 1] ** 2);
-      }
+      const w = weights[b];
+      for (let k = 0; k < size / 2; k++)
+        if (w[k]) energy += w[k] * (spectrum[2 * k] ** 2 + spectrum[2 * k + 1] ** 2);
       out[t * bins + b] = Math.log(Math.max(energy, 1e-10));
     }
   }
@@ -87,9 +89,13 @@ export class SpeakerEncoder {
     const norm = Math.sqrt(embedding.reduce((sum, x) => sum + x * x, 0));
     return embedding.map((x) => x / Math.max(norm, 1e-10));
   }
-  async matches(audio: Float32Array, locked: Float32Array) {
+  async similarity(audio: Float32Array, locked: Float32Array) {
     const e = await this.encode(audio);
-    return e.reduce((sum, x, i) => sum + x * locked[i], 0) >= 0.65;
+    return e.reduce((sum, x, i) => sum + x * locked[i], 0);
+  }
+  /** 阈值来自服务端 SPEAKER_THRESHOLD（默认 0.5），需用真实录音标定。 */
+  async matches(audio: Float32Array, locked: Float32Array, threshold = 0.5) {
+    return (await this.similarity(audio, locked)) >= threshold;
   }
   async close() {
     await this.session.release();

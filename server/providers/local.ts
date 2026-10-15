@@ -1,7 +1,10 @@
 import WebSocket from 'ws';
 import type { ASRProvider, ASRStream, TTSProvider, Transcript } from './types.js';
 export class FunASR implements ASRProvider {
-  constructor(private url: string) {}
+  constructor(
+    private url: string,
+    private hotwords: Record<string, number> = {},
+  ) {}
   async open(
     onResult: (t: Transcript) => void,
     onError: (e: Error) => void,
@@ -27,13 +30,24 @@ export class FunASR implements ASRProvider {
         wav_name: 'chaobao',
         is_speaking: true,
         itn: true,
+        ...(Object.keys(this.hotwords).length ? { hotwords: JSON.stringify(this.hotwords) } : {}),
       }),
     );
+    // FunASR 2pass：2pass-online 每次只返回新增片段，需要累加成当前句；
+    // 2pass-offline 返回整句修正结果，替换当前句并结束该句。
+    let online = '';
     ws.on('message', (data) => {
       try {
         const r = JSON.parse(data.toString());
-        if (r.text)
-          onResult({ text: r.text, final: r.mode === '2pass-offline' || r.is_final === true });
+        if (typeof r.text !== 'string') return;
+        if (r.mode === '2pass-offline' || r.mode === 'offline') {
+          online = '';
+          if (r.text) onResult({ text: r.text, final: true });
+        } else if (r.text) {
+          online += r.text;
+          onResult({ text: online, final: r.is_final === true });
+          if (r.is_final === true) online = '';
+        }
       } catch {
         onError(new Error('FunASR 响应格式异常。'));
       }
