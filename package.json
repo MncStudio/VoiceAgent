@@ -10,7 +10,7 @@
     "dev": "concurrently -k -n agent,web \"npm:dev:server\" \"npm:dev:web\"",
     "dev:server": "tsx watch server/index.ts",
     "dev:web": "vite --host 127.0.0.1",
-    "build": "tsc --noEmit && vite build && tsup server/index.ts --format esm --platform node --out-dir dist/server --external @livekit/rtc-node",
+    "build": "tsc --noEmit && vite build && npm run build:sdk && tsup server/index.ts --format esm --platform node --out-dir dist/server --external @livekit/rtc-node",
     "start": "node dist/server/index.js",
     "check": "tsc --noEmit",
     "test": "vitest run",
@@ -18,7 +18,8 @@
     "setup:assets": "node scripts/setup-assets.mjs",
     "setup:livekit": "node scripts/setup-livekit.mjs",
     "livekit": "node scripts/run-livekit.mjs",
-    "doctor": "tsx scripts/doctor.ts"
+    "doctor": "tsx scripts/doctor.ts",
+    "build:sdk": "vite build --config vite.sdk.config.ts && node -e \"require('node:fs').copyFileSync('sdk/chaobao-sdk.d.ts','dist/sdk/chaobao-sdk.d.ts')\""
   },
   "dependencies": {
     "@livekit/rtc-node": "^0.13.0",

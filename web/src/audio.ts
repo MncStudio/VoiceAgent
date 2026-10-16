@@ -1,6 +1,7 @@
 import { MicVAD } from '@ricky0123/vad-web';
 import { RnnoiseWorkletNode, loadRnnoise } from '@sapphi-red/web-noise-suppressor';
 import type { ClientEvent } from '../../shared/protocol';
+import { createWorker, serviceUrl } from './endpoint';
 export type AudioStatus = {
   kws: string;
   vad: string;
@@ -61,10 +62,10 @@ export class MicrophonePipeline {
     else
       try {
         const wasmBinary = await loadRnnoise({
-          url: '/vendor/rnnoise/rnnoise.wasm',
-          simdUrl: '/vendor/rnnoise/rnnoise_simd.wasm',
+          url: serviceUrl('/vendor/rnnoise/rnnoise.wasm'),
+          simdUrl: serviceUrl('/vendor/rnnoise/rnnoise_simd.wasm'),
         });
-        await this.context.audioWorklet.addModule('/vendor/rnnoise/rnnoise-worklet.js');
+        await this.context.audioWorklet.addModule(serviceUrl('/vendor/rnnoise/rnnoise-worklet.js'));
         this.noise = new RnnoiseWorkletNode(this.context, { wasmBinary, maxChannels: 1 });
         source.connect(this.noise);
         processed = this.noise;
@@ -73,7 +74,7 @@ export class MicrophonePipeline {
       } catch {
         this.report({ noise: '浏览器降噪' });
       }
-    await this.context.audioWorklet.addModule('/audio-worklet.js');
+    await this.context.audioWorklet.addModule(serviceUrl('/audio-worklet.js'));
     const capture = new AudioWorkletNode(this.context, 'pcm-capture');
     this.nodes.push(capture);
     processed.connect(capture);
@@ -100,7 +101,7 @@ export class MicrophonePipeline {
       }
     } else this.report({ speaker: '未安装声纹模型' });
     if (assets.kws) {
-      this.worker = new Worker('/kws-worker.js');
+      this.worker = createWorker('/kws-worker.js');
       this.worker.onmessage = async ({ data }) => {
         if (data.type === 'ready') this.report({ kws: '你好超宝 · 本地' });
         if (data.type === 'error') this.report({ kws: '不可用 · 请点按唤醒' });
@@ -142,8 +143,8 @@ export class MicrophonePipeline {
       try {
         this.vad = await MicVAD.new({
           model: 'v5',
-          baseAssetPath: '/vendor/vad/',
-          onnxWASMBasePath: '/vendor/ort/',
+          baseAssetPath: serviceUrl('/vendor/vad/'),
+          onnxWASMBasePath: serviceUrl('/vendor/ort/'),
           getStream: async () => stream,
           pauseStream: async () => {},
           resumeStream: async () => stream,

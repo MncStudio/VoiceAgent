@@ -17,11 +17,25 @@ const allowed = new Set(config.ALLOWED_ORIGINS.split(','));
 app.disable('x-powered-by');
 app.use(express.json({ limit: '8kb' }));
 app.use((req, res, next) => {
-  if (req.headers.origin && !allowed.has(req.headers.origin)) {
+  const origin = req.headers.origin;
+  if (origin && !allowed.has(origin)) {
     res.status(403).json({ error: '不允许的来源。' });
     return;
   }
-  res.setHeader('Cache-Control', 'no-store');
+  // 允许 ALLOWED_ORIGINS 中的其他系统跨域使用 SDK：接口、模型、Worker 与 AudioWorklet 都需要 CORS。
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Max-Age', '600');
+  }
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(204);
+    return;
+  }
+  // 只有接口禁止缓存；端侧模型体积大，按 ETag 协商缓存，避免每次打开都重新下载。
+  if (req.path.startsWith('/api/')) res.setHeader('Cache-Control', 'no-store');
   next();
 });
 type Session = {
@@ -191,11 +205,14 @@ server.on('upgrade', (req, socket, head) => {
     });
   });
 });
+// SDK（npm run build:sdk 生成）供其他系统通过 ${baseUrl}/sdk/chaobao-sdk.js 加载。
+const sdk = path.resolve('dist/sdk');
+if (existsSync(sdk)) app.use('/sdk', express.static(sdk, { cacheControl: true, maxAge: 0 }));
 const web = path.resolve('dist/web');
-if (existsSync(web)) {
-  app.use(express.static(web));
-  app.get('/{*path}', (_req, res) => res.sendFile(path.join(web, 'index.html')));
-}
+if (existsSync(web)) app.use(express.static(web));
+// 开发模式（未构建前端）下同样提供端侧模型、Worker 与 AudioWorklet，SDK 接入方可直接连 3001。
+app.use(express.static(publicRoot));
+if (existsSync(web)) app.get('/{*path}', (_req, res) => res.sendFile(path.join(web, 'index.html')));
 // 只回收没有控制连接的会话；常驻使用的助手只要连接还在就不会被定时删除。
 // 有连接的会话在连接关闭 10 秒后由 close 回调回收。
 const cleanup = setInterval(() => {

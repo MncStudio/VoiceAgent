@@ -1,5 +1,6 @@
 import * as ort from 'onnxruntime-web/wasm';
 import FFT from 'fft.js';
+import { serviceRoot } from './endpoint';
 // CAM++ expects 16 kHz, 80-bin log-mel fbank, mean normalization, [batch,time,80].
 // This frontend is isolated here so alternate CAM++ exports can replace their feature contract.
 export function fbank(audio: Float32Array) {
@@ -71,10 +72,10 @@ export function trimSilence(audio: Float32Array) {
 export class SpeakerEncoder {
   private constructor(private session: ort.InferenceSession) {}
   static async create() {
-    ort.env.wasm.wasmPaths = '/vendor/ort/';
+    ort.env.wasm.wasmPaths = `${serviceRoot()}/vendor/ort/`;
     ort.env.wasm.numThreads = 1;
     return new SpeakerEncoder(
-      await ort.InferenceSession.create('/models/speaker/cam++.onnx', {
+      await ort.InferenceSession.create(`${serviceRoot()}/models/speaker/cam++.onnx`, {
         executionProviders: ['wasm'],
       }),
     );

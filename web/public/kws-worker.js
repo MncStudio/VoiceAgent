@@ -1,12 +1,17 @@
+// 服务根由页面通过 Worker name 传入（跨域嵌入时为超宝服务的绝对地址）。
+const base = (self.name || '').replace(/\/+$/, '');
 let spotter,
   stream,
   ready = false;
 self.onmessage = async ({ data }) => {
   if (data.type === 'init') {
     try {
-      importScripts('/models/kws/sherpa-onnx-kws.js', '/models/kws/sherpa-onnx-wasm-web.js');
+      importScripts(
+        `${base}/models/kws/sherpa-onnx-kws.js`,
+        `${base}/models/kws/sherpa-onnx-wasm-web.js`,
+      );
       const Module = await SherpaOnnx({
-        locateFile: (name) => `/models/kws/${name}`,
+        locateFile: (name) => `${base}/models/kws/${name}`,
         print() {},
         printErr() {},
       });
@@ -18,7 +23,7 @@ self.onmessage = async ({ data }) => {
       ];
       await Promise.all(
         files.map(async (name) => {
-          const response = await fetch(`/models/kws/${name}`);
+          const response = await fetch(`${base}/models/kws/${name}`);
           if (!response.ok) throw new Error('模型文件缺失');
           Module.FS.writeFile(`/${name}`, new Uint8Array(await response.arrayBuffer()));
         }),

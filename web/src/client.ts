@@ -7,6 +7,7 @@ import {
 } from 'livekit-client';
 import type { ClientEvent, ServerEvent } from '../../shared/protocol';
 import { MicrophonePipeline, type AudioStatus } from './audio';
+import { serviceUrl, socketUrl } from './endpoint';
 export type AppConfig = {
   provider: 'demo' | 'dashscope' | 'local';
   qaProvider: 'demo' | 'openai' | 'yuxi';
@@ -62,13 +63,11 @@ export class AssistantClient {
     );
   }
   async connect() {
-    const response = await fetch('/api/sessions', { method: 'POST' });
+    const response = await fetch(serviceUrl('/api/sessions'), { method: 'POST' });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error ?? '无法建立会话');
     this.id = result.id;
-    this.ws = new WebSocket(
-      `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/control?session=${this.id}`,
-    );
+    this.ws = new WebSocket(socketUrl(`/control?session=${this.id}`));
     this.ws.onmessage = ({ data }) => {
       const event = JSON.parse(data) as ServerEvent;
       if (event.type === 'state') this.state = event.state;
@@ -207,7 +206,9 @@ export class AssistantClient {
         autoGainControl: true,
         channelCount: 1,
       });
-      const response = await fetch(`/api/sessions/${this.id}/voice`, { method: 'POST' });
+      const response = await fetch(serviceUrl(`/api/sessions/${this.id}/voice`), {
+        method: 'POST',
+      });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error);
       this.room = new Room({ adaptiveStream: false, dynacast: false });
@@ -284,8 +285,9 @@ export class AssistantClient {
     this.ws?.close();
     await this.disableVoice();
     if (this.id)
-      await fetch(`/api/sessions/${this.id}`, { method: 'DELETE', keepalive: true }).catch(
-        () => {},
-      );
+      await fetch(serviceUrl(`/api/sessions/${this.id}`), {
+        method: 'DELETE',
+        keepalive: true,
+      }).catch(() => {});
   }
 }

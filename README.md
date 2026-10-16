@@ -115,6 +115,36 @@ npm start
 
 服务端同时托管 `dist/web`，访问 3001。远程部署还需 HTTPS、反向代理认证、非开发 LiveKit 密钥、可访问的 ICE/TURN 和实际允许的域名配置；现有配置用于本机开发，没有配置公网多用户认证。模型资源打包在本地输出内，构建目录体积较大。
 
+## 在其他项目中接入（SDK）
+
+其他系统想用超宝、但界面自己做时，使用 SDK：唤醒、VAD、声纹、降噪、LiveKit 音频与对话协议都在 SDK 里，宿主页面只负责界面。
+
+1. 超宝服务执行 `npm run build`（或单独 `npm run build:sdk`）后，在 `/sdk/chaobao-sdk.js` 提供 SDK，类型声明在 `/sdk/chaobao-sdk.d.ts`（源文件 `sdk/chaobao-sdk.d.ts`）。端侧模型、Worker、AudioWorklet 仍由超宝服务按 `baseUrl` 提供，不需要拷贝到宿主项目；超宝升级后宿主无需重新构建。
+2. 宿主页面运行时加载：
+
+   ```js
+   const { ChaobaoAssistant } = await import(/* @vite-ignore */ '/chaobao/sdk/chaobao-sdk.js');
+   const bot = new ChaobaoAssistant({ baseUrl: '/chaobao', rememberVoice: true });
+   bot.on('state', ({ state }) => {}); // IDLE / CANDIDATE / LISTENING / THINKING / SPEAKING / INTERRUPT
+   bot.on('messages', (list) => {}); // 对话记录快照
+   bot.on('transcript', ({ text, final }) => {}); // 实时转写
+   bot.on('level', (v) => {}); // 播报音量 0~1，驱动口型
+   bot.on('error', (msg) => {});
+   await bot.init(); // 读取服务端配置
+   button.onclick = () => bot.enableVoice(); // 开麦需在用户点击中调用
+   bot.wake();
+   bot.sendText('你好');
+   bot.stop();
+   bot.reset();
+   bot.destroy();
+   ```
+
+3. 地址二选一：
+   - **推荐：同源反向代理**。宿主的 Vite / Nginx 把 `/chaobao/` 转发到超宝服务（去掉前缀，需支持 WebSocket），`baseUrl: '/chaobao'`。无跨域问题，HTTPS 只需在宿主一处配置。
+   - 跨域直连：`baseUrl: 'https://chaobao.example.com'`，超宝已为 `ALLOWED_ORIGINS` 中的来源返回 CORS 头，KWS Worker 会自动经 Blob 中转加载。
+4. 无论哪种方式，都要把宿主页面的地址（协议 + 域名 + 端口）加入超宝 `.env` 的 `ALLOWED_ORIGINS`；`LIVEKIT_URL` 必须是用户浏览器能访问的地址（HTTPS 页面用 `wss://`）；页面必须是 HTTPS 或 localhost，否则浏览器不给麦克风。
+5. 一个页面只创建一个实例（SDK 内部按全局服务地址工作）。选煤系统的 Vue 接入示例见该项目 `src/components/ChaobaoAssistant`。
+
 ## 验证
 
 ```powershell
@@ -143,7 +173,8 @@ npx playwright test tests/e2e/voice.spec.ts
 server/             会话编排、HTTP/控制连接、LiveKit 音轨
 server/providers/   线上/本地 ASR、LLM、TTS Provider
 shared/             带运行时校验的事件协议
-web/src/            页面、音频处理、声纹与 VRM 渲染
+web/src/            页面、音频处理、声纹与 VRM 渲染；sdk.ts 为对外 SDK 入口
+sdk/                SDK 类型声明（构建产物在 dist/sdk）
 web/public/         AudioWorklet、KWS Worker、本地模型
 scripts/            资源下载、服务启动与接口诊断
 tests/              编排单元回归与浏览器集成测试

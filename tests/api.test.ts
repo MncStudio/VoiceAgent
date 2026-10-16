@@ -38,6 +38,26 @@ describe('本地 API 边界', () => {
     });
     expect(r.status).toBe(403);
   });
+  it('允许的来源可跨域使用 SDK：预检、CORS 头与端侧资源', async () => {
+    const pre = await fetch(`${base}/api/sessions`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: base,
+        'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Headers': 'content-type',
+      },
+    });
+    expect(pre.status).toBe(204);
+    expect(pre.headers.get('access-control-allow-origin')).toBe(base);
+    expect(pre.headers.get('access-control-allow-methods')).toContain('DELETE');
+    const config = await fetch(`${base}/api/config`, { headers: { Origin: base } });
+    expect(config.headers.get('access-control-allow-origin')).toBe(base);
+    expect(config.headers.get('cache-control')).toBe('no-store');
+    const worker = await fetch(`${base}/kws-worker.js`, { headers: { Origin: base } });
+    expect(worker.status).toBe(200);
+    expect(worker.headers.get('access-control-allow-origin')).toBe(base);
+    expect(worker.headers.get('cache-control')).not.toBe('no-store');
+  });
   it('控制连接验证消息且删除会话后断开', async () => {
     const s = await (await fetch(`${base}/api/sessions`, { method: 'POST' })).json();
     ids.push(s.id);
