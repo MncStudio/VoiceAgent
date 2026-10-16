@@ -3,7 +3,8 @@ test('文字对话、设置与响应式界面', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto('/');
-  await expect(page.getByRole('heading', { name: '与超宝，自然对话。' })).toBeVisible();
+  await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+  await expect(page.getByRole('button', { name: '点按唤醒' })).toBeVisible();
   await page.getByRole('button', { name: '打开设置' }).click();
   await expect(page.getByRole('dialog')).toContainText('你好超宝');
   await page.getByRole('button', { name: '关闭设置' }).click();

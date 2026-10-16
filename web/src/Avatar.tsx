@@ -129,7 +129,9 @@ export function Avatar({
           </div>
           <div className="robot-neck" />
           <div className="robot-body">
-            <span>✦</span>
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+              <path d="M12 2q1.8 6.6 8.4 8.4-6.6 1.8-8.4 8.4-1.8-6.6-8.4-8.4Q10.2 8.6 12 2Z" />
+            </svg>
             <i />
           </div>
           <div className="robot-hand hand-left" />
@@ -137,9 +139,6 @@ export function Avatar({
         </div>
       )}
       {failed && <span className="avatar-warning">VRM 加载失败，已使用默认形象</span>}
-      <div className="floating-tag">
-        <span /> AUDIO ONLY · 无需摄像头
-      </div>
     </div>
   );
 }

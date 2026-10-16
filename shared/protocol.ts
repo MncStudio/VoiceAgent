@@ -67,5 +67,8 @@ export type ServerEvent =
   | { type: 'duck'; active: boolean }
   | { type: 'error'; message: string }
   | { type: 'notice'; message: string }
-  | { type: 'wake-confirmed' }
+  /** chime=true 时由浏览器播放提示音；否则服务端会在需要时播报语音应答。 */
+  | { type: 'wake-confirmed'; chime: boolean }
+  /** 服务端即将播放唤醒应答（如“我在”），浏览器需恢复播放音量。 */
+  | { type: 'ack'; text: string }
   | { type: 'metrics'; name: string; ms: number };

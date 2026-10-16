@@ -21,6 +21,8 @@ const schema = z.object({
   LIVEKIT_API_KEY: z.string().default('devkey'),
   LIVEKIT_API_SECRET: z.string().default('secret'),
   WAKE_WORD: z.string().default('你好超宝'),
+  // 只说唤醒词时的语音应答，逗号分隔多条随机播报；设为空字符串则改为提示音。
+  WAKE_ACK: z.string().default('我在'),
   PORT: z.coerce.number().default(3001),
   HOST: z.string().default('127.0.0.1'),
   ALLOWED_ORIGINS: z

@@ -39,6 +39,7 @@ app.get('/api/config', (_req, res) =>
   res.json({
     provider: config.PROVIDER,
     wakeWord: config.WAKE_WORD,
+    wakeAck: config.WAKE_ACK,
     followupMs: config.FOLLOWUP_MS,
     llmModel: config.LLM_MODEL,
     asrModel: config.ASR_MODEL,
@@ -81,6 +82,9 @@ app.post('/api/sessions', (_req, res) => {
     },
     {
       wakeWord: config.WAKE_WORD,
+      wakeAck: config.WAKE_ACK.split(/[,，]/)
+        .map((s) => s.trim())
+        .filter(Boolean),
       followupMs: config.FOLLOWUP_MS,
       speakerReject: Math.max(0, config.SPEAKER_THRESHOLD - 0.15),
       semantic,

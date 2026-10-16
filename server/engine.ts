@@ -27,6 +27,8 @@ export interface AudioOutput {
  */
 type ListenMode = 'verify' | 'verify-speaking' | 'barge' | 'query';
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+/** 唤醒应答音频缓存：同一音色下“我在”只合成一次，之后零延迟播放。 */
+const ackCache = new Map<string, Promise<Buffer>>();
 export class Conversation {
   state: AssistantState = 'IDLE';
   readonly ring = new AudioRing();
@@ -60,6 +62,9 @@ export class Conversation {
   private speakerLocked = false;
   private speakerMatch = false;
   private followupListening = false;
+  private acking?: AbortController;
+  /** 刚播过的应答文本，识别结果开头若是它的回声需去掉。 */
+  private ackEcho = '';
   /** 当前这句话说完后的整句声纹结果。 */
   private verdict?: { match: boolean; score?: number; speechMs?: number };
   private noSpeechMs = 6000;
@@ -72,6 +77,8 @@ export class Conversation {
     private emit: (e: ServerEvent) => void,
     private opts: {
       wakeWord: string;
+      /** 只说唤醒词时播报的短应答（随机选一条）；为空时只播提示音。 */
+      wakeAck?: string[];
       followupMs: number;
       semantic?: SemanticPolicy;
       speculative?: boolean;
@@ -82,6 +89,70 @@ export class Conversation {
   ) {}
   attachAudio(audio: AudioOutput) {
     this.audio = audio;
+    // 语音一接通就预合成应答，第一次唤醒也不用等 TTS。
+    for (const text of this.opts.wakeAck ?? []) void this.ackAudio(text).catch(() => {});
+  }
+  private ackAudio(text: string) {
+    let cached = ackCache.get(text);
+    if (!cached) {
+      cached = (async () => {
+        const chunks: Buffer[] = [];
+        for await (const pcm of this.p.tts.synth(text, AbortSignal.timeout(5000))) chunks.push(pcm);
+        return Buffer.concat(chunks);
+      })();
+      cached.catch(() => ackCache.delete(text));
+      ackCache.set(text, cached);
+    }
+    return cached;
+  }
+  /**
+   * 只说了唤醒词时，像小爱一样先应一声“我在”；唤醒词后紧接着说了命令（一句话直达）
+   * 或用户已经开口，就不应答，直接听。应答过程中用户开口会立即停止播放。
+   */
+  private async acknowledge() {
+    const texts = this.opts.wakeAck ?? [];
+    if (!texts.length || this.p.demo || !this.audio) return;
+    const epoch = this.recognizerEpoch;
+    const still = () =>
+      epoch === this.recognizerEpoch &&
+      this.state === 'LISTENING' &&
+      !this.userSpeaking &&
+      !this.transcript;
+    // 等唤醒词这句话的 VAD 结束，再留 250ms 给“唤醒词 + 短停顿 + 命令”接话。
+    const start = performance.now();
+    while (this.userSpeaking && performance.now() - start < 1500) await delay(30);
+    await delay(250);
+    if (!still()) return;
+    const text = texts[Math.floor(Math.random() * texts.length)];
+    let pcm: Buffer;
+    try {
+      pcm = await Promise.race([
+        this.ackAudio(text),
+        delay(600).then(() => Promise.reject(new Error('应答合成超时'))),
+      ]);
+    } catch {
+      return;
+    }
+    if (!still() || !pcm.length) return;
+    this.acking = new AbortController();
+    this.ackEcho = text;
+    this.emit({ type: 'ack', text });
+    try {
+      await this.audio.write(pcm, this.acking.signal);
+      await this.audio.drain();
+    } catch {
+      // 用户开口打断了应答
+    } finally {
+      this.acking = undefined;
+    }
+    // 应答期间没人说话，从应答结束起重新计“无语音”超时。
+    if (still()) this.armNoSpeech(6000);
+  }
+  private stopAck() {
+    if (!this.acking) return;
+    this.acking.abort();
+    this.acking = undefined;
+    this.audio?.clear();
   }
   private setState(state: AssistantState) {
     this.state = state;
@@ -148,6 +219,7 @@ export class Conversation {
     this.pendingAudio = [];
   }
   private cancel() {
+    this.stopAck();
     this.generation++;
     this.abort.abort();
     this.abort = new AbortController();
@@ -311,9 +383,13 @@ export class Conversation {
       if (speakingNow || mode === 'verify-speaking' || mode === 'barge') this.stopResponse();
       this.barge = false;
       this.setState('LISTENING');
-      this.emit({ type: 'wake-confirmed' });
+      const voiceAck = !!this.opts.wakeAck?.length && !this.p.demo && !!this.audio;
+      this.emit({ type: 'wake-confirmed', chime: !voiceAck });
       this.emit({ type: 'notice', message: '我在，请说。' });
       this.armNoSpeech(6000);
+      this.ackEcho = '';
+      // 本次结果里唤醒词后面已经有命令，就是一句话直达，不应答。
+      if (voiceAck && !stripWake(raw, this.opts.wakeWord).trim()) void this.acknowledge();
     } else if (this.barge) {
       if (isEcho(raw, this.answer)) return;
       if (isBackchannel(raw)) {
@@ -325,7 +401,13 @@ export class Conversation {
       this.setState('LISTENING');
       this.armNoSpeech(6000);
     } else if (mode !== 'query' && this.state !== 'LISTENING') return;
-    const clean = stripWake(raw, this.opts.wakeWord);
+    let clean = stripWake(raw, this.opts.wakeWord);
+    if (this.ackEcho) {
+      // 应答“我在”的残余回声被识别进来时去掉，不当成用户的话。
+      const echo = this.ackEcho.replace(/[，。,.!！?？\s]/g, '');
+      const head = clean.replace(/^[，。,.!！?？\s]+/, '');
+      if (head.startsWith(echo)) clean = head.slice(echo.length).replace(/^[，。,.!！?？\s]+/, '');
+    }
     this.transcript = this.committed + clean;
     this.lastFinal = final;
     if (final) this.committed = this.transcript;
@@ -526,6 +608,7 @@ export class Conversation {
     this.userSpeaking = speaking;
     if (this.speakerLocked && !speaking) this.speakerMatch = target;
     if (started) {
+      this.stopAck();
       this.speechAt = performance.now();
       this.verdict = undefined;
       // 用户一开口就预热识别连接；唤醒词说完时握手已完成。
@@ -585,6 +668,7 @@ export class Conversation {
     this.followupUntil = 0;
     this.transcript = '';
     this.committed = '';
+    this.ackEcho = '';
     this.emit({ type: 'transcript', text, final: true });
     this.history.push({ role: 'user', content: text });
     if (this.history.length > 24) this.history.splice(0, this.history.length - 24);

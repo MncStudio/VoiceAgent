@@ -11,6 +11,7 @@ export type AppConfig = {
   provider: 'demo' | 'dashscope' | 'local';
   wakeWord: string;
   followupMs: number;
+  wakeAck?: string;
   configured: boolean;
   llmModel: string;
   asrModel: string;
@@ -72,7 +73,12 @@ export class AssistantClient {
       if (event.type === 'duck') this.setVolume(event.active ? 0.2 : 1);
       if (event.type === 'wake-confirmed') {
         void this.pipeline?.confirmWake();
-        this.chime();
+        if (event.chime) this.chime();
+      }
+      if (event.type === 'ack') {
+        // 打断后播放处于静音状态，应答前恢复音量。
+        this.stopped = false;
+        this.setVolume(1);
       }
       if (event.type === 'interrupted') {
         this.stopPlayback();

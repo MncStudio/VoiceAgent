@@ -18,6 +18,7 @@ function harness(
   tts?: Providers['tts'],
 ) {
   const events: ServerEvent[] = [];
+  const played: number[] = [];
   const opened: { result: (r: Transcript) => void; written: number; closed: boolean }[] = [];
   const p: Providers = {
     demo: false,
@@ -51,10 +52,16 @@ function harness(
     p,
     (e) => events.push(e),
     { wakeWord: '你好超宝', followupMs: 8000, ...options },
-    { async write() {}, async drain() {}, clear() {} },
+    {
+      async write(pcm) {
+        played.push(pcm.length);
+      },
+      async drain() {},
+      clear() {},
+    },
   );
   active.push(c);
-  return { c, events, opened };
+  return { c, events, opened, played };
 }
 describe('唤醒词拼音匹配', () => {
   it('同音 / 近音字也能通过复核', () => {
@@ -336,5 +343,45 @@ describe('追问灵敏度', () => {
     c.handle({ type: 'vad', speaking: false, target: false });
     await wait(800);
     expect(c.history.filter((m) => m.role === 'user')).toHaveLength(1);
+  });
+});
+describe('唤醒应答', () => {
+  const wakeOnly = async (text: string, opts = {}) => {
+    const h = harness({ wakeAck: ['我在'], ...opts });
+    h.c.handle({ type: 'wake', source: 'kws' });
+    await wait(20);
+    h.opened[0].result({ text, final: false });
+    return h;
+  };
+  it('只说唤醒词时先应答“我在”，不播提示音', async () => {
+    const { events, played } = await wakeOnly('你好超宝');
+    expect(events.find((e) => e.type === 'wake-confirmed')).toMatchObject({ chime: false });
+    await wait(400);
+    expect(events.some((e) => e.type === 'ack' && e.text === '我在')).toBe(true);
+    expect(played.length).toBeGreaterThan(0);
+  });
+  it('唤醒词后直接说命令（一句话直达）不应答', async () => {
+    const { events } = await wakeOnly('你好超宝明天天气怎么样');
+    await wait(400);
+    expect(events.some((e) => e.type === 'ack')).toBe(false);
+  });
+  it('唤醒后用户马上接着说，不应答', async () => {
+    const { c, events } = await wakeOnly('你好超宝');
+    c.handle({ type: 'vad', speaking: true, target: false });
+    await wait(400);
+    expect(events.some((e) => e.type === 'ack')).toBe(false);
+  });
+  it('应答的回声不会混进用户的话', async () => {
+    const { c, opened } = await wakeOnly('你好超宝');
+    await wait(400);
+    opened[0].result({ text: '你好超宝。我在，帮我查一下快递', final: true });
+    await wait(700);
+    expect(c.history.find((m) => m.role === 'user')?.content).toBe('帮我查一下快递');
+  });
+  it('未配置应答时改用提示音', async () => {
+    const { events } = await wakeOnly('你好超宝', { wakeAck: [] });
+    await wait(400);
+    expect(events.find((e) => e.type === 'wake-confirmed')).toMatchObject({ chime: true });
+    expect(events.some((e) => e.type === 'ack')).toBe(false);
   });
 });
