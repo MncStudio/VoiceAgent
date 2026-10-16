@@ -3,101 +3,153 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AI 小头像 · Shantou</title>
+<title>小能 · Shantou</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
-    background: linear-gradient(160deg, #eef1ff, #f5f6fa);
-    min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  html, body { width: 100%; height: 100%; background: transparent; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  .stage {
+    --glow-color: 162, 155, 254;
+    --speech-level: 0;
+    display: flex; flex-direction: column; align-items: center;
+    position: relative; border: 0; padding: 14px; background: transparent; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
   }
-  .stage { display: flex; flex-direction: column; align-items: center; }
-  #avatarImg { display: block; max-width: 200px; height: auto; }
-  .baseWrap { position: relative; width: 200px; margin-top: -26px; }
-  #baseImg { display: block; max-width: 200px; height: auto; }
-  /* 底座光圈:未唤醒微弱灰紫,已唤醒时亮起(用户唤醒状态提示) */
+  .stage:focus-visible { outline: 2px solid #a29bfe; outline-offset: 2px; border-radius: 24px; }
+  #avatarImg {
+    display: block; max-width: 200px; height: auto;
+    transform-origin: center bottom; animation: float 4s ease-in-out infinite;
+    transition: opacity .35s, filter .35s;
+  }
+  .baseWrap { position: relative; width: 200px; max-width: 100%; margin-top: -26px; }
+  #baseImg {
+    display: block; width: 100%; height: auto;
+    filter: drop-shadow(0 0 4px rgba(var(--glow-color), .25));
+    transition: filter .15s;
+  }
   #baseGlow {
     position: absolute; left: 8%; right: 8%; bottom: 0; height: 62px; border-radius: 50%;
-    background: radial-gradient(ellipse, rgba(162,155,254,.55), transparent 70%);
-    filter: blur(10px); opacity: .12; transition: opacity .35s; pointer-events: none;
+    background: radial-gradient(ellipse, rgba(var(--glow-color), .65), transparent 70%);
+    filter: blur(10px); opacity: .18; pointer-events: none;
+    animation: breathe 4s ease-in-out infinite;
   }
-  .baseWrap.awake #baseGlow { opacity: .75; }
-  /* 状态提示 */
-  .hint { margin-top: .5rem; font-size: .84rem; color: #95a5a6; min-height: 1.2em; transition: color .2s; }
-  .hint.hi { color: #6c5ce7; font-weight: 600; }
+  .baseWrap::after {
+    content: ''; position: absolute; left: 12%; right: 12%; bottom: 10px;
+    height: 32px; border-radius: 50%; border: 2px solid rgba(var(--glow-color), .6);
+    opacity: 0; pointer-events: none;
+  }
+  .stage[data-state="idle"] #avatarImg,
+  .stage[data-state="sleep"] #avatarImg { opacity: .7; animation-duration: 6s; }
+  .stage[data-state="starting"] #baseGlow,
+  .stage[data-state="waiting-activation"] #baseGlow { animation: activate 1.6s ease-in-out infinite; }
+  .stage[data-state="wake-active"],
+  .stage[data-state="recording"] { --glow-color: 105, 218, 226; }
+  .stage[data-state="wake-active"] #avatarImg,
+  .stage[data-state="recording"] #avatarImg { animation: float 2s ease-in-out infinite; }
+  .stage[data-state="wake-active"] #baseGlow,
+  .stage[data-state="recording"] #baseGlow { animation: awake 1.8s ease-in-out infinite; }
+  .stage[data-state="wake-active"] .baseWrap::after,
+  .stage[data-state="recording"] .baseWrap::after { animation: ripple 1.8s ease-out infinite; }
+  .stage[data-state="speaking"] { --glow-color: 140, 125, 255; }
+  .stage[data-state="speaking"] #avatarImg { animation: talk .9s ease-in-out infinite; }
+  .stage[data-state="speaking"] #baseGlow {
+    animation: none; opacity: calc(.5 + var(--speech-level) * .5);
+    transform: scale(calc(1 + var(--speech-level) * .18)); transition: opacity .08s, transform .08s;
+  }
+  .stage[data-state="speaking"] #baseImg {
+    filter: drop-shadow(0 0 calc(5px + var(--speech-level) * 14px) rgba(var(--glow-color), .8));
+  }
+  .stage[data-state="speaking"] .baseWrap::after { animation: ripple 1.1s ease-out infinite; }
+  .stage[data-state="error"] { --glow-color: 238, 163, 91; }
+  .stage[data-state="error"] #avatarImg { opacity: .65; animation: none; }
+  .stage[data-state="error"] #baseGlow { animation: activate 2s ease-in-out infinite; }
+  @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+  @keyframes breathe { 0%, 100% { opacity: .12; transform: scale(.96); } 50% { opacity: .32; transform: scale(1.04); } }
+  @keyframes activate { 0%, 100% { opacity: .18; } 50% { opacity: .7; } }
+  @keyframes awake { 0%, 100% { opacity: .6; } 50% { opacity: .95; } }
+  @keyframes ripple { 0% { opacity: .7; transform: scale(.85); } 100% { opacity: 0; transform: scale(1.3); } }
+  @keyframes talk { 0%, 100% { transform: translateY(-3px) rotate(-1deg); } 50% { transform: translateY(-6px) rotate(1deg); } }
+  @media (prefers-reduced-motion: reduce) {
+    #avatarImg, #baseGlow, .baseWrap::after { animation: none !important; transition: none !important; }
+    .stage[data-state="wake-active"] #baseGlow,
+    .stage[data-state="recording"] #baseGlow { opacity: .85; }
+    .stage[data-state="waiting-activation"] #baseGlow,
+    .stage[data-state="error"] #baseGlow { opacity: .55; }
+  }
 </style>
 </head>
 <body>
-  <div class="stage">
-    <img id="avatarImg" src="ai-avatar.svg" alt="AI 头像">
-    <div class="baseWrap" id="baseWrap">
+  <button class="stage" id="stage" type="button" data-state="idle" aria-label="小能，点击开始监听">
+    <img id="avatarImg" src="ai-avatar.svg" alt="" aria-hidden="true">
+    <div class="baseWrap">
       <div id="baseGlow"></div>
-      <img id="baseImg" src="base.svg" alt="底座">
+      <img id="baseImg" src="base.svg" alt="" aria-hidden="true">
     </div>
-  </div>
-  <div class="hint" id="hint">说「你好小能」唤醒</div>
+  </button>
 
-  <script src="voice-agent.js"></script>
+  <script src="voice-agent.js?v=20261010"></script>
   <script>
-    const baseUrl = 'http://localhost:30002';
-    const hintEl = document.getElementById('hint');
-    const baseWrap = document.getElementById('baseWrap');
+    // 保持线上 iframe 透明、HTTPS 同源代理；SDK 自动选择 wss://。
+    const stage = document.getElementById('stage');
+    const labels = {
+      idle: '小能，点击开始监听',
+      starting: '小能正在启动监听',
+      'waiting-activation': '小能，点击激活监听',
+      listening: '小能正在等待唤醒',
+      'wake-active': '小能已唤醒，请讲',
+      sleep: '小能已休眠，等待唤醒',
+      recording: '小能正在聆听',
+      speaking: '小能正在回答',
+      error: '小能连接异常，点击重试',
+    };
+    let lastError = '';
+    const log = (...args) => console.log('[小能]', ...args);
 
-    // 更新提示 + 底座光圈唤醒态
-    function setHint(text, on) {
-      hintEl.textContent = text;
-      hintEl.classList.toggle('hi', !!on);
-      baseWrap.classList.toggle('awake', !!on);
+    function setState(state) {
+      if (!labels[state]) state = 'idle';
+      if (state === 'starting' || state === 'listening' || state === 'wake-active') lastError = '';
+      if (state === 'idle' && lastError) state = 'error';
+      stage.dataset.state = state;
+      stage.setAttribute('aria-label', labels[state]);
+      if (state !== 'speaking') stage.style.setProperty('--speech-level', '0');
     }
 
-    // ============ 说话时底座光圈闪烁(在唤醒常亮基础上叠加) ============
-    function initGlow(stream) {
-      let ctx;
-      try { ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch { return; }
-      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
-      const src = ctx.createMediaStreamSource(stream);
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 256;
-      src.connect(analyser);
-      const data = new Uint8Array(analyser.frequencyBinCount);
-      const baseImg = document.getElementById('baseImg');
-      (function glow() {
-        requestAnimationFrame(glow);
-        analyser.getByteFrequencyData(data);
-        let sum = 0;
-        for (let i = 0; i < data.length; i++) sum += data[i];
-        const v = Math.min(1, (sum / (data.length * 255)) * 4);
-        if (baseImg) {
-          const blur = 4 + v * 10;
-          const alpha = 0.25 + v * 0.7;
-          baseImg.style.filter = 'drop-shadow(0 0 ' + blur + 'px rgba(162,155,254,' + alpha + '))';
-        }
-      })();
-    }
-
-    // 状态只打印到控制台
-    const log = (...a) => console.log('[AI头像]', ...a);
-
-    // ============ VoiceAgent(加载即自动监听,仅唤醒词免按键) ============
     const agent = new VoiceAgent({
-      baseUrl,
+      baseUrl: '',
       autoWake: true,
-      onUserText: (t) => log('用户说:', t),
-      onReply: (t) => log('回复:', t),
-      onWake: (w, sec) => { log('已唤醒:', w, sec + 's'); setHint('已唤醒,请讲', true); },
-      onSleep: (idle) => { log('已休眠,静默', idle, 's'); setHint('已休眠,说「你好小能」唤醒', false); },
-      onStateChange: (s) => {
-        log('状态:', s);
-        if (s === 'wake-active') setHint('已唤醒,请讲', true);
-        else if (s === 'speaking') setHint('正在回答…', true);
-        else if (s === 'listening') setHint('说「你好小能」唤醒', false);
-        else if (s === 'sleep') setHint('已休眠,说「你好小能」唤醒', false);
-        else if (s === 'waiting-activation') setHint('点击页面任意处激活监听', false);
-        else if (s === 'idle') setHint('未启动', false);
+      onUserText: (text) => log('用户说:', text),
+      onReply: (text) => log('回复:', text),
+      onWake: (word, seconds) => { log('已唤醒:', word, seconds + 's'); setState('wake-active'); },
+      onSleep: (seconds) => {
+        log('已休眠，静默', seconds, 's');
+        // 回答仍在播放时保留说话动画，最终状态由 SDK 回调更新。
+        if (stage.dataset.state !== 'speaking') setState('sleep');
       },
-      onError: (m) => console.error('[AI头像] 错误:', m),
-      onAudioStream: initGlow,
+      onStateChange: (state) => { log('状态:', state); setState(state); },
+      // 最新 SDK 按实际 PCM 播放时刻给出音量，无需额外 AudioContext 或常驻动画循环。
+      onAudioLevel: (level) => {
+        const value = Math.min(1, Math.max(0, Number(level) || 0) * 4);
+        stage.style.setProperty('--speech-level', String(value));
+      },
+      onError: (message) => {
+        lastError = message;
+        console.error('[小能] 错误:', message);
+        setState('error');
+      },
     });
+
+    stage.addEventListener('click', async () => {
+      // 已监听时由 SDK 的首次手势处理激活音频；连接失败后点击小能可重新启动。
+      if (agent.wakeActive || stage.dataset.state === 'starting') return;
+      try { await agent.startWake(); }
+      catch (error) {
+        lastError = error.message;
+        console.error('[小能] 错误:', error);
+        setState('error');
+      }
+    });
+
+    window.addEventListener('pagehide', () => { agent.stopWake(); agent.stopPlay(); });
   </script>
 </body>
 </html>
