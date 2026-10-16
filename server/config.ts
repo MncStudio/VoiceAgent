@@ -6,6 +6,10 @@ const schema = z.object({
   DASHSCOPE_WS_URL: z.url().default('wss://dashscope.aliyuncs.com/api-ws/v1/inference'),
   LLM_BASE_URL: z.url().default('https://dashscope.aliyuncs.com/compatible-mode/v1'),
   LLM_MODEL: z.string().default('qwen-plus'),
+  QA_PROVIDER: z.enum(['openai', 'yuxi']).default('openai'),
+  YUXI_BASE_URL: z.url().default('http://127.0.0.1:5050'),
+  YUXI_API_KEY: z.string().default(''),
+  YUXI_AGENT_SLUG: z.string().default('wms'),
   ASR_MODEL: z.string().default('paraformer-realtime-v2'),
   ASR_VOCABULARY_ID: z.string().default(''),
   // 百炼 Paraformer v2 的 VAD 断句静音阈值（ms），0 表示使用服务默认值。

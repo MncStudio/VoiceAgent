@@ -38,14 +38,15 @@ app.get('/api/health', (_req, res) => res.json({ ok: true, provider: config.PROV
 app.get('/api/config', (_req, res) =>
   res.json({
     provider: config.PROVIDER,
+    qaProvider: config.PROVIDER === 'demo' ? 'demo' : config.QA_PROVIDER,
     wakeWord: config.WAKE_WORD,
     wakeAck: config.WAKE_ACK,
     followupMs: config.FOLLOWUP_MS,
-    llmModel: config.LLM_MODEL,
+    llmModel: config.QA_PROVIDER === 'yuxi' ? `yuxi / ${config.YUXI_AGENT_SLUG}` : config.LLM_MODEL,
     asrModel: config.ASR_MODEL,
     ttsModel: config.TTS_MODEL,
     turnModel: config.TURN_MODEL,
-    speculative: config.SPECULATIVE === 'true',
+    speculative: config.QA_PROVIDER !== 'yuxi' && config.SPECULATIVE === 'true',
     speakerThreshold: config.SPEAKER_THRESHOLD,
     configured: config.PROVIDER !== 'dashscope' || !!config.DASHSCOPE_API_KEY,
     assets: {
@@ -88,7 +89,7 @@ app.post('/api/sessions', (_req, res) => {
       followupMs: config.FOLLOWUP_MS,
       speakerReject: Math.max(0, config.SPEAKER_THRESHOLD - 0.15),
       semantic,
-      speculative: config.SPECULATIVE === 'true',
+      speculative: config.QA_PROVIDER !== 'yuxi' && config.SPECULATIVE === 'true',
     },
   );
   sessions.set(id, { id, engine, events, created: Date.now() });

@@ -28,7 +28,7 @@ describe('本地 API 边界', () => {
   it('公共配置没有服务端密钥', async () => {
     const r = await fetch(`${base}/api/config`);
     const body = await r.text();
-    expect(body).not.toMatch(/DASHSCOPE_API_KEY|LIVEKIT_API_SECRET|sk-ws-/);
+    expect(body).not.toMatch(/DASHSCOPE_API_KEY|LIVEKIT_API_SECRET|YUXI_API_KEY|yxkey_|sk-ws-/);
     expect(JSON.parse(body)).toMatchObject({ provider: 'demo', wakeWord: '你好超宝' });
   });
   it('拒绝未经允许的网页来源创建会话', async () => {

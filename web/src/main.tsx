@@ -307,9 +307,11 @@ function App() {
           <span className="mode-pill">
             {config?.provider === 'demo'
               ? '演示模式'
-              : config?.provider === 'local'
-                ? '本地模型'
-                : '百炼云端'}
+              : config?.qaProvider === 'yuxi'
+                ? 'Yuxi 问答'
+                : config?.provider === 'local'
+                  ? '本地模型'
+                  : '百炼云端'}
           </span>
         </div>
         <div className="topbar-actions">

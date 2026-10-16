@@ -2,6 +2,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { Config } from '../config.js';
 import type { Providers } from './types.js';
 import { OpenAILLM } from './llm.js';
+import { YuxiLLM } from './yuxi.js';
 import { DashScopeASR, DashScopeTTS } from './dashscope.js';
 import { FunASR, CosyVoiceLocal } from './local.js';
 export function parseHotwords(value: string) {
@@ -47,11 +48,14 @@ export function createProviders(c: Config): Providers {
             c.ASR_VOCABULARY_ID,
             c.ASR_MAX_SENTENCE_SILENCE,
           ),
-    llm: new OpenAILLM(
-      c.LLM_BASE_URL,
-      c.PROVIDER === 'local' ? c.LOCAL_LLM_API_KEY : c.DASHSCOPE_API_KEY,
-      c.LLM_MODEL,
-    ),
+    llm:
+      c.QA_PROVIDER === 'yuxi'
+        ? new YuxiLLM(c.YUXI_BASE_URL, c.YUXI_API_KEY, c.YUXI_AGENT_SLUG)
+        : new OpenAILLM(
+            c.LLM_BASE_URL,
+            c.PROVIDER === 'local' ? c.LOCAL_LLM_API_KEY : c.DASHSCOPE_API_KEY,
+            c.LLM_MODEL,
+          ),
     tts:
       c.PROVIDER === 'local'
         ? new CosyVoiceLocal(c.LOCAL_TTS_URL, c.LOCAL_TTS_VOICE)

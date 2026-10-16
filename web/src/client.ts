@@ -9,6 +9,7 @@ import type { ClientEvent, ServerEvent } from '../../shared/protocol';
 import { MicrophonePipeline, type AudioStatus } from './audio';
 export type AppConfig = {
   provider: 'demo' | 'dashscope' | 'local';
+  qaProvider: 'demo' | 'openai' | 'yuxi';
   wakeWord: string;
   followupMs: number;
   wakeAck?: string;

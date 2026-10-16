@@ -89,6 +89,23 @@ LOCAL_TTS_VOICE=中文女
 
 本地模型服务需自行启动：ASR 接收 FunASR 官方 2pass PCM WebSocket 协议；LLM 提供 OpenAI 兼容 `/chat/completions` SSE；TTS 接收 `tts_text` / `spk_id` 表单并输出 **24kHz、int16 LE、单声道裸 PCM**。CosyVoice 各版本原生采样率可能不同，请在网关统一重采样后再对接，不能把 WAV / MP3 文件头当 PCM。
 
+### 接入 Yuxi 问答
+
+问答后端可独立切换，保留 `PROVIDER=dashscope` 的百炼语音识别和合成。在 `.env` 设置：
+
+```dotenv
+QA_PROVIDER=yuxi
+YUXI_BASE_URL=http://8.130.55.151:5050
+YUXI_API_KEY=填写专用接口密钥
+YUXI_AGENT_SLUG=wms
+```
+
+当前服务器的 `wms` 是“储运一体化平台智能体”，配置了企业知识库和 WMS MCP。接口密钥只保存在服务端 `.env`，不会返回网页；SSH 登录信息不用于运行时问答。设置 `QA_PROVIDER=openai` 可切回原来的 `LLM_BASE_URL` / `LLM_MODEL`。
+
+适配器调用 Yuxi 的线程、运行和 SSE 事件接口，仅将正文增量交给字幕和 TTS。每次回答携带本地会话上下文并创建临时线程，完成后删除；打断时先请求取消远程运行，再清理线程。清理失败会记录不含密钥的日志。清空本地对话后不再携带旧上下文；Yuxi 自身的审计和运行日志仍遵循服务器的保留策略。
+
+Yuxi 模式关闭投机问答，避免在用户尚未说完时触发业务工具；`TURN_MODEL` 的语义断句仍走原有 OpenAI 兼容模型配置。单次业务问答最多等待 120 秒。
+
 生产构建：
 
 ```powershell
