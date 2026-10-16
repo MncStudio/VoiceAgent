@@ -40,6 +40,7 @@ npm start                 # 固定加载 server/config/local.json
 | `wakeFollowUpTimeout` | number（秒） | 唤醒后“等你提问”的短窗口，缺省 5 秒；唤醒词所在语音段只负责唤醒，同段 ASR 尾字不当问题。5 秒内开始说下一段话就会等待整句和 ASR 完成并立即回答；没有开口则休眠。默认每问唤醒模式下，这个窗口只接一问。 |
 | `wakeTimeout` | number（秒） | 唤醒窗口总秒数：命中唤醒词后这段时间内免唤醒词连续问答；随 `/api/wake` 的 `wake` 事件 `timeoutSeconds` 下发给前端。开了 `wakeRequireWord` 后只有手动唤醒会用到这个窗口。 |
 | `wakeRequireWord` | boolean | 缺省 `true`：每轮先说唤醒词，下一段在短窗口提问，回答后发 `sleep` 复位。配置 `false` 可在首问后恢复长窗口内连续问答；单连接可用 `?requireWake=1/0` 覆盖。 |
+| `wakeInterruptOnSpeech` | boolean | 缺省 `true`：播放中识别到非回声人声，即使没有唤醒词也可停播。公共展厅建议设为 `false`，忽略未唤醒的无关说话；明确停止指令和重新唤醒仍能打断。 |
 | `speech` | object | 播报文本策略，见下两行。 |
 | `speech.mode` | string | `full`（缺省）**数字人与对话框用同一个 LLM，LLM 答什么数字人就念什么**（只清掉 HTML/Markdown 排版噪声，不会念出表格竖线/# 号）；`key-numbers` 规则精简，只念「数字+单位」的关键片段；`llm` 再起一条独立 LLM 链路把回答改写成 20~50 字口语（角色=数字人播报员，不念表格/代码/Markdown）。弹窗/字幕**始终**是完整回答（`delta`/`done.replyText`），只有 TTS 用播报文本。 |
 | `speech.summary` | object | `mode: "llm"` 时这条独立链路的 LLM 配置，字段与顶层 `llm` 相同（`provider`/`baseUrl`/`apiKey`/`model`/`url`/`agentSlug`/`agentId`/`timeoutMs`），另可加 `system` 覆盖默认角色提示。**建议 `openai-compatible`**（不建会话线程）；用 yuxi 会为每次改写建一条会话。留空或失败自动退回 `key-numbers`，再不行播完整回复。 |

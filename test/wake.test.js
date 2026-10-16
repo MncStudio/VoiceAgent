@@ -7,6 +7,14 @@ const { WakeDetector, _test } = require('../server/wake');
 
 const { normalize, toSyllables, findSubseq } = _test;
 
+// WebSocket 内存池中的奇数偏移也必须正确解码，不得导致服务崩溃。
+const pcmStorage = new ArrayBuffer(8);
+const unalignedPcm = Buffer.from(pcmStorage, 1, 5);
+unalignedPcm.writeInt16LE(-32768, 0);
+unalignedPcm.writeInt16LE(12345, 2);
+assert.deepStrictEqual(Array.from(_test.decodePcm(unalignedPcm)), [-32768, 12345]);
+assert.deepStrictEqual(Array.from(_test.decodePcm(Buffer.alloc(0))), []);
+
 // ---- normalize:去空白/全半角标点/转小写 ----
 assert.strictEqual(normalize(' 你好，小智！ '), '你好小智');
 assert.strictEqual(normalize('Stop the music.'), 'stopthemusic');
@@ -119,6 +127,46 @@ async function feed(det, text) {
 }
 
 (async () => {
+  // 数字员工按连接关闭环境人声打断；不改其他接入方的默认策略。
+  {
+    const { EventEmitter } = require('node:events');
+    const { attach } = require('../server/wake');
+    const originalInit = WakeDetector.prototype.init;
+    const detectors = [];
+    const sockets = [];
+    WakeDetector.prototype.init = async function () { detectors.push(this); };
+    try {
+      const wss = new EventEmitter();
+      attach(wss, ['你好小智'], 30);
+      function connect(url) {
+        const ws = new EventEmitter();
+        ws.readyState = 1; ws.OPEN = 1; ws.frames = [];
+        ws.send = (data) => ws.frames.push(JSON.parse(data));
+        ws.close = () => ws.emit('close');
+        sockets.push(ws);
+        wss.emit('connection', ws, { url });
+        return ws;
+      }
+      const isolated = connect('/api/wake?requireWake=1&interruptOnSpeech=0');
+      assert.equal(detectors[0].interruptOnSpeech, false);
+      detectors[0].playing = true;
+      detectors[0].playingText = '一句话结论。付款仍在审核，后面还有完整的说明。';
+      await feed(detectors[0], '旁边有人说话');
+      assert.deepStrictEqual(isolated.frames, [], '标题刚开始时，环境人声不能中止正文');
+      await feed(detectors[0], '别说了');
+      assert.deepStrictEqual(isolated.frames, [{ type: 'interrupt', reason: 'stop-word' }]);
+      const normal = connect('/api/wake?requireWake=1');
+      assert.equal(detectors[1].interruptOnSpeech, true, '其他接入继续采用原策略');
+      detectors[1].playing = true;
+      detectors[1].playingText = '原来的回答';
+      await feed(detectors[1], '旁边有人说话');
+      assert.deepStrictEqual(normal.frames, [{ type: 'interrupt', reason: 'speech' }]);
+    } finally {
+      sockets.forEach((ws) => ws.close());
+      WakeDetector.prototype.init = originalInit;
+    }
+  }
+
   // 1) 首段即使识别出尾字，也只唤醒；下一段说话结束后立即提交
   {
     const events = [];
@@ -126,7 +174,7 @@ async function feed(det, text) {
     await feed(det, '你好小智 库存还有多少');
     assert.deepStrictEqual(events, [
       { type: 'wake', word: '你好小智', timeoutSeconds: 5, followUp: true },
-      { type: 'interrupt' },
+      { type: 'interrupt', reason: 'wake' },
     ]);
     assert.strictEqual(det.armed, true);
     await feed(det, '库存还有多少');
@@ -231,7 +279,28 @@ async function feed(det, text) {
     await feed(det, '当前库存总量为一万两千件');
     assert.deepStrictEqual(events, [], '自己的声音不该打断自己');
     await feed(det, '等一下我有问题');
-    assert.deepStrictEqual(events, [{ type: 'interrupt' }]);
+    assert.deepStrictEqual(events, [{ type: 'interrupt', reason: 'speech' }]);
+    det.close();
+  }
+
+  // 展厅模式关闭无唤醒词的人声停播，但保留明确停止指令和重新唤醒。
+  {
+    const events = [];
+    const det = new WakeDetector(['你好小能'], (type, payload) => events.push({ type, ...payload }),
+      30000, {}, undefined, undefined, true, 5000, true, false);
+    det.playing = true;
+    det.playingText = '当前库存总量为一万两千件。';
+    det.onFrame(1, new Float32Array(512));
+    det.onFrame(1, new Float32Array(512));
+    assert.deepStrictEqual(events, [], 'VAD 检测到开口不能直接停播');
+    await feed(det, '当前库存总量为一万两千件');
+    await feed(det, '旁边有人聊天');
+    assert.deepStrictEqual(events, [], '回声和未唤醒的无关人声不能打断');
+    await feed(det, '别说了');
+    assert.deepStrictEqual(events, [{ type: 'interrupt', reason: 'stop-word' }], '明确停止指令仍然可用');
+    events.length = 0;
+    await feed(det, '你好小能');
+    assert.deepStrictEqual(events.map((event) => event.type), ['wake', 'interrupt'], '重新唤醒仍能打断');
     det.close();
   }
 
@@ -245,7 +314,7 @@ async function feed(det, text) {
     det.playingText = '旧回答';
     await feed(det, '库存还有多少');
     assert.deepStrictEqual(events, [
-      { type: 'interrupt' },
+      { type: 'interrupt', reason: 'question' },
       { type: 'answer', userText: '库存还有多少' },
       { type: 'sleep', idleSeconds: 0 },
     ]);

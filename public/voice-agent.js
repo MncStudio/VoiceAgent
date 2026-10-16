@@ -10,6 +10,7 @@
 //     sessionId: '…',        // 可选;接入方传固定值则后端据此续 yuxi 多轮记忆(thread_id);不传则每次单轮
 //     newSessionPerAsk: true,// 可选;每次提问都换一个 sessionId("每次提问都是新对话",不带上一轮上下文)
 //     wakeRequireWord: true, // 缺省 true；false 则允许长窗口内连续提问
+//     interruptOnSpeech: false, // 可选:关闭环境人声打断，仍可重新唤醒或说明确停止词
 //     baseUrl: '…',          // 可选;后端地址(如 http://192.168.1.5:3000),跨域/独立部署时填;缺省同源相对路径
 //     autoWake: true,        // 可选;true 则构造后自动开始唤醒监听
 //     onUserText(text),      // 识别到用户说的话(三路都触发)
@@ -21,6 +22,7 @@
 //     onStateChange(state),  // 状态变化:idle/starting/waiting-activation/listening/wake-active/sleep/recording/speaking
 //     onAudioLevel(level),   // 可选:按实际播放时刻回调 PCM 短时音量(0..1),数字人口型首选
 //     onError(msg),
+//     onQuestion(text),     // 可选:由接入方处理问答，SDK 仅提供唤醒/识别/朗读，不调 chat_stream
 //   });
 //
 //   agent.startWake();       // Promise<void>:开始唤醒监听(采集常开)
@@ -30,8 +32,28 @@
 //   agent.startRecording();  // Promise<void>:按住说话开始
 //   agent.stopRecording();   // Promise<{replyText,userText}|null>:松开发送,自动播放
 //   agent.stopPlay();        // void:手动打断当前播放(保底,在播时触发 onInterrupt)
+//   agent.activateAudio();   // Promise<void>:在首次用户点击时解锁播放
+//   agent.speak(text);       // Promise<void>:只朗读传入的正文，不调用 LLM
+//   agent.destroy();         // void:离开页面时释放麦克风、连接和播放资源
 
 (function (global) {
+  // 只分段，不摘要、不截断。每段播完后再合成下一段，避免长回答一次合成超时，
+  // 同时保证回声判定拿到的始终是当前播报段（不会丢掉长回答的开头）。
+  function speechSegments(text, limit = 240) {
+    const chars = Array.from(String(text || '').trim());
+    const out = [];
+    while (chars.length) {
+      let end = Math.min(limit, chars.length);
+      if (chars.length > limit) {
+        for (let i = end - 1; i >= Math.floor(limit / 3); i--) {
+          if (/[。！？；\n，、：\s]/.test(chars[i])) { end = i + 1; break; }
+        }
+      }
+      const part = chars.splice(0, end).join('').trim();
+      if (part) out.push(part);
+    }
+    return out;
+  }
   // ============ TtsPlayer:流式 TTS 播放(内联,私有,不挂 window) ============
   // 拿 replyText → 连 /api/tts WS 流式合成 → Web Audio 排队播放。
   // 关键点(别改):播放起点必须等首个 PCM 块到达时才定为 ctx.currentTime + 0.15。
@@ -61,6 +83,7 @@
       this.speakingText = '';
       this.onAudioStream = null;    // (stream:MediaStream) 可选,播放流创建后回调
       this.onAudioLevel = null;     // (level:0..1) 可选,按实际播放时刻回调 PCM 短时音量
+      this._playbackWaiter = null;
     }
 
     get playing() { return this._playing; }
@@ -106,6 +129,13 @@
       this._playing = v;
       if (!v) this.speakingText = '';
       if (this.onStateChange) this.onStateChange(v);
+      if (!v) this._finishPlaybackWait();
+    }
+
+    _finishPlaybackWait() {
+      const resolve = this._playbackWaiter;
+      this._playbackWaiter = null;
+      if (resolve) resolve();
     }
 
     // 流式 TTS 的相邻语句之间可能有数秒合成空窗。此时已排队的 AudioBufferSource
@@ -126,6 +156,7 @@
       this._nextTime = 0;
       this._pending = null; // 清残留累积字节
       this._setPlaying(false);
+      this._finishPlaybackWait();
     }
 
     _clearLevelTimers() {
@@ -181,23 +212,46 @@
       const ws = new WebSocket(url);
       ws.binaryType = 'arraybuffer';
       this._ttsWs = ws;
-      ws.onopen = () => ws.send(JSON.stringify({ type: 'synthesize', text }));
+      let completed = false;
+      ws.onopen = () => {
+        if (gen === this._playGen) ws.send(JSON.stringify({ type: 'synthesize', text }));
+      };
       ws.onmessage = (e) => {
         if (gen !== this._playGen) return; // 已打断,丢弃旧合成
         if (typeof e.data === 'string') {
           const msg = JSON.parse(e.data);
           if (msg.type === 'meta') this._applyMeta(msg);
           else if (msg.type === 'error') { if (this.onError) this.onError(msg.message); }
-          else if (msg.type === 'done') { ws.close(); if (this.onDone) this.onDone(); }
+          else if (msg.type === 'done') { completed = true; ws.close(); if (this.onDone) this.onDone(); }
           return;
         }
         this._consumePcm(gen, ctx, e.data);
       };
       ws.onclose = () => {
+        if (gen !== this._playGen) return;
         if (this._ttsWs === ws) this._ttsWs = null;
+        if (!completed) {
+          if (this.onError) this.onError('语音连接提前结束，回答尚未读完，请重试');
+          this.stop();
+          return;
+        }
         this._maybeFinish(gen);
       };
       ws.onerror = () => { if (gen === this._playGen && this.onError) this.onError('TTS 连接异常'); };
+    }
+
+    // done 仅代表合成结束，必须等最后一个已排队音块播完；打断也要释放等待。
+    playAndWait(text) {
+      const started = this.play(text);
+      return new Promise((resolve, reject) => {
+        this._playbackWaiter = resolve;
+        started.then(() => {
+          if (this._playbackWaiter === resolve && !this.playing) this._finishPlaybackWait();
+        }, (error) => {
+          if (this._playbackWaiter === resolve) this._playbackWaiter = null;
+          reject(error);
+        });
+      });
     }
 
     // 流式问答:连 /api/chat_stream,后端一条龙(LLM 增量→断句→逐句 TTS→顺序推 PCM),这里只播。
@@ -300,7 +354,15 @@
       this.newSessionPerAsk = !!opts.newSessionPerAsk;
       // 默认每问唤醒；显式 false 才使用长窗口连续问答。
       this.wakeRequireWord = opts.wakeRequireWord !== false;
+      this.interruptOnSpeech = opts.interruptOnSpeech !== false;
       this.baseUrl = String(opts.baseUrl || '').replace(/\/+$/, ''); // 跨域部署:后端地址(如 http://host:port)
+      // 外部问答模式：只提供唤醒/ASR/TTS，业务问答由接入方处理，不再请求 chat_stream。
+      this._onQuestion = typeof opts.onQuestion === 'function' ? opts.onQuestion : null;
+      this._destroyed = false;
+      this._wakeGeneration = 0;
+      this._wakeStarting = null;
+      this._speakSeq = 0;
+      this._speakingSequence = false;
 
       this._on = {
         userText: opts.onUserText,
@@ -316,7 +378,10 @@
       };
 
       this._tts = new TtsPlayer(this.baseUrl);
-      this._tts.onError = (msg) => this._emit('error', 'TTS 失败:' + msg);
+      this._tts.onError = (msg) => {
+        if (this._speakingSequence) this.stopPlay();
+        this._emit('error', 'TTS 失败:' + msg);
+      };
       this._tts.onStateChange = (playing) => {
         this._notifyWakePlaying(playing);
         this._refreshState();
@@ -354,7 +419,8 @@
       if (opts.autoWake) {
         // 延迟到构造完成后:startWake 会同步触发 onStateChange('starting'),
         // 若此刻触发,回调里可能访问尚未完成赋值的 agent 变量(TDZ),抛 ReferenceError。
-        setTimeout(() => {
+        this._autoWakeTimer = setTimeout(() => {
+          if (this._destroyed) return;
           this.startWake().catch((e) => {
             this._emit('error', '无法监听:' + e.message);
             this._refreshState();
@@ -437,8 +503,10 @@
     _refreshState() {
       let s;
       if (this._recording) s = 'recording';
-      else if (this._tts.playing) s = 'speaking';
-      else if (this._wakeOn) s = this._armed ? 'wake-active' : (this._ctxRunning ? 'listening' : 'waiting-activation');
+      else if (this._tts.playing || this._speakingSequence) s = 'speaking';
+      else if (this._wakeOn) s = !this._wakeWs || this._wakeWs.readyState !== WebSocket.OPEN
+        ? 'starting'
+        : (this._armed ? 'wake-active' : (this._ctxRunning ? 'listening' : 'waiting-activation'));
       else s = 'idle';
       this._setState(s);
     }
@@ -467,7 +535,22 @@
 
     // ============ ① 唤醒监听(/api/wake WS) ============
     async startWake() {
-      if (this._wakeOn) return;
+      if (this._destroyed || this._wakeOn) return;
+      if (this._wakeStarting) return this._wakeStarting;
+      const generation = ++this._wakeGeneration;
+      const pending = this._startWake(generation);
+      this._wakeStarting = pending;
+      try {
+        await pending;
+      } catch (error) {
+        if (generation === this._wakeGeneration) this.stopWake();
+        throw error;
+      } finally {
+        if (this._wakeStarting === pending) this._wakeStarting = null;
+      }
+    }
+
+    async _startWake(generation) {
       this._setState('starting');
       // echoCancellation 消扬声器回声:外放时回答声不会再被 VAD 误判成"用户开口"而自打断
       // (打断要求采集常开,开 AEC 是防止外放自打断的关键)。noiseSuppression/autoGainControl 顺带降噪。
@@ -480,18 +563,24 @@
           autoGainControl: true,
         },
       });
+      // 授权框未关闭时可能已经离开页面/停止监听，不允许迟到授权重新开启麦克风。
+      if (generation !== this._wakeGeneration || this._destroyed) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
       this._micStream = stream;
       // 采集固定 16k,与后端 VAD/ASR 一致(浏览器自动重采样)。
       const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      this._wakeCtx = ctx;
       if (Math.abs(ctx.sampleRate - 16000) > 1) {
         stream.getTracks().forEach((t) => t.stop());
         throw new Error('浏览器不支持 16k 采样率(实际 ' + ctx.sampleRate + 'Hz),无法做唤醒检测');
       }
-      this._wakeCtx = ctx;
       this._ctxRunning = ctx.state === 'running';
 
       // requireWake=1:大屏等公共场景要求"每次提问都说唤醒词",不做窗口内免唤醒词(判定在服务端)。
-      const wsUrl = this._wsUrl('/api/wake?requireWake=' + (this.wakeRequireWord ? '1' : '0'));
+      const wsUrl = this._wsUrl('/api/wake?requireWake=' + (this.wakeRequireWord ? '1' : '0') +
+        (this.interruptOnSpeech ? '' : '&interruptOnSpeech=0'));
       const ws = new WebSocket(wsUrl);
       this._wakeWs = ws;
 
@@ -516,10 +605,25 @@
         }
       };
 
-      ws.onmessage = (e) => this._onWakeMessage(JSON.parse(e.data));
-      ws.onopen = () => { if (this._tts.playing) this._notifyWakePlaying(true); };
-      ws.onerror = () => { if (this._wakeOn) this.stopWake(); this._emit('error', '唤醒连接异常'); };
-      ws.onclose = () => { if (this._wakeOn) this.stopWake(); };
+      ws.onmessage = (e) => {
+        if (this._wakeWs !== ws) return;
+        try { this._onWakeMessage(JSON.parse(e.data)); } catch { this._emit('error', '唤醒服务响应异常'); }
+      };
+      ws.onopen = () => {
+        if (this._wakeWs !== ws) return;
+        if (this._tts.playing) this._notifyWakePlaying(true);
+        this._refreshState();
+      };
+      ws.onerror = () => {
+        if (this._wakeWs !== ws) return;
+        this.stopWake();
+        this._emit('error', '唤醒连接异常');
+      };
+      ws.onclose = () => {
+        if (this._wakeWs !== ws) return;
+        this.stopWake();
+        this._emit('error', '唤醒连接已断开，请重新开启语音');
+      };
 
       this._wakeOn = true;
       if (!this._ctxRunning) this._armGestureResume(ctx);
@@ -527,14 +631,17 @@
     }
 
     stopWake() {
-      if (!this._wakeOn) return;
+      ++this._wakeGeneration;
+      this._wakeStarting = null;
       this._wakeOn = false;
       this._armed = false;
       this._disarmGesture();
       if (this._procNode) { this._procNode.onaudioprocess = null; this._procNode.disconnect(); }
       if (this._srcNode) this._srcNode.disconnect();
       if (this._wakeCtx) { this._wakeCtx.close().catch(() => {}); }
-      if (this._wakeWs) this._wakeWs.close();
+      const ws = this._wakeWs;
+      this._wakeWs = null;
+      if (ws) ws.close();
       if (this._micStream) this._micStream.getTracks().forEach((t) => t.stop());
       this._wakeWs = null; this._wakeCtx = null; this._srcNode = null; this._procNode = null; this._micStream = null;
       this._ctxRunning = false;
@@ -555,7 +662,10 @@
       switch (msg.type) {
         case 'answer': // 识别到问题后走 /api/chat_stream 流式问答；兼容旧服务端的 replyText 回包
           this._armed = true;
-          if (msg.replyText) {
+          if (this._onQuestion) {
+            this._streamReply(msg.userText);
+          } else if (msg.replyText) {
+            this.stopPlay();
             // 兼容旧服务端直接返回的回复文本。
             this._tts.onDone = null;
             if (msg.userText) this._emit('userText', msg.userText);
@@ -566,12 +676,11 @@
           }
           break;
         case 'interrupt': // 后端识别到打断词(如"别说了"):停止正在播的回答;没在播则忽略,不误报 onInterrupt
-          if (this._tts.playing) {
-            this._tts.stop();
-            this._emit('interrupt');
-          }
+          if (!this.interruptOnSpeech && msg.reason === 'speech') break;
+          if (this._tts.playing || this._speakingSequence) this.stopPlay(msg.reason || 'voice');
           break;
         case 'wake': // 命中唤醒词,进入唤醒窗口;timeoutSeconds=窗口总秒数,followUp=是否"只说唤醒词"的等待提问窗口
+          this.stopPlay('wake');
           this._armed = true;
           this._emit('wake', msg.word, msg.timeoutSeconds, !!msg.followUp);
           break;
@@ -593,7 +702,7 @@
     async startRecording() {
       // 防重入:连点/触屏同时触发 mousedown+touchstart 时,只录一路,避免麦克风双开泄漏
       if (this._recording || this._mediaRecorder) return;
-      this._tts.stop(); // 开口即打断正在播的回答
+      this.stopPlay(); // 开口即打断正在播的回答及后续待播段落
       // 按住说话同样开回声消除/降噪;MediaRecorder 按设备默认采样率录(opus 内部 48k),不设 sampleRate
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
@@ -658,7 +767,16 @@
     // 打断直接 _tts.stop() 关连接,服务端中止。
     _streamReply(text) {
       const q = String(text || '').trim();
-      if (!q) return;
+      if (!q || this._destroyed) return;
+      if (this._onQuestion) {
+        this.stopPlay();
+        this._emit('userText', q);
+        Promise.resolve().then(() => {
+          if (!this._destroyed) return this._onQuestion(q);
+        }).catch((e) => this._emit('error', '提问失败:' + e.message));
+        return;
+      }
+      this.stopPlay();
       const seq = ++this._reqSeq; // 抢占:只让最后一次提问生效
       // 每轮提问独立成段对话:URL 在下面才拼,这里换键即可让后端开新的 yuxi thread。
       if (this.newSessionPerAsk) this.newSession();
@@ -684,15 +802,67 @@
       this._streamReply(t);
     }
 
+    // 在用户点击时解锁播放，语音回答到达后即可自动朗读。
+    async activateAudio() {
+      if (this._destroyed) return;
+      const ctx = this._wakeCtx;
+      await Promise.all([
+        this._tts._ensureAudioCtx(),
+        ctx && ctx.state === 'suspended' ? ctx.resume().then(() => {
+          if (this._wakeCtx !== ctx || this._destroyed) return;
+          this._ctxRunning = ctx.state === 'running';
+          this._disarmGesture();
+          this._refreshState();
+        }) : Promise.resolve(),
+      ]);
+    }
+
+    // 只合成接入方给出的正文，不调用 LLM、不修改弹窗内容。
+    async speak(text) {
+      if (this._destroyed || !String(text || '').trim()) return;
+      this.stopPlay();
+      const seq = this._speakSeq;
+      this._speakingSequence = true;
+      this._refreshState();
+      this._tts.onDone = null;
+      this._tts.onReplyDelta = null;
+      try {
+        for (const part of speechSegments(text)) {
+          if (this._destroyed || seq !== this._speakSeq) break;
+          await this._tts.playAndWait(part);
+        }
+      } finally {
+        if (seq === this._speakSeq) {
+          this._speakingSequence = false;
+          this._refreshState();
+        }
+      }
+    }
+
+    destroy() {
+      this._destroyed = true;
+      clearTimeout(this._autoWakeTimer);
+      ++this._reqSeq;
+      this.stopWake();
+      this.stopPlay();
+      if (this._recStream) this._recStream.getTracks().forEach((t) => t.stop());
+      if (this._tts._audioCtx) this._tts._audioCtx.close().catch(() => {});
+      this._on = {};
+      this._listeners = {};
+    }
+
     // 手动打断播放(保底):停止当前回答;在播时触发 onInterrupt,与语音打断行为一致。
     // 语音/打断词识别失效时点它兜底。
-    stopPlay() {
-      const was = this._tts.playing;
+    stopPlay(reason = 'manual') {
+      const was = this._tts.playing || this._speakingSequence;
+      ++this._speakSeq;
+      this._speakingSequence = false;
       this._tts.stop();
-      if (was) this._emit('interrupt');
+      if (was) this._emit('interrupt', reason);
       this._refreshState();
     }
   }
 
+  VoiceAgent.sdkVersion = '2026-10-16.4';
   global.VoiceAgent = VoiceAgent;
 })(window);

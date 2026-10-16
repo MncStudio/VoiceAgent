@@ -15,6 +15,14 @@ const { pinyin } = require('pinyin-pro'); // 拼音模糊匹配,兼容 ASR 同�
 const PAD_SAMPLES = 4800; // 段前后各保留 300ms 静音,防止掐头去尾(VAD 判开口有滞后,100ms 不够,开头的短促音易被切)
 const MAX_SEG_SAMPLES = 5 * 16000; // 单段上限 5s,超时强制截断
 
+// ws 的 Buffer 可能从内存池的奇数偏移开始，不能直接创建 Int16Array 视图。
+// 按协议逐个读取 little-endian PCM，忽略不足一个采样的尾字节。
+function decodePcm(data) {
+  const samples = new Int16Array(Math.floor(data.length / 2));
+  for (let i = 0; i < samples.length; i++) samples[i] = data.readInt16LE(i * 2);
+  return samples;
+}
+
 // 语义化打断词:VAD 攒段 → ASR 识别后,文本命中这些词(且整段够短)才发 interrupt,
 // 让"别说了/暂停"这类指令能停播,而环境噪音/无关音不再打断。
 // 收词原则:优先收"单独说就是祈使"的词(停止/再见/结束…),避免收会出现在正常问句里的动词。
@@ -150,7 +158,7 @@ class Ring {
 }
 
 class WakeDetector {
-  constructor(wakeWords, onEvent, wakeTimeoutMs, vad = {}, stopWords, stopMaxLen, requireWake = true, followUpMs = 0, fuzzyMatch = true) {
+  constructor(wakeWords, onEvent, wakeTimeoutMs, vad = {}, stopWords, stopMaxLen, requireWake = true, followUpMs = 0, fuzzyMatch = true, interruptOnSpeech = true) {
     this.wakeWords = wakeWords.map(normalize).filter(Boolean);
     this.wakeSyllables = this.wakeWords.map(toSyllables); // 拼音匹配用,构造时预计算一次
     // 打断词可配(config.wakeStopWords 覆盖默认),每个归一化 + 拼音预处理,供 matchStop 用。
@@ -165,6 +173,8 @@ class WakeDetector {
     this.followUpMs = followUpMs > 0 ? followUpMs : 5000; // 唤醒后安静等待用户思考、提问
     // 音节级模糊容错（口音/ASR 误识别）：默认开，可用 config.wakeFuzzyMatch=false 关掉
     this.fuzzy = fuzzyMatch !== false;
+    // 公共展厅可关闭无唤醒词的人声停播，只允许明确停止指令或重新唤醒打断。
+    this.interruptOnSpeech = interruptOnSpeech !== false;
     this.onEvent = onEvent; // 回调(type, payload):answer=回答、wake=命中唤醒词、sleep=已休眠
     this.wakeTimeoutMs = wakeTimeoutMs || 300000; // 唤醒窗口时长,默认 5 分钟
     this.armedTimeoutMs = this.wakeTimeoutMs; // 当前窗口时长（手动唤醒=wakeTimeout，跟随=followUp）
@@ -407,7 +417,7 @@ class WakeDetector {
           console.log(`[wake] 检测到打断词,识别为:「${text}」`);
           // 静默停播:命中打断词即发 interrupt(不播报"已暂停",避免想安静时又多一声、
           // 以及那声被麦克风采回识别成用户输入而自问自答)。
-          this.onEvent('interrupt');
+          this.onEvent('interrupt', { reason: 'stop-word' });
           return;
         }
 
@@ -434,7 +444,7 @@ class WakeDetector {
           } else {
             this._scheduleSleep();
           }
-          if (heardWhilePlaying) this.onEvent('interrupt');
+          if (heardWhilePlaying) this.onEvent('interrupt', { reason: 'question' });
           if (!question) return; // 窗口内重复说唤醒词只重置等待时间，不生成回答
           this.answer(question);
           if (this.requireWake && !this.armed) this.onEvent('sleep', { idleSeconds: 0 });
@@ -446,8 +456,8 @@ class WakeDetector {
         if (!m) {
           // 外放时 ASR 不一定能听清唤醒词；有明确的非回声发言先停播，
           // 提问仍须再说唤醒词，不把环境谈话送给 LLM。
-          if (heardWhilePlaying && spokenText && normalize(text).length >= 2) {
-            this.onEvent('interrupt');
+          if (this.interruptOnSpeech && heardWhilePlaying && spokenText && normalize(text).length >= 2) {
+            this.onEvent('interrupt', { reason: 'speech' });
             return;
           }
           console.log(`[wake] 未命中唤醒词,识别为:「${text}」`);
@@ -461,7 +471,7 @@ class WakeDetector {
           timeoutSeconds: Math.round(this.followUpMs / 1000),
           followUp: true,
         });
-        this.onEvent('interrupt');
+        this.onEvent('interrupt', { reason: 'wake' });
         this.armed = true;
         this.followUpAwaiting = true;
         this.armedTimeoutMs = this.followUpMs;
@@ -510,7 +520,7 @@ class WakeDetector {
 // 挂到共享 WebSocketServer(无 path,这里过滤 /api/wake)。前端连上后持续发二进制 int16 块。
 // requireWake=true 时每次提问都要带唤醒词(命中只答本句,不开窗口),见 WakeDetector。
 // 接入方可按连接用 `?requireWake=1/0` 覆盖全局配置；判定与执行都在服务端。
-function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen, requireWake = true, followUpSec = 0, fuzzyMatch = true) {
+function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen, requireWake = true, followUpSec = 0, fuzzyMatch = true, interruptOnSpeech = true) {
   const words = Array.isArray(wakeWords) ? wakeWords : [];
   const timeoutMs = (wakeTimeoutSec && wakeTimeoutSec > 0 ? wakeTimeoutSec : 300) * 1000;
   wss.on('connection', (ws, req) => {
@@ -518,10 +528,12 @@ function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen,
     if (url.pathname !== '/api/wake') return; // 非唤醒连接,交给其他 handler(如 /api/tts)
     const requireWakeParam = url.searchParams.get('requireWake');
     const requireWakeForConn = requireWakeParam === '0' ? false : (requireWake || requireWakeParam === '1');
+    // 公共大屏可按连接关闭无关人声打断，其他接入方继续沿用全局配置。
+    const interruptOnSpeechForConn = interruptOnSpeech && url.searchParams.get('interruptOnSpeech') !== '0';
     const detector = new WakeDetector(words, (type, payload) => {
       if (ws.readyState !== ws.OPEN) return;
       ws.send(JSON.stringify({ type, ...payload }));
-    }, timeoutMs, vad, stopWords, stopMaxLen, requireWakeForConn, followUpSec > 0 ? followUpSec * 1000 : 0, fuzzyMatch);
+    }, timeoutMs, vad, stopWords, stopMaxLen, requireWakeForConn, followUpSec > 0 ? followUpSec * 1000 : 0, fuzzyMatch, interruptOnSpeechForConn);
     // init 异步加载 ONNX 模型(数百 ms),消息到达时等它就绪再喂,避免丢帧
     const ready = detector.init().catch((e) => {
       console.error('[wake] 初始化失败:', e.message);
@@ -575,7 +587,7 @@ function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen,
         return;
       }
       // Buffer → Int16Array(16k mono s16le)
-      const int16 = new Int16Array(data.buffer, data.byteOffset, Math.floor(data.byteLength / 2));
+      const int16 = decodePcm(data);
       chain = chain
         .then(() => detector.vadStream.feed(int16))
         .catch((e) => console.error('[wake] feed:', e.message));
@@ -584,4 +596,4 @@ function attach(wss, wakeWords, wakeTimeoutSec, vad = {}, stopWords, stopMaxLen,
 }
 
 // 导出 attach 供 index.js 挂载;WakeDetector 与纯文本匹配函数导出供测试(test/)用,无副作用。
-module.exports = { attach, WakeDetector, _test: { normalize, toSyllables, findSubseq, syllableScore, fuzzyFindSubseq, looksLikeEcho } };
+module.exports = { attach, WakeDetector, _test: { normalize, toSyllables, findSubseq, syllableScore, fuzzyFindSubseq, looksLikeEcho, decodePcm } };
