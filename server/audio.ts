@@ -67,20 +67,41 @@ export function syllables(text: string) {
     : [];
   return chars.map((c, i) => ({ ...c, sound: normalizeSyllable(spoken[i] ?? c.char) }));
 }
-export function findWake(text: string, wakeWord: string) {
+/**
+ * 在识别文本中定位唤醒词。loose=true 时（本地唤醒已命中后的复核）再容忍一个音节的
+ * 识别错误或漏字，但唤醒词的最后两个音节（如“超宝”）必须完全对上；四个音节以下不放宽。
+ */
+export function findWake(text: string, wakeWord: string, loose = false) {
   const target = syllables(wakeWord).map((s) => s.sound);
   const heard = syllables(text);
-  if (!target.length) return undefined;
-  for (let i = 0; i + target.length <= heard.length; i++)
-    if (target.every((sound, j) => heard[i + j].sound === sound))
-      return { start: heard[i].start, end: heard[i + target.length - 1].end };
+  const n = target.length;
+  if (!n) return undefined;
+  const range = (i: number, len: number) => ({
+    start: heard[i].start,
+    end: heard[i + len - 1].end,
+  });
+  for (let i = 0; i + n <= heard.length; i++)
+    if (target.every((sound, j) => heard[i + j].sound === sound)) return range(i, n);
+  if (!loose || n < 4) return undefined;
+  // 替换：一个音节听错，例如“你号超宝”“我好超宝”
+  for (let i = 0; i + n <= heard.length; i++) {
+    const wrong = target.filter((sound, j) => heard[i + j].sound !== sound).length;
+    const tailOk = target.slice(-2).every((sound, j) => heard[i + n - 2 + j].sound === sound);
+    if (wrong <= 1 && tailOk) return range(i, n);
+  }
+  // 漏字：例如“好超宝”“你超宝”
+  for (let skip = 0; skip < n - 2; skip++) {
+    const short = target.filter((_, j) => j !== skip);
+    for (let i = 0; i + short.length <= heard.length; i++)
+      if (short.every((sound, j) => heard[i + j].sound === sound)) return range(i, short.length);
+  }
   return undefined;
 }
-export function hasWake(text: string, wakeWord: string) {
-  return !!findWake(text, wakeWord);
+export function hasWake(text: string, wakeWord: string, loose = false) {
+  return !!findWake(text, wakeWord, loose);
 }
 export function stripWake(text: string, wakeWord: string) {
-  const match = findWake(text, wakeWord);
+  const match = findWake(text, wakeWord, true);
   return match ? text.slice(match.end).replace(/^[，。！？、,.!?\s]+/u, '') : text;
 }
 const plain = (text: string) => text.replace(/[\s\p{P}]/gu, '');

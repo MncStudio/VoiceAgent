@@ -27,6 +27,12 @@ const schema = z.object({
   WAKE_WORD: z.string().default('你好超宝'),
   // 只说唤醒词时的语音应答，逗号分隔多条随机播报；设为空字符串则改为提示音。
   WAKE_ACK: z.string().default('我在'),
+  // 本地唤醒（sherpa-onnx）灵敏度：阈值越低越容易唤醒，加权越高越容易唤醒。
+  // 一级只负责“宁可多报”，误报由服务端 ASR 复核过滤。
+  KWS_THRESHOLD: z.coerce.number().min(0.01).max(0.9).default(0.15),
+  KWS_BOOST: z.coerce.number().min(0.5).max(5).default(2),
+  // 唤醒链路是否叠加 RNNoise（浏览器已自带降噪，叠加可能损伤语音，建议实测对比）。
+  KWS_DENOISE: z.enum(['true', 'false']).default('true'),
   PORT: z.coerce.number().default(3001),
   HOST: z.string().default('127.0.0.1'),
   ALLOWED_ORIGINS: z

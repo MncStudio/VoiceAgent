@@ -45,7 +45,7 @@ npm run setup:livekit
 - 唤醒应答：只说唤醒词时像小爱一样先应答“我在”（`WAKE_ACK`，预合成缓存、零等待），唤醒词后直接接命令则不应答、直接回答；应答中开口会立即停止，应答的回声不会混入识别结果。
 - three.js / three-vrm 渲染用户导入的 `.vrm` 文件，浏览器内读取；呼吸、眨眼、倾听姿态和音频能量口型。没有 VRM 时使用默认动态形象。
 - `getUserMedia` AEC / NS / AGC；AudioWorklet 16kHz PCM 采集；RNNoise 仅用于本地唤醒链路；Silero VAD 本地运行；不开启摄像头。
-- sherpa-onnx WASM Web Worker 连续检测“你好超宝 / 别说了 / 暂停 / 下一个”；一级候选视觉反馈，服务端以缓冲音频的 ASR 转写复核（按拼音音节匹配，容忍同音/近音字与 zh/z、l/n、an/ang 等口音差异）；确认后提示音；失败自动恢复。“别说了 / 暂停”等命令词只在播报或思考时生效，且与当前播报内容重合时视为回声忽略。
+- sherpa-onnx WASM Web Worker 连续检测“你好超宝 / 别说了 / 暂停 / 下一个”；一级候选视觉反馈，服务端以缓冲音频的 ASR 转写复核（按拼音音节匹配，容忍同音/近音字与 zh/z、l/n、an/ang 等口音差异）；本地已命中时复核再容忍一个音节听错或漏字（如“好超宝”，但“超宝”两字必须对上）；确认后提示音；失败自动恢复，服务端日志 `[wake]` 会打印复核未通过时的识别结果，便于区分“一级没触发”还是“复核没通过”。一级灵敏度由 `KWS_THRESHOLD` / `KWS_BOOST` 调节，并内置“nǐ→ní”变调写法；`KWS_DENOISE=false` 可关闭唤醒链路的 RNNoise 叠加。采集重采样使用带抗混叠低通的 FIR 抽取。“别说了 / 暂停”等命令词只在播报或思考时生效，且与当前播报内容重合时视为回声忽略。
 - LiveKit WebRTC 双向音频：麦克风上行，服务端将 CosyVoice PCM 发布为远端音轨。浏览器使用原生 HTMLAudioElement 播放，保留浏览器回声参考路径。
 - ASR / LLM / TTS 接口抽象；百炼 Paraformer / OpenAI 兼容 Qwen SSE / CosyVoice 双向 WebSocket；本地 FunASR 2pass / OpenAI 兼容 Qwen / CosyVoice HTTP 适配器；可显式切换的无密钥文本演示模式。
 - 3 秒服务端音频环形缓冲，回放起点按 VAD 开口时刻计算（开口前 400ms），追问、打断都不截句首；一句话直达。

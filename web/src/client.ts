@@ -20,6 +20,7 @@ export type AppConfig = {
   turnModel: string;
   speculative: boolean;
   speakerThreshold?: number;
+  kws?: { threshold: number; boost: number; denoise: boolean };
   assets: { kws: boolean; vad: boolean; speaker: boolean };
 };
 export class AssistantClient {
@@ -252,6 +253,7 @@ export class AssistantClient {
             (this.state === 'SPEAKING' || this.state === 'THINKING') && !this.echoing(keyword),
           allowWake: () => !this.echoing(config.wakeWord),
           speakerThreshold: config.speakerThreshold ?? 0.5,
+          kws: config.kws ?? { threshold: 0.15, boost: 2, denoise: true },
         },
       );
       await this.pipeline.start(new MediaStream([this.mic.mediaStreamTrack]), config.assets);

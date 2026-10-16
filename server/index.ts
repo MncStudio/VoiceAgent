@@ -48,6 +48,11 @@ app.get('/api/config', (_req, res) =>
     turnModel: config.TURN_MODEL,
     speculative: config.QA_PROVIDER !== 'yuxi' && config.SPECULATIVE === 'true',
     speakerThreshold: config.SPEAKER_THRESHOLD,
+    kws: {
+      threshold: config.KWS_THRESHOLD,
+      boost: config.KWS_BOOST,
+      denoise: config.KWS_DENOISE === 'true',
+    },
     configured: config.PROVIDER !== 'dashscope' || !!config.DASHSCOPE_API_KEY,
     assets: {
       kws: [

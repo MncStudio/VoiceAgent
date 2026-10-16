@@ -43,6 +43,7 @@ export class MicrophonePipeline {
       allowCommand: (keyword: string) => boolean;
       allowWake: () => boolean;
       speakerThreshold: number;
+      kws?: { threshold: number; boost: number; denoise: boolean };
     } = { allowCommand: () => true, allowWake: () => true, speakerThreshold: 0.5 },
   ) {}
   private report(patch: Partial<AudioStatus>) {
@@ -55,20 +56,23 @@ export class MicrophonePipeline {
     const source = this.context.createMediaStreamSource(stream);
     this.nodes.push(source);
     let processed: AudioNode = source;
-    try {
-      const wasmBinary = await loadRnnoise({
-        url: '/vendor/rnnoise/rnnoise.wasm',
-        simdUrl: '/vendor/rnnoise/rnnoise_simd.wasm',
-      });
-      await this.context.audioWorklet.addModule('/vendor/rnnoise/rnnoise-worklet.js');
-      this.noise = new RnnoiseWorkletNode(this.context, { wasmBinary, maxChannels: 1 });
-      source.connect(this.noise);
-      processed = this.noise;
-      this.nodes.push(this.noise);
-      this.report({ noise: 'RNNoise · 本地' });
-    } catch {
-      this.report({ noise: '浏览器降噪' });
-    }
+    if (this.policy.kws?.denoise === false)
+      this.report({ noise: '浏览器降噪（唤醒不叠加 RNNoise）' });
+    else
+      try {
+        const wasmBinary = await loadRnnoise({
+          url: '/vendor/rnnoise/rnnoise.wasm',
+          simdUrl: '/vendor/rnnoise/rnnoise_simd.wasm',
+        });
+        await this.context.audioWorklet.addModule('/vendor/rnnoise/rnnoise-worklet.js');
+        this.noise = new RnnoiseWorkletNode(this.context, { wasmBinary, maxChannels: 1 });
+        source.connect(this.noise);
+        processed = this.noise;
+        this.nodes.push(this.noise);
+        this.report({ noise: 'RNNoise · 本地' });
+      } catch {
+        this.report({ noise: '浏览器降噪' });
+      }
     await this.context.audioWorklet.addModule('/audio-worklet.js');
     const capture = new AudioWorkletNode(this.context, 'pcm-capture');
     this.nodes.push(capture);
@@ -121,10 +125,13 @@ export class MicrophonePipeline {
         }
       };
       this.worker.onerror = () => this.report({ kws: '加载失败 · 请点按唤醒' });
+      const { threshold, boost } = this.policy.kws ?? { threshold: 0.15, boost: 2 };
       this.worker.postMessage({
         type: 'init',
         keywords:
-          'n ǐ h ǎo ch āo b ǎo @你好超宝\n' +
+          // 唤醒词：放低阈值、提高加权，保证一级“宁可多报”；另加“你好”的变调读法 ní hǎo。
+          `n ǐ h ǎo ch āo b ǎo :${boost} #${threshold} @你好超宝\n` +
+          `n í h ǎo ch āo b ǎo :${boost} #${threshold} @你好超宝\n` +
           // 命令词短、易误报：单独提高触发阈值、降低加权。
           'b ié sh uō l e :1.0 #0.35 @别说了\n' +
           'z àn t íng :1.0 #0.45 @暂停\n' +

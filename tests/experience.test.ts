@@ -73,6 +73,19 @@ describe('唤醒词拼音匹配', () => {
     for (const text of ['你好宝宝', '你好', '超宝你好', '你好小宝'])
       expect(hasWake(text, '你好超宝')).toBe(false);
   });
+  it('本地唤醒已命中时，复核容忍一个音节听错或漏字', () => {
+    for (const text of ['我好超宝', '你要超宝', '好超宝', '你超宝，几点了'])
+      expect(hasWake(text, '你好超宝', true)).toBe(true);
+    for (const text of ['我好超宝', '好超宝']) expect(hasWake(text, '你好超宝')).toBe(false);
+  });
+  it('宽松复核仍要求“超宝”两个音节完全对上', () => {
+    for (const text of ['超宝', '你好宝宝', '超宝你好', '你好小宝', '我想超市'])
+      expect(hasWake(text, '你好超宝', true)).toBe(false);
+  });
+  it('去唤醒词也能处理听错一个字的情况', () => {
+    expect(stripWake('好超宝，明天会下雨吗', '你好超宝')).toBe('明天会下雨吗');
+    expect(stripWake('我好超宝介绍一下', '你好超宝')).toBe('介绍一下');
+  });
   it('按拼音定位并去掉唤醒词', () => {
     expect(stripWake('你好潮宝，明天会下雨吗', '你好超宝')).toBe('明天会下雨吗');
   });

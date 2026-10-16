@@ -63,6 +63,8 @@ export class Conversation {
   private speakerMatch = false;
   private followupListening = false;
   private acking?: AbortController;
+  /** 唤醒复核期间最后一次识别结果，复核失败时写日志，便于判断是哪一级没通过。 */
+  private lastVerifyText = '';
   /** 刚播过的应答文本，识别结果开头若是它的回声需去掉。 */
   private ackEcho = '';
   /** 当前这句话说完后的整句声纹结果。 */
@@ -375,11 +377,16 @@ export class Conversation {
     this.lastResultAt = performance.now();
     const speakingNow = this.state === 'SPEAKING' || this.state === 'THINKING';
     if (this.candidate) {
-      if (!hasWake(raw, this.opts.wakeWord)) return;
+      if (!hasWake(raw, this.opts.wakeWord, true)) {
+        this.lastVerifyText = raw;
+        return;
+      }
       // 播报内容本身含唤醒词时，残余回声不能算唤醒。
       if (speakingNow && hasWake(this.answer, this.opts.wakeWord) && isEcho(raw, this.answer))
         return;
       this.candidate = false;
+      this.lastVerifyText = '';
+      console.info(`[wake] 复核通过：“${raw}”`);
       if (speakingNow || mode === 'verify-speaking' || mode === 'barge') this.stopResponse();
       this.barge = false;
       this.setState('LISTENING');
@@ -467,6 +474,7 @@ export class Conversation {
       return;
     }
     const text = this.transcript;
+    if (this.candidate) this.logRejected();
     if (!text || this.candidate) {
       this.cancel();
       this.setState('IDLE');
@@ -641,7 +649,14 @@ export class Conversation {
       void this.listen('query', this.preRoll(), 3000).catch((e) => this.fail(e));
     }
   }
+  private logRejected() {
+    console.info(
+      `[wake] 本地唤醒命中但复核未通过，识别结果：${this.lastVerifyText ? `“${this.lastVerifyText}”` : '（无）'}`,
+    );
+    this.lastVerifyText = '';
+  }
   private finishBarge() {
+    if (this.candidate) this.logRejected();
     this.closeRecognizer();
     this.barge = false;
     this.candidate = false;
