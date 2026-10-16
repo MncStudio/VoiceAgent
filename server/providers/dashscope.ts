@@ -4,7 +4,7 @@ import { speechProxy } from '../net.js';
 import { AsyncQueue } from './queue.js';
 import type { ASRProvider, ASRStream, TTSProvider, Transcript } from './types.js';
 type Packet = {
-  header: { event?: string; error_code?: string };
+  header: { event?: string; error_code?: string; error_message?: string };
   payload?: { output?: { sentence?: { text?: string; sentence_end?: boolean } } };
 };
 function connect(url: string, key: string, signal?: AbortSignal) {
@@ -28,8 +28,12 @@ function bindAbort(ws: WebSocket, signal: AbortSignal) {
 }
 /**
  * 预热连接：在用户开口 / 开始回答时提前完成 WebSocket 握手，真正需要时直接取用。
- * 每次只保留一个空闲连接，超过 30 秒未使用就丢弃重连，避免拿到被服务端回收的连接。
+ * 每次只保留一个空闲连接。百炼规定连接上超过 23 秒不发数据就会以
+ * InvalidParameter（request timeout after 23 seconds）拒绝，所以空闲超过 15 秒就丢弃重连。
  */
+const SPARE_MAX_IDLE_MS = 15000;
+/** 复用的预热连接在出声前失败，可以换新连接重试。 */
+class RetryableError extends Error {}
 class WarmSocket {
   private spare?: { ws: WebSocket; at: number };
   private pending?: Promise<void>;
@@ -41,7 +45,7 @@ class WarmSocket {
     return (
       !!this.spare &&
       this.spare.ws.readyState === WebSocket.OPEN &&
-      Date.now() - this.spare.at < 30000
+      Date.now() - this.spare.at < SPARE_MAX_IDLE_MS
     );
   }
   warm() {
@@ -61,16 +65,17 @@ class WarmSocket {
         this.pending = undefined;
       });
   }
-  async take(signal: AbortSignal) {
-    if (!this.fresh() && this.pending) await this.pending;
+  /** 返回连接以及它是否来自预热池（复用连接失败时调用方可换新连接重试）。 */
+  async take(signal: AbortSignal, reuse = true): Promise<{ ws: WebSocket; reused: boolean }> {
+    if (reuse && !this.fresh() && this.pending) await this.pending;
     signal.throwIfAborted();
-    const spare = this.fresh() ? this.spare : undefined;
-    this.spare = undefined;
+    const spare = reuse && this.fresh() ? this.spare : undefined;
     if (spare) {
+      this.spare = undefined;
       bindAbort(spare.ws, signal);
-      return spare.ws;
+      return { ws: spare.ws, reused: true };
     }
-    return connect(this.url, this.key, signal);
+    return { ws: await connect(this.url, this.key, signal), reused: false };
   }
   close() {
     this.spare?.ws.close();
@@ -103,7 +108,7 @@ export class DashScopeASR implements ASRProvider {
     onError: (e: Error) => void,
     signal: AbortSignal,
   ): Promise<ASRStream> {
-    const ws = await this.socket.take(signal);
+    const { ws } = await this.socket.take(signal);
     const id = randomUUID();
     let ready = false,
       finished = false,
@@ -133,7 +138,13 @@ export class DashScopeASR implements ASRProvider {
             break;
           }
           case 'task-failed':
-            onError(new Error(`ASR 服务拒绝请求（${event.header.error_code ?? 'unknown'}）。`));
+            {
+              const detail = [event.header.error_code, event.header.error_message]
+                .filter(Boolean)
+                .join('：');
+              console.warn(`[asr] task-failed ${detail}`);
+              onError(new Error(`ASR 服务拒绝请求（${detail || 'unknown'}）。`));
+            }
             ws.close();
             break;
           case 'task-finished':
@@ -208,14 +219,29 @@ export class DashScopeTTS implements TTSProvider {
   close() {
     this.socket.close();
   }
-  async *synth(text: string, signal: AbortSignal) {
-    const ws = await this.socket.take(signal);
+  async *synth(text: string, signal: AbortSignal): AsyncGenerator<Buffer> {
+    let produced = false;
+    try {
+      for await (const pcm of this.attempt(text, signal, true)) {
+        produced = true;
+        yield pcm;
+      }
+    } catch (error) {
+      // 预热连接可能已被服务端判为空闲超时；还没出声时换一条新连接重试一次。
+      if (produced || signal.aborted || !(error instanceof RetryableError)) throw error;
+      yield* this.attempt(text, signal, false);
+    }
+  }
+  private async *attempt(text: string, signal: AbortSignal, reuse: boolean) {
+    const { ws, reused } = await this.socket.take(signal, reuse);
     // 同一轮回答的下一句通常紧接着需要连接，提前预热。
     this.socket.warm();
     const id = randomUUID();
     const queue = new AsyncQueue<Buffer>();
     let done = false;
     let bytes = 0;
+    const fail = (message: string) =>
+      queue.end(reused && bytes === 0 ? new RetryableError(message) : new Error(message));
     const timeout = setTimeout(() => {
       queue.end(new Error('TTS 合成超时。'));
       ws.close();
@@ -240,7 +266,11 @@ export class DashScopeTTS implements TTSProvider {
           queue.end();
           ws.close();
         } else if (event.header.event === 'task-failed') {
-          queue.end(new Error(`TTS 服务拒绝请求（${event.header.error_code ?? 'unknown'}）。`));
+          const detail = [event.header.error_code, event.header.error_message]
+            .filter(Boolean)
+            .join('：');
+          console.warn(`[tts] task-failed ${detail}（${reused ? '预热连接' : '新连接'}）`);
+          fail(`TTS 服务拒绝请求（${detail || 'unknown'}）。`);
           ws.close();
         }
       } catch {
@@ -248,10 +278,11 @@ export class DashScopeTTS implements TTSProvider {
         ws.close();
       }
     });
-    ws.on('error', () => queue.end(new Error('TTS 网络异常。')));
-    ws.on('close', () =>
-      queue.end(done || signal.aborted ? undefined : new Error('TTS 连接意外断开。')),
-    );
+    ws.on('error', () => fail('TTS 网络异常。'));
+    ws.on('close', () => {
+      if (!done && !signal.aborted) fail('TTS 连接意外断开。');
+      else queue.end();
+    });
     command(ws, id, 'run-task', {
       task_group: 'audio',
       task: 'tts',

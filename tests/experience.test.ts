@@ -3,6 +3,7 @@ import { WebSocketServer } from 'ws';
 import { Conversation } from '../server/engine';
 import { hasWake, isEcho, nextSegment, stripWake } from '../server/audio';
 import { FunASR } from '../server/providers/local';
+import { DashScopeTTS } from '../server/providers/dashscope';
 import { SemanticPolicy } from '../server/semantic';
 import type { Providers, Transcript } from '../server/providers/types';
 import type { ServerEvent } from '../shared/protocol';
@@ -383,5 +384,46 @@ describe('唤醒应答', () => {
     await wait(400);
     expect(events.find((e) => e.type === 'wake-confirmed')).toMatchObject({ chime: true });
     expect(events.some((e) => e.type === 'ack')).toBe(false);
+  });
+});
+describe('百炼 TTS 预热连接', () => {
+  it('预热连接被服务端判为空闲超时（InvalidParameter）时，换新连接重试且不报错', async () => {
+    const server = new WebSocketServer({ port: 0 });
+    let connections = 0;
+    server.on('connection', (ws) => {
+      const index = ++connections;
+      ws.on('message', (raw) => {
+        const msg = JSON.parse(raw.toString());
+        const id = msg.header.task_id;
+        if (msg.header.action === 'run-task') {
+          if (index === 1)
+            ws.send(
+              JSON.stringify({
+                header: {
+                  event: 'task-failed',
+                  task_id: id,
+                  error_code: 'InvalidParameter',
+                  error_message: 'request timeout after 23 seconds.',
+                },
+              }),
+            );
+          else ws.send(JSON.stringify({ header: { event: 'task-started', task_id: id } }));
+        } else if (msg.header.action === 'finish-task') {
+          ws.send(Buffer.alloc(960));
+          ws.send(JSON.stringify({ header: { event: 'task-finished', task_id: id } }));
+        }
+      });
+    });
+    await new Promise((r) => server.once('listening', r));
+    const port = (server.address() as { port: number }).port;
+    const tts = new DashScopeTTS(`ws://127.0.0.1:${port}`, 'k', 'cosyvoice-v2', 'v');
+    tts.warm();
+    await wait(50);
+    let bytes = 0;
+    for await (const pcm of tts.synth('你好。', new AbortController().signal)) bytes += pcm.length;
+    expect(bytes).toBe(960);
+    expect(connections).toBeGreaterThanOrEqual(2);
+    tts.close();
+    server.close();
   });
 });
