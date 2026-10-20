@@ -530,16 +530,14 @@ export class Conversation {
         if (final) this.finishBarge();
         return;
       } else {
-        // 思考中（用户还没听到任何回答）本人接着说：多半是补充或修正刚才的问题，
-        // 与刚才的问题合并成一句重新提问，避免只回答前半句。
-        const pending =
-          this.state === 'THINKING' && this.turnId ? this.history[this.turnStart] : undefined;
+        // 思考中（用户还没听到任何回答）本人开口：丢掉刚才的问题，只回答新说的话，
+        // 刚才的问题也移出上下文，不会连带回答。
+        const pending = this.state === 'THINKING' && !!this.turnId;
         // 确认是真实打断：停止回答，沿用这条识别流继续聆听，不重新建连、不丢句首。
         this.stopResponse();
-        if (pending?.role === 'user') {
-          this.history.splice(this.turnStart);
+        if (pending && this.stoppedTurnStart !== undefined) {
+          this.history.splice(this.stoppedTurnStart);
           this.stoppedTurnStart = undefined;
-          this.committed = `${pending.content.replace(/[。！!.\s]+$/u, '')}，${this.committed}`;
         }
         this.bargeStop = { epoch: this.recognizerEpoch, at: performance.now() };
         this.setState('LISTENING');

@@ -482,7 +482,7 @@ describe('思考中声纹续问与关键词打断', () => {
     h.c.handle({ type: 'speaker', locked: true, match: true });
     return { ...h, asked, contexts, aborted: () => !!signal?.aborted };
   };
-  it('本人接着补充：停止思考，与刚才的问题合并成一句重新提问', async () => {
+  it('本人开口说新内容：停止思考，丢掉刚才的问题，只回答新说的话', async () => {
     const { c, opened, asked, contexts, aborted } = await thinking();
     c.handle({ type: 'vad', speaking: true, target: true });
     await wait(20);
@@ -493,8 +493,8 @@ describe('思考中声纹续问与关键词打断', () => {
     expect(c.state).toBe('LISTENING');
     c.handle({ type: 'vad', speaking: false, target: true });
     await wait(600);
-    expect(asked.at(-1)).toBe('帮我查询，A01的库存');
-    expect(contexts.at(-1)).toEqual(['帮我查询，A01的库存']);
+    expect(asked.at(-1)).toBe('A01的库存');
+    expect(contexts.at(-1)).toEqual(['A01的库存']);
   });
   it('本人说唤醒词：停止思考并应答“我在”，不再回答刚才的问题', async () => {
     const { c, events, opened, contexts, aborted } = await thinking('讲个故事');
