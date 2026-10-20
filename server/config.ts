@@ -38,10 +38,12 @@ const schema = z.object({
   // 唤醒链路是否叠加 RNNoise（浏览器已自带降噪，叠加可能损伤语音，建议实测对比）。
   KWS_DENOISE: z.enum(['true', 'false']).default('true'),
   PORT: z.coerce.number().default(3001),
-  HOST: z.string().default('127.0.0.1'),
-  ALLOWED_ORIGINS: z
+  // 监听地址，默认 0.0.0.0（本机和局域网都能访问）；只允许本机访问时填 127.0.0.1。
+  // 只能填一个地址，误填成逗号分隔的多个地址时按 0.0.0.0 处理。
+  HOST: z
     .string()
-    .default('http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:3001'),
+    .default('0.0.0.0')
+    .transform((h) => (h.includes(',') || !h.trim() ? '0.0.0.0' : h.trim())),
   LOCAL_ASR_URL: z.url().default('ws://127.0.0.1:10095'),
   LOCAL_TTS_URL: z.url().default('http://127.0.0.1:50000/inference_sft'),
   LOCAL_TTS_VOICE: z.string().default('中文女'),

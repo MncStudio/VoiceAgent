@@ -10,7 +10,7 @@
     "dev": "concurrently -k -n agent,web \"npm:dev:server\" \"npm:dev:web\"",
     "predev:server": "npm run build:sdk",
     "dev:server": "tsx watch server/index.ts",
-    "dev:web": "vite --host 127.0.0.1",
+    "dev:web": "vite --host 0.0.0.0",
     "build": "tsc --noEmit && vite build && npm run build:sdk && tsup server/index.ts --format esm --platform node --out-dir dist/server --external @livekit/rtc-node",
     "start": "node dist/server/index.js",
     "check": "tsc --noEmit",

@@ -8,7 +8,7 @@ const base = 'http://127.0.0.1:3109';
 const ids: string[] = [];
 beforeAll(async () => {
   child = spawn(process.execPath, ['--import', 'tsx', 'server/index.ts'], {
-    env: { ...process.env, PROVIDER: 'demo', PORT: '3109', ALLOWED_ORIGINS: base },
+    env: { ...process.env, PROVIDER: 'demo', PORT: '3109', HOST: '127.0.0.1' },
     stdio: 'pipe',
     windowsHide: true,
   });
@@ -38,14 +38,14 @@ describe('本地 API 边界', () => {
     expect(body).not.toMatch(/DASHSCOPE_API_KEY|LIVEKIT_API_SECRET|YUXI_API_KEY|yxkey_|sk-ws-/);
     expect(JSON.parse(body)).toMatchObject({ provider: 'demo', wakeWord: '你好超宝' });
   });
-  it('拒绝未经允许的网页来源创建会话', async () => {
-    const r = await fetch(`${base}/api/sessions`, {
-      method: 'POST',
-      headers: { Origin: 'https://example.org' },
-    });
-    expect(r.status).toBe(403);
+  it('不限制网页来源：局域网 IP 等任意来源都能创建会话', async () => {
+    const origin = 'http://192.168.110.116';
+    const r = await fetch(`${base}/api/sessions`, { method: 'POST', headers: { Origin: origin } });
+    expect(r.status).toBe(200);
+    expect(r.headers.get('access-control-allow-origin')).toBe(origin);
+    ids.push((await r.json()).id);
   });
-  it('允许的来源可跨域使用 SDK：预检、CORS 头与端侧资源', async () => {
+  it('其他系统可跨域使用 SDK：预检、CORS 头与端侧资源', async () => {
     const pre = await fetch(`${base}/api/sessions`, {
       method: 'OPTIONS',
       headers: {

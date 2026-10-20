@@ -12,6 +12,8 @@ Windows 在项目目录运行：
 
 打开 <http://127.0.0.1:5173/>，使用 Chrome / Edge。点击“连接麦克风”并允许麦克风权限。等待设置中的本地唤醒、Silero VAD、降噪加载完成，再说“你好超宝，介绍一下你自己”。首次加载端侧模型可能需要几秒；可先用“点按唤醒”或文字聊天。
 
+局域网其他设备可直接打开 `http://本机IP:5173/`（前端、超宝服务、LiveKit 默认都监听 0.0.0.0，不限制网页来源）。要在局域网用语音，`.env` 的 `LIVEKIT_URL` 需改为 `ws://本机IP:7880`，并放行防火墙 5173、7880、7881/TCP、7882/UDP；浏览器只在 localhost 或 HTTPS 页面开放麦克风，局域网 HTTP 页面需配 HTTPS（或临时用 Chrome 的 `unsafely-treat-insecure-origin-as-secure`）。
+
 也可以分别启动两个终端：
 
 ```powershell
@@ -122,7 +124,7 @@ npm start
 其他系统想用超宝、但界面自己做时，使用 SDK：唤醒、VAD、声纹、降噪、LiveKit 音频与对话协议都在 SDK 里，宿主页面只负责界面。
 
 1. 超宝服务执行 `npm run build`（或单独 `npm run build:sdk`）后，在 `/sdk/chaobao-sdk.js` 提供 SDK，类型声明在 `/sdk/chaobao-sdk.d.ts`（源文件 `sdk/chaobao-sdk.d.ts`）。开发启动 `npm run dev` / `npm run dev:server` 会自动先构建 SDK。端侧模型、Worker、AudioWorklet 仍由超宝服务按 `baseUrl` 提供，不需要拷贝到宿主项目；超宝升级后宿主无需重新构建。
-   宿主页面的来源必须加入 `.env` 的 `ALLOWED_ORIGINS`；例如 WMS 使用 `http://localhost`（80 端口）时应填写 `http://localhost`，不要写成 `http://localhost:80`。修改 `.env` 后需重启超宝服务。
+   超宝不限制网页来源，宿主页面无需加白名单。
 2. 宿主页面运行时加载：
 
    ```js
@@ -144,8 +146,8 @@ npm start
 
 3. 地址二选一：
    - **推荐：同源反向代理**。宿主的 Vite / Nginx 把 `/chaobao/` 转发到超宝服务（去掉前缀，需支持 WebSocket），`baseUrl: '/chaobao'`。无跨域问题，HTTPS 只需在宿主一处配置。
-   - 跨域直连：`baseUrl: 'https://chaobao.example.com'`，超宝已为 `ALLOWED_ORIGINS` 中的来源返回 CORS 头，KWS Worker 会自动经 Blob 中转加载。
-4. 无论哪种方式，都要把宿主页面的地址（协议 + 域名 + 端口）加入超宝 `.env` 的 `ALLOWED_ORIGINS`；`LIVEKIT_URL` 必须是用户浏览器能访问的地址（HTTPS 页面用 `wss://`）；页面必须是 HTTPS 或 localhost，否则浏览器不给麦克风。
+   - 跨域直连：`baseUrl: 'https://chaobao.example.com'`，超宝对任意来源返回 CORS 头，KWS Worker 会自动经 Blob 中转加载。
+4. 无论哪种方式，`LIVEKIT_URL` 必须是用户浏览器能访问的地址（HTTPS 页面用 `wss://`）；页面必须是 HTTPS 或 localhost，否则浏览器不给麦克风。
 5. 一个页面只创建一个实例（SDK 内部按全局服务地址工作）。选煤系统的 Vue 接入示例见该项目 `src/components/ChaobaoAssistant`。
 
 ## 验证

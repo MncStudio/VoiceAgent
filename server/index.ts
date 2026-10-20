@@ -1,5 +1,6 @@
 import express from 'express';
 import { createServer } from 'node:http';
+import { networkInterfaces } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -14,16 +15,12 @@ import { SemanticPolicy } from './semantic.js';
 import { OpenAILLM } from './providers/llm.js';
 const app = express();
 const server = createServer(app);
-const allowed = new Set(config.ALLOWED_ORIGINS.split(','));
 app.disable('x-powered-by');
 app.use(express.json({ limit: '8kb' }));
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (origin && !allowed.has(origin)) {
-    res.status(403).json({ error: '不允许的来源。' });
-    return;
-  }
-  // 允许 ALLOWED_ORIGINS 中的其他系统跨域使用 SDK：接口、模型、Worker 与 AudioWorklet 都需要 CORS。
+  // 不限制网页来源：任何页面（含局域网 IP、其他系统）都可跨域使用 SDK；
+  // 接口、模型、Worker 与 AudioWorklet 都需要 CORS。
   if (origin) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
@@ -203,12 +200,7 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: 8192 });
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url ?? '/', 'http://localhost');
   const id = url.searchParams.get('session') ?? '';
-  if (
-    url.pathname !== '/control' ||
-    !sessions.has(id) ||
-    !req.headers.origin ||
-    !allowed.has(req.headers.origin)
-  ) {
+  if (url.pathname !== '/control' || !sessions.has(id)) {
     socket.destroy();
     return;
   }
@@ -263,11 +255,18 @@ const cleanup = setInterval(() => {
     if (!s.events.size && Date.now() - s.created > 5 * 60 * 1000) void remove(id);
 }, 60000);
 cleanup.unref();
-server.listen(config.PORT, config.HOST, () =>
+server.listen(config.PORT, config.HOST, () => {
+  const lan =
+    config.HOST === '0.0.0.0'
+      ? Object.values(networkInterfaces())
+          .flat()
+          .filter((n) => n && n.family === 'IPv4' && !n.internal)
+          .map((n) => `http://${n!.address}:${config.PORT}`)
+      : [];
   console.log(
-    `超宝服务已启动：http://${config.HOST}:${config.PORT}，Provider=${config.PROVIDER}，唤醒词=${config.WAKE_WORD}（${wakeTokens().join(' / ') || '本地唤醒不可用'}）`,
-  ),
-);
+    `超宝服务已启动：http://${config.HOST === '0.0.0.0' ? '127.0.0.1' : config.HOST}:${config.PORT}${lan.length ? `（局域网：${lan.join('、')}）` : ''}，Provider=${config.PROVIDER}，唤醒词=${config.WAKE_WORD}（${wakeTokens().join(' / ') || '本地唤醒不可用'}）`,
+  );
+});
 for (const signal of ['SIGINT', 'SIGTERM'] as const)
   process.on(signal, () => {
     server.close();

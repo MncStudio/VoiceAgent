@@ -7,7 +7,7 @@ if (-not (Test-Path -LiteralPath 'web/public/models/kws/tokens.txt')) { npm run 
 if (-not (Test-Path -LiteralPath '.runtime/livekit/livekit-server.exe')) { npm run setup:livekit; if ($LASTEXITCODE -ne 0) { throw 'LiveKit 安装失败。' } }
 New-Item -ItemType Directory -Path '.runtime' -Force | Out-Null
 if (-not (Get-NetTCPConnection -LocalPort 7880 -State Listen -ErrorAction SilentlyContinue)) {
-    Start-Process -FilePath (Join-Path $PSScriptRoot '.runtime/livekit/livekit-server.exe') -ArgumentList @('--dev', '--bind', '127.0.0.1') -WorkingDirectory $PSScriptRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $PSScriptRoot '.runtime/livekit.stdout.log') -RedirectStandardError (Join-Path $PSScriptRoot '.runtime/livekit.stderr.log') | Out-Null
+    Start-Process -FilePath (Join-Path $PSScriptRoot '.runtime/livekit/livekit-server.exe') -ArgumentList @('--dev', '--bind', '0.0.0.0') -WorkingDirectory $PSScriptRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $PSScriptRoot '.runtime/livekit.stdout.log') -RedirectStandardError (Join-Path $PSScriptRoot '.runtime/livekit.stderr.log') | Out-Null
 }
 if (-not (Get-NetTCPConnection -LocalPort 5173 -State Listen -ErrorAction SilentlyContinue)) {
     Start-Process -FilePath (Get-Command node).Source -ArgumentList @('node_modules/concurrently/dist/bin/concurrently.js', '-k', 'npm:dev:server', 'npm:dev:web') -WorkingDirectory $PSScriptRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $PSScriptRoot '.runtime/app.stdout.log') -RedirectStandardError (Join-Path $PSScriptRoot '.runtime/app.stderr.log') | Out-Null
