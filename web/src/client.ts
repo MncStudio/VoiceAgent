@@ -265,8 +265,10 @@ export class AssistantClient {
         (e) => this.send(e),
         this.onAudio,
         () => {
+          // 回答中再次唤醒：本地立即静音，不等服务端往返；服务端同时停止回答。
+          if (this.state === 'SPEAKING' || this.state === 'THINKING') this.stopPlayback();
+          else this.setVolume(0.2);
           this.onEvent({ type: 'state', state: 'CANDIDATE' });
-          this.setVolume(0.2);
         },
         () => this.stopPlayback(),
         {

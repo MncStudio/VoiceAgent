@@ -374,16 +374,28 @@ describe('唤醒应答', () => {
     expect(events.some((e) => e.type === 'ack' && e.text === '我在')).toBe(true);
     expect(played.length).toBeGreaterThan(0);
   });
-  it('唤醒词后直接说命令（一句话直达）不应答', async () => {
+  it('唤醒词后直接说命令（一句话直达）也应答“我在”，再回答命令', async () => {
     const { events } = await wakeOnly('你好超宝明天天气怎么样');
-    await wait(400);
-    expect(events.some((e) => e.type === 'ack')).toBe(false);
+    await wait(1800);
+    const ack = events.findIndex((e) => e.type === 'ack' && e.text === '我在');
+    expect(ack).toBeGreaterThanOrEqual(0);
+    // 回答的语音排在应答之后
+    expect(events.findIndex((e) => e.type === 'utterance')).toBeGreaterThan(ack);
   });
-  it('唤醒后用户马上接着说，不应答', async () => {
+  it('唤醒后用户马上接着说：等用户说完再应答，不盖住用户的话', async () => {
     const { c, events } = await wakeOnly('你好超宝');
     c.handle({ type: 'vad', speaking: true, target: false });
     await wait(400);
     expect(events.some((e) => e.type === 'ack')).toBe(false);
+    c.handle({ type: 'vad', speaking: false, target: false });
+    await wait(400);
+    expect(events.some((e) => e.type === 'ack' && e.text === '我在')).toBe(true);
+  });
+  it('点按唤醒也应答“我在”', async () => {
+    const { c, events } = harness({ wakeAck: ['我在'] });
+    c.handle({ type: 'wake', source: 'button' });
+    await wait(400);
+    expect(events.some((e) => e.type === 'ack' && e.text === '我在')).toBe(true);
   });
   it('应答的回声不会混进用户的话', async () => {
     const { c, opened } = await wakeOnly('你好超宝');
@@ -449,12 +461,14 @@ describe('回答中再次唤醒', () => {
   const answering = async (opts = {}) => {
     let signal: AbortSignal | undefined;
     const asked: string[] = [];
+    const contexts: string[][] = [];
     const h = harness(
       { wakeAck: ['我在'], rewakeAck: ['你好'], ...opts },
       {
         async *chat(messages, s) {
           const q = messages.at(-1)!.content;
           asked.push(q);
+          contexts.push(messages.filter((m) => m.role !== 'system').map((m) => m.content));
           if (q !== '讲个故事') {
             yield '新回答。';
             return;
@@ -468,10 +482,28 @@ describe('回答中再次唤醒', () => {
     h.c.handle({ type: 'text', text: '讲个故事' });
     await wait(20);
     expect(h.c.state).toBe('SPEAKING');
-    return { ...h, asked, aborted: () => !!signal?.aborted };
+    return { ...h, asked, contexts, aborted: () => !!signal?.aborted };
   };
-  it('只说唤醒词：停止回答并应答，接着回答用户的新问题', async () => {
-    const { c, events, opened, asked, aborted } = await answering();
+  it('本地唤醒一命中就立即停止回答，不等复核', async () => {
+    const { c, events, aborted } = await answering();
+    c.handle({ type: 'wake', source: 'kws' });
+    await wait(20);
+    expect(aborted()).toBe(true);
+    expect(events.some((e) => e.type === 'interrupted')).toBe(true);
+    expect(c.state).toBe('CANDIDATE');
+  });
+  it('复核没通过：回答已停，打开追问窗口可直接说话', async () => {
+    const { c, events } = await answering();
+    c.handle({ type: 'wake', source: 'kws' });
+    await wait(2700);
+    expect(c.state).toBe('IDLE');
+    const last = events.filter((e) => e.type === 'state').at(-1);
+    expect(last).toMatchObject({ state: 'IDLE' });
+    expect((last as { followupUntil?: number }).followupUntil).toBeGreaterThan(Date.now());
+    expect(events.some((e) => e.type === 'ack')).toBe(false);
+  });
+  it('只说唤醒词：停止回答并应答，接着回答用户的新问题，不再回答之前的问题', async () => {
+    const { c, events, opened, asked, contexts, aborted } = await answering();
     c.handle({ type: 'wake', source: 'kws' });
     await wait(20);
     opened[0].result({ text: '你好超宝', final: false });
@@ -486,21 +518,33 @@ describe('回答中再次唤醒', () => {
     opened[0].result({ text: '你好超宝。你好，帮我查一下快递', final: true });
     await wait(700);
     expect(asked.at(-1)).toBe('帮我查一下快递');
+    // 被打断的问题和半句回答整轮移出上下文
+    expect(contexts.at(-1)).toEqual(['帮我查一下快递']);
     expect(c.history.filter((m) => m.role === 'user').map((m) => m.content)).toEqual([
-      '讲个故事',
       '帮我查一下快递',
     ]);
   });
-  it('唤醒词后直接接新问题：停止回答，不应答，直接回答新问题', async () => {
-    const { c, events, opened, asked, aborted } = await answering();
+  it('唤醒词后直接接新问题：停止回答，应答后直接回答新问题', async () => {
+    const { c, events, opened, asked, contexts, aborted } = await answering();
     c.handle({ type: 'wake', source: 'kws' });
     await wait(20);
     opened[0].result({ text: '你好超宝明天天气怎么样', final: true });
     await wait(20);
     expect(aborted()).toBe(true);
     await wait(700);
-    expect(events.some((e) => e.type === 'ack')).toBe(false);
+    expect(events.some((e) => e.type === 'ack' && e.text === '你好')).toBe(true);
     expect(asked.at(-1)).toBe('明天天气怎么样');
+    expect(contexts.at(-1)).toEqual(['明天天气怎么样']);
+  });
+  it('点按唤醒打断：应答并且不再回答之前的问题', async () => {
+    const { c, events, opened, contexts, aborted } = await answering();
+    c.handle({ type: 'wake', source: 'button' });
+    await wait(400);
+    expect(aborted()).toBe(true);
+    expect(events.some((e) => e.type === 'ack' && e.text === '你好')).toBe(true);
+    opened.at(-1)!.result({ text: '查一下快递', final: true });
+    await wait(500);
+    expect(contexts.at(-1)).toEqual(['查一下快递']);
   });
   it('思考中（还没出声）再次唤醒同样停止并应答', async () => {
     let signal: AbortSignal | undefined;

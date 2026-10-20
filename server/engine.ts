@@ -64,6 +64,16 @@ export class Conversation {
   private speakerMatch = false;
   private followupListening = false;
   private acking?: AbortController;
+  /** 应答代次：新的唤醒 / 打断 / 停止会作废尚未播出的应答。 */
+  private ackEpoch = 0;
+  /** 当前应答播完的时刻；回答的语音排在应答之后播放。 */
+  private ackDone?: Promise<void>;
+  /** 当前回答这一轮在 history 中的起点（用户问题的位置）。 */
+  private turnStart = 0;
+  /** 被停止的那一轮的起点：再次唤醒时整轮移出上下文，不再回答之前的问题。 */
+  private stoppedTurnStart?: number;
+  /** 回答中本地唤醒命中、已停止回答，正在复核唤醒词。 */
+  private rewaking = false;
   /** 唤醒复核期间最后一次识别结果，复核失败时写日志，便于判断是哪一级没通过。 */
   private lastVerifyText = '';
   /** 唤醒已在哪条识别流上确认过：同一条流上晚到的 KWS 候选不再重新复核。 */
@@ -124,49 +134,61 @@ export class Conversation {
     }
     return cached;
   }
+  private acks(rewake: boolean) {
+    return (rewake && this.opts.rewakeAck?.length ? this.opts.rewakeAck : this.opts.wakeAck) ?? [];
+  }
   /**
-   * 只说了唤醒词时，像小爱一样先应一声“我在”；唤醒词后紧接着说了命令（一句话直达）
-   * 或用户已经开口，就不应答，直接听。应答过程中用户开口会立即停止播放。
+   * 每次唤醒都先应一声（“我在”）。用户还在说（一句话直达）时等这句说完再应答，
+   * 不盖住用户的话；应答不因用户开口而中断，回答的语音排在应答之后播放。
    */
-  private async acknowledge(texts: string[]) {
+  private acknowledge(texts: string[]) {
     if (!texts.length || this.p.demo || !this.audio) return;
-    const epoch = this.recognizerEpoch;
-    const still = () =>
-      epoch === this.recognizerEpoch &&
-      this.state === 'LISTENING' &&
-      !this.userSpeaking &&
-      !this.transcript;
-    // 等唤醒词这句话的 VAD 结束，再留 250ms 给“唤醒词 + 短停顿 + 命令”接话。
-    const start = performance.now();
-    while (this.userSpeaking && performance.now() - start < 1500) await delay(30);
-    await delay(250);
-    if (!still()) return;
-    const text = texts[Math.floor(Math.random() * texts.length)];
-    let pcm: Buffer;
-    try {
-      pcm = await Promise.race([
-        this.ackAudio(text),
-        delay(600).then(() => Promise.reject(new Error('应答合成超时'))),
-      ]);
-    } catch {
-      return;
-    }
-    if (!still() || !pcm.length) return;
-    this.acking = new AbortController();
-    this.ackEcho = text;
-    this.emit({ type: 'ack', text });
-    try {
-      await this.audio.write(pcm, this.acking.signal);
-      await this.audio.drain();
-    } catch {
-      // 用户开口打断了应答
-    } finally {
-      this.acking = undefined;
-    }
-    // 应答期间没人说话，从应答结束起重新计“无语音”超时。
-    if (still()) this.armNoSpeech(6000);
+    this.stopAck();
+    const epoch = ++this.ackEpoch,
+      audio = this.audio;
+    const live = () => epoch === this.ackEpoch && !this.disposed;
+    const done = (async () => {
+      // 等用户安静 250ms 再应答（给“唤醒词 + 短停顿 + 命令”留接话时间）；最多等 10 秒。
+      const start = performance.now();
+      let quietSince = performance.now();
+      while (live() && performance.now() - start < 10000) {
+        if (this.userSpeaking) quietSince = performance.now();
+        else if (performance.now() - quietSince >= 250) break;
+        await delay(30);
+      }
+      if (!live()) return;
+      const text = texts[Math.floor(Math.random() * texts.length)];
+      let pcm: Buffer;
+      try {
+        pcm = await Promise.race([
+          this.ackAudio(text),
+          delay(1500).then(() => Promise.reject(new Error('应答合成超时'))),
+        ]);
+      } catch {
+        return;
+      }
+      if (!live() || !pcm.length) return;
+      const controller = new AbortController();
+      this.acking = controller;
+      this.ackEcho = text;
+      this.emit({ type: 'ack', text });
+      try {
+        await audio.write(pcm, controller.signal);
+        await audio.drain();
+      } catch {
+        // 新的唤醒 / 打断停止了应答
+      } finally {
+        if (this.acking === controller) this.acking = undefined;
+      }
+      // 应答期间没人说话，从应答结束起重新计“无语音”超时。
+      if (live() && this.state === 'LISTENING' && !this.transcript && !this.userSpeaking)
+        this.armNoSpeech(6000);
+    })();
+    this.ackDone = done;
   }
   private stopAck() {
+    this.ackEpoch++;
+    this.ackDone = undefined;
     if (!this.acking) return;
     this.acking.abort();
     this.acking = undefined;
@@ -251,10 +273,11 @@ export class Conversation {
     this.asrReady = undefined;
     this.pendingAudio = [];
   }
-  private cancel() {
+  /** keepAck：开始回答时保留正在播放的唤醒应答，回答排在它之后。 */
+  private cancel(keepAck = false) {
     this.hostAnswer?.queue.end();
     this.hostAnswer = undefined;
-    this.stopAck();
+    if (!keepAck) this.stopAck();
     this.generation++;
     this.abort.abort();
     this.abort = new AbortController();
@@ -266,7 +289,7 @@ export class Conversation {
     this.abortSpeculation();
     this.decisionAbort?.abort();
     this.decisionEpoch++;
-    this.audio?.clear();
+    if (!keepAck || !this.acking) this.audio?.clear();
     this.emit({ type: 'duck', active: false });
     this.candidate = false;
     this.barge = false;
@@ -276,6 +299,7 @@ export class Conversation {
   private stopResponse() {
     const turnId = this.turnId,
       heardChars = this.heardChars;
+    if (turnId) this.stoppedTurnStart = this.turnStart;
     this.generation++;
     this.abort.abort();
     this.abort = new AbortController();
@@ -309,9 +333,13 @@ export class Conversation {
   private interrupt(reason: string, heard?: number) {
     if (heard !== undefined) this.heardChars = Math.min(heard, this.answer.length);
     const turnId = this.turnId,
-      heardChars = this.heardChars;
+      heardChars = this.heardChars,
+      turnStart = this.turnStart;
     this.cancel();
     this.retainHeard();
+    // 点按唤醒打断：这一轮整轮移出上下文，不再回答之前的问题。
+    if (reason === 'wake' && turnId) this.history.splice(turnStart);
+    this.stoppedTurnStart = undefined;
     this.followupUntil = 0;
     this.emit({ type: 'interrupted', turnId, heardChars });
     this.setState('INTERRUPT');
@@ -322,6 +350,7 @@ export class Conversation {
     this.setState('LISTENING');
     // 点按打断时缓冲里多是播报回声，只回放很短的一段。
     void this.listen('query', reason === 'wake' ? 300 : 700).catch((e) => this.fail(e));
+    if (reason === 'wake') this.acknowledge(this.acks(true));
   }
   private async wake(source: 'button' | 'kws') {
     if (source === 'kws' && this.state === 'LISTENING' && (this.asr || this.asrReady)) {
@@ -341,19 +370,24 @@ export class Conversation {
         this.interrupt('wake');
         return;
       }
-      // KWS 候选先压低音量，复核失败恢复；不让候选直接污染历史。
-      this.emit({ type: 'duck', active: true });
+      // 回答中本地唤醒一命中就立即停止回答，不等复核；复核通过后应答“我在”并聆听，
+      // 复核没通过则打开追问窗口，用户可直接说话。
+      this.stopResponse();
+      this.rewaking = true;
       this.candidate = true;
+      this.setState('CANDIDATE');
       if (this.asr || this.asrReady) {
-        // 免唤醒打断的识别流已在运行，直接用它复核唤醒词。
-        clearTimeout(this.duckTimer);
-        this.duckTimer = setTimeout(() => this.finishBarge(), 2500);
+        // 免唤醒打断的识别流已在运行，直接用它复核（唤醒词可能已在识别结果里）。
+        clearTimeout(this.timeout);
+        this.timeout = setTimeout(() => this.finishListening(), 2500);
+        if (this.lastRaw) this.onTranscript(this.lastRaw, false, 'barge');
         return;
       }
       this.p.asr.warm?.();
-      await this.listen('verify-speaking');
+      await this.listen('verify');
       return;
     }
+    if (this.state !== 'CANDIDATE') this.rewaking = false;
     this.cancel();
     this.followupUntil = 0;
     this.candidate = source === 'kws';
@@ -363,6 +397,7 @@ export class Conversation {
       this.emit({ type: 'notice', message: '演示模式：请在下方输入文字。' });
       return;
     }
+    if (source === 'button') this.acknowledge(this.acks(false));
     await this.listen(source === 'kws' ? 'verify' : 'query');
   }
   private armNoSpeech(ms = this.noSpeechMs) {
@@ -438,6 +473,8 @@ export class Conversation {
    * 问题（一句话直达）则不应答，直接听完回答新问题。
    */
   private confirmWake(raw: string, rewake: boolean) {
+    rewake ||= this.rewaking;
+    this.rewaking = false;
     this.candidate = false;
     this.wakeEpoch = this.recognizerEpoch;
     this.lastVerifyText = '';
@@ -448,11 +485,13 @@ export class Conversation {
       clearTimeout(this.duckTimer);
       this.emit({ type: 'duck', active: false });
     }
+    // 再次唤醒：被打断的那一轮（问题 + 已播出的半句回答）整轮移出上下文，不再回答之前的问题。
+    if (rewake && this.stoppedTurnStart !== undefined) this.history.splice(this.stoppedTurnStart);
+    this.stoppedTurnStart = undefined;
     this.barge = false;
     this.followupListening = false;
     this.setState('LISTENING');
-    const acks =
-      (rewake && this.opts.rewakeAck?.length ? this.opts.rewakeAck : this.opts.wakeAck) ?? [];
+    const acks = this.acks(rewake);
     const voiceAck = !!acks.length && !this.p.demo && !!this.audio;
     this.emit({ type: 'wake-confirmed', chime: !voiceAck });
     this.emit({ type: 'notice', message: rewake ? '已停止回答，请说。' : '我在，请说。' });
@@ -462,8 +501,8 @@ export class Conversation {
     this.emit({ type: 'transcript', text: '', final: false });
     this.armNoSpeech(6000);
     this.ackEcho = '';
-    // 本次结果里唤醒词后面已经有命令，就是一句话直达，不应答。
-    if (voiceAck && !stripWake(raw, this.opts.wakeWord).trim()) void this.acknowledge(acks);
+    // 每次唤醒都应答；一句话直达时等用户说完再应答，随后回答新问题。
+    if (voiceAck) this.acknowledge(acks);
   }
   private onTranscript(raw: string, final: boolean, mode: ListenMode) {
     this.lastResultAt = performance.now();
@@ -568,7 +607,17 @@ export class Conversation {
     const text = this.transcript;
     if (this.candidate) this.logRejected();
     if (!text || this.candidate) {
+      const stopped = this.rewaking && this.candidate;
+      this.rewaking = false;
       this.cancel();
+      if (stopped) {
+        // 回答已因本地唤醒停止但复核没通过：打开追问窗口，用户可直接说话。
+        this.followupUntil = Date.now() + this.opts.followupMs;
+        this.timeout = setTimeout(() => {
+          this.followupUntil = 0;
+          this.setState('IDLE');
+        }, this.opts.followupMs);
+      }
       this.setState('IDLE');
       return;
     }
@@ -722,7 +771,6 @@ export class Conversation {
     this.userSpeaking = speaking;
     if (this.speakerLocked && !speaking) this.speakerMatch = target;
     if (started) {
-      this.stopAck();
       this.speechAt = performance.now();
       this.verdict = undefined;
       // 用户一开口就预热识别连接；唤醒词说完时握手已完成。
@@ -776,7 +824,9 @@ export class Conversation {
     const speculative = this.speculative?.text === text ? this.speculative : undefined;
     if (speculative) this.speculative = undefined;
     if (this.turnId && this.answer) this.retainHeard();
-    this.cancel();
+    this.cancel(true);
+    this.rewaking = false;
+    this.stoppedTurnStart = undefined;
     this.p.tts.warm?.();
     const generation = this.generation,
       controller = this.abort,
@@ -793,6 +843,7 @@ export class Conversation {
     this.emit({ type: 'transcript', text, final: true });
     this.history.push({ role: 'user', content: text });
     if (this.history.length > 24) this.history.splice(0, this.history.length - 24);
+    this.turnStart = this.history.length - 1;
     this.turnId = randomUUID();
     const turnId = this.turnId;
     this.answer = '';
@@ -839,7 +890,10 @@ export class Conversation {
     let buffer = '',
       offset = 0,
       firstSegment = true;
+    const ack = this.ackDone;
     const speaking = (async () => {
+      // 唤醒应答还没播完时，回答排在它之后，不与“我在”交叠。
+      if (ack) await ack;
       for await (const job of jobs) {
         if (generation !== this.generation) return;
         let first = true,
@@ -937,6 +991,7 @@ export class Conversation {
       this.answer = '';
       this.turnId = undefined;
       this.emit({ type: 'done', turnId, text: answer });
+      this.ackEcho = '';
       this.followupUntil = Date.now() + this.opts.followupMs;
       this.setState('IDLE');
       this.timeout = setTimeout(() => {
