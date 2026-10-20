@@ -459,7 +459,11 @@ export class Conversation {
       this.duckTimer = setTimeout(() => this.finishBarge(), 2500);
     } else if (mode === 'barge' && this.barge) {
       clearTimeout(this.duckTimer);
-      this.duckTimer = setTimeout(() => this.finishBarge(), 1200);
+      // 思考时没有播报压着，多给一点时间等识别结果。
+      this.duckTimer = setTimeout(
+        () => this.finishBarge(),
+        this.state === 'THINKING' ? 2000 : 1200,
+      );
     } else if (mode === 'query') this.armNoSpeech(noSpeechMs);
   }
   private rewakeOpen() {
@@ -518,14 +522,25 @@ export class Conversation {
         return;
       this.confirmWake(raw, speakingNow || mode === 'verify-speaking' || mode === 'barge');
     } else if (this.barge) {
-      if (isEcho(raw, this.answer)) return;
+      // 播报时过滤播报内容的回声；思考时还没出声，只过滤唤醒应答“我在”的回声。
+      if (isEcho(raw, this.state === 'SPEAKING' ? this.answer : '')) return;
+      if (this.ackEcho && isEcho(raw, this.ackEcho)) return;
       if (hasWake(raw, this.opts.wakeWord)) this.confirmWake(raw, true);
       else if (isBackchannel(raw)) {
         if (final) this.finishBarge();
         return;
       } else {
-        // 确认是真实打断：停止播报，沿用这条识别流继续聆听，不重新建连、不丢句首。
+        // 思考中（用户还没听到任何回答）本人接着说：多半是补充或修正刚才的问题，
+        // 与刚才的问题合并成一句重新提问，避免只回答前半句。
+        const pending =
+          this.state === 'THINKING' && this.turnId ? this.history[this.turnStart] : undefined;
+        // 确认是真实打断：停止回答，沿用这条识别流继续聆听，不重新建连、不丢句首。
         this.stopResponse();
+        if (pending?.role === 'user') {
+          this.history.splice(this.turnStart);
+          this.stoppedTurnStart = undefined;
+          this.committed = `${pending.content.replace(/[。！!.\s]+$/u, '')}，${this.committed}`;
+        }
         this.bargeStop = { epoch: this.recognizerEpoch, at: performance.now() };
         this.setState('LISTENING');
         this.armNoSpeech(6000);
@@ -785,9 +800,16 @@ export class Conversation {
     }
     if (!speaking && this.state === 'LISTENING' && this.transcript)
       this.scheduleEndpoint(this.transcript);
-    if (speaking && target && this.state === 'SPEAKING' && !this.barge && !this.candidate) {
+    if (
+      speaking &&
+      target &&
+      (this.state === 'SPEAKING' || this.state === 'THINKING') &&
+      !this.barge &&
+      !this.candidate
+    ) {
+      // 播报 / 思考中本人开口：先识别再判断（唤醒词 → 应答“我在”；附和 → 忽略；其他 → 当作提问）。
       this.barge = true;
-      this.emit({ type: 'duck', active: true });
+      if (this.state === 'SPEAKING') this.emit({ type: 'duck', active: true });
       void this.listen('barge', this.preRoll()).catch((e) => this.fail(e));
     } else if (
       speaking &&
@@ -812,10 +834,11 @@ export class Conversation {
   private finishBarge() {
     if (this.candidate) this.logRejected();
     this.closeRecognizer();
+    // timeout 此时可能是宿主问答的 120 秒兜底，只有唤醒复核才需要清掉。
+    if (this.candidate) clearTimeout(this.timeout);
     this.barge = false;
     this.candidate = false;
     clearTimeout(this.duckTimer);
-    clearTimeout(this.timeout);
     this.emit({ type: 'duck', active: false });
     this.setState(this.state);
   }
@@ -909,6 +932,8 @@ export class Conversation {
           signal.throwIfAborted();
           if (first) {
             this.setState('SPEAKING');
+            // 思考时本人已开口、正在判断是否打断：开播即压低音量。
+            if (this.barge) this.emit({ type: 'duck', active: true });
             if (firstAudio) {
               this.emit({
                 type: 'metrics',

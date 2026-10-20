@@ -456,6 +456,83 @@ describe('说一半想一想不抢答', () => {
     expect(asked).toEqual(['帮我查询A01的库存']);
   });
 });
+describe('思考中声纹续问与关键词打断', () => {
+  const thinking = async (question = '帮我查询') => {
+    let signal: AbortSignal | undefined;
+    const asked: string[] = [];
+    const contexts: string[][] = [];
+    const h = harness(
+      { wakeAck: ['我在'] },
+      {
+        async *chat(messages, s) {
+          asked.push(messages.at(-1)!.content);
+          contexts.push(messages.filter((m) => m.role !== 'system').map((m) => m.content));
+          if (asked.length > 1) {
+            yield '好的。';
+            return;
+          }
+          signal = s;
+          await new Promise((_, reject) => s.addEventListener('abort', () => reject(s.reason)));
+        },
+      },
+    );
+    h.c.handle({ type: 'text', text: question });
+    await wait(20);
+    expect(h.c.state).toBe('THINKING');
+    h.c.handle({ type: 'speaker', locked: true, match: true });
+    return { ...h, asked, contexts, aborted: () => !!signal?.aborted };
+  };
+  it('本人接着补充：停止思考，与刚才的问题合并成一句重新提问', async () => {
+    const { c, opened, asked, contexts, aborted } = await thinking();
+    c.handle({ type: 'vad', speaking: true, target: true });
+    await wait(20);
+    expect(opened).toHaveLength(1);
+    opened[0].result({ text: 'A01的库存', final: true });
+    await wait(20);
+    expect(aborted()).toBe(true);
+    expect(c.state).toBe('LISTENING');
+    c.handle({ type: 'vad', speaking: false, target: true });
+    await wait(600);
+    expect(asked.at(-1)).toBe('帮我查询，A01的库存');
+    expect(contexts.at(-1)).toEqual(['帮我查询，A01的库存']);
+  });
+  it('本人说唤醒词：停止思考并应答“我在”，不再回答刚才的问题', async () => {
+    const { c, events, opened, contexts, aborted } = await thinking('讲个故事');
+    c.handle({ type: 'vad', speaking: true, target: true });
+    await wait(20);
+    opened[0].result({ text: '你好超宝', final: false });
+    c.handle({ type: 'vad', speaking: false, target: true });
+    await wait(400);
+    expect(aborted()).toBe(true);
+    expect(events.some((e) => e.type === 'ack' && e.text === '我在')).toBe(true);
+    opened[0].result({ text: '你好超宝。查一下快递', final: true });
+    await wait(600);
+    expect(contexts.at(-1)).toEqual(['查一下快递']);
+  });
+  it('附和声（嗯、好）不打断思考', async () => {
+    const { c, opened, aborted } = await thinking();
+    c.handle({ type: 'vad', speaking: true, target: true });
+    await wait(20);
+    opened[0].result({ text: '嗯', final: true });
+    await wait(20);
+    expect(aborted()).toBe(false);
+    expect(c.state).toBe('THINKING');
+  });
+  it('不是本人（声纹未匹配）说话不打断思考', async () => {
+    const { c, opened, aborted } = await thinking();
+    c.handle({ type: 'vad', speaking: true, target: false });
+    await wait(20);
+    expect(opened).toHaveLength(0);
+    expect(aborted()).toBe(false);
+  });
+  it('思考中说“别说了 / 暂停”立即停止', async () => {
+    const { c, aborted } = await thinking();
+    c.handle({ type: 'interrupt', reason: 'stop' });
+    await wait(20);
+    expect(aborted()).toBe(true);
+    expect(c.state).toBe('IDLE');
+  });
+});
 describe('回答中再次唤醒', () => {
   /** 一段放不完的回答：hold 不释放就一直处于播报中。 */
   const answering = async (opts = {}) => {
