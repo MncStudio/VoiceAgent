@@ -239,8 +239,30 @@ describe('真实会话编排', () => {
     await new Promise((resolve) => setTimeout(resolve, 520));
     expect(chat).not.toHaveBeenCalled();
     c.handle({ type: 'vad', speaking: false, target: false });
-    await new Promise((resolve) => setTimeout(resolve, 520));
+    // 一直没有句末 final：450ms 断句 + 最多 900ms 等句尾后仍按已有文字回答
+    await new Promise((resolve) => setTimeout(resolve, 1500));
     expect(chat).toHaveBeenCalledOnce();
+  });
+  it('VAD 判停后句末 final 晚到，问题不丢句尾', async () => {
+    const chat = vi.fn(async function* () {
+      yield '我是超宝。';
+    });
+    const { c, result, events } = harness({ chat });
+    c.handle({ type: 'wake', source: 'button' });
+    await flush();
+    c.handle({ type: 'vad', speaking: true, target: false });
+    result({ text: '你是', final: false });
+    c.handle({ type: 'vad', speaking: false, target: false });
+    // final 晚于 450ms 断句到达（ASR 断句静音 + 链路延迟）
+    await new Promise((resolve) => setTimeout(resolve, 650));
+    expect(chat).not.toHaveBeenCalled();
+    result({ text: '你是谁？', final: true });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(chat).toHaveBeenCalledOnce();
+    expect(events.find((e) => e.type === 'transcript' && e.final)).toMatchObject({
+      text: '你是谁？',
+    });
+    expect(c.history.find((m) => m.role === 'user')?.content).toBe('你是谁？');
   });
   it('投机请求在确认断句后复用，不重复调用 LLM', async () => {
     const chat = vi.fn(async function* () {

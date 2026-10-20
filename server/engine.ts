@@ -488,15 +488,14 @@ export class Conversation {
     }
     void this.respond(text);
   }
-  /** 等识别结果稳定：拿到句末 final，或 250ms 内没有新结果，最多等 maxMs。 */
-  private async settle(maxMs = 400) {
+  /**
+   * 等这句话的字收齐：流式识别的中间结果常常还差句尾一两个字（“你是谁”先出“你是”），
+   * 句尾要等句末 final（ASR 断句静音 + 链路延迟）才补上。VAD 判停时 final 往往还在路上，
+   * 所以没拿到 final 就继续等，最多 maxMs；final 一到会重新排期提交（见 scheduleEndpoint）。
+   */
+  private async settle(maxMs = 900) {
     const start = performance.now();
-    while (
-      !this.lastFinal &&
-      performance.now() - start < maxMs &&
-      performance.now() - this.lastResultAt < 250
-    )
-      await delay(40);
+    while (!this.lastFinal && performance.now() - start < maxMs) await delay(40);
   }
   private scheduleEndpoint(text: string) {
     clearTimeout(this.endpoint);
@@ -549,7 +548,9 @@ export class Conversation {
       void this.respond(this.transcript);
     };
     if (!this.opts.semantic) {
-      this.endpoint = setTimeout(() => void commit(), incomplete(text) ? 1500 : 450);
+      // 已拿到句末 final（ASR 已确认静音断句）时字已齐，短等即可提交；否则先等 450ms 看是否继续说。
+      const wait = incomplete(text) ? 1500 : this.lastFinal ? 200 : 450;
+      this.endpoint = setTimeout(() => void commit(), wait);
       return;
     }
     this.endpoint = setTimeout(() => {
