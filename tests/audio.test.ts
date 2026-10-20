@@ -1,6 +1,27 @@
 import { describe, expect, it } from 'vitest';
-import { AudioRing, stripWake, isBackchannel, incomplete, estimatedMarks } from '../server/audio';
+import {
+  AudioRing,
+  stripWake,
+  isBackchannel,
+  incomplete,
+  estimatedMarks,
+  kwsTokens,
+} from '../server/audio';
 import { clientEventSchema } from '../shared/protocol';
+describe('唤醒词拼音 token', () => {
+  it('默认唤醒词与原内置关键词一致（含“你好”变调）', () => {
+    expect(kwsTokens('你好超宝')).toEqual(['n ǐ h ǎo ch āo b ǎo', 'n í h ǎo ch āo b ǎo']);
+  });
+  it('换唤醒词自动生成，y/w 按声母切、连续三声加变调读法', () => {
+    const tokens = kwsTokens('你好小圆');
+    expect(tokens[0]).toBe('n ǐ h ǎo x iǎo y uán');
+    expect(tokens).toContain('n í h ǎo x iǎo y uán');
+    expect(tokens).toContain('n í h áo x iǎo y uán');
+    expect(tokens.length).toBeLessThanOrEqual(4);
+    expect(kwsTokens('小爱同学')).toEqual(['x iǎo ài t óng x ué']);
+    expect(kwsTokens('hello')).toEqual([]);
+  });
+});
 describe('音频与协议边界', () => {
   it('环形缓冲保留精确尾部，不持有可变输入', () => {
     const ring = new AudioRing(8);

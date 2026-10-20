@@ -1,10 +1,11 @@
 import express from 'express';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { config } from './config.js';
+import { kwsTokens } from './audio.js';
 import { Conversation } from './engine.js';
 import { createProviders } from './providers/index.js';
 import { clientEventSchema, type ServerEvent } from '../shared/protocol.js';
@@ -48,6 +49,35 @@ type Session = {
 };
 const sessions = new Map<string, Session>();
 const publicRoot = path.resolve('web/public');
+/**
+ * 本地唤醒模型要用的唤醒词拼音 token：WAKE_WORD_PINYIN 优先，否则按 WAKE_WORD 自动生成。
+ * 模型词表里没有的 token 会让唤醒模型初始化失败，这里先按 tokens.txt 过滤并提示。
+ */
+let wakeWarned = '';
+function wakeTokens() {
+  const wanted = config.WAKE_WORD_PINYIN.trim()
+    ? config.WAKE_WORD_PINYIN.split('|')
+        .map((s) => s.trim().replace(/\s+/gu, ' '))
+        .filter(Boolean)
+    : kwsTokens(config.WAKE_WORD);
+  const file = path.join(publicRoot, 'models/kws/tokens.txt');
+  if (!existsSync(file)) return wanted;
+  const vocab = new Set(
+    readFileSync(file, 'utf8')
+      .split(/\r?\n/u)
+      .map((l) => l.split(' ')[0]),
+  );
+  const valid = wanted.filter((line) => line.split(' ').every((t) => vocab.has(t)));
+  const key = wanted.join('|');
+  if (valid.length < wanted.length && wakeWarned !== key) {
+    wakeWarned = key;
+    const bad = wanted.filter((l) => !valid.includes(l));
+    console.warn(
+      `[wake] 唤醒词“${config.WAKE_WORD}”的拼音 ${bad.map((l) => `“${l}”`).join('、')} 含本地唤醒模型不认识的 token，已忽略；${config.WAKE_WORD_PINYIN.trim() ? '请检查' : '可用'} WAKE_WORD_PINYIN 手动指定。`,
+    );
+  }
+  return valid;
+}
 app.get('/api/health', (_req, res) => res.json({ ok: true, provider: config.PROVIDER }));
 app.get('/api/config', (_req, res) =>
   res.json({
@@ -66,6 +96,7 @@ app.get('/api/config', (_req, res) =>
       threshold: config.KWS_THRESHOLD,
       boost: config.KWS_BOOST,
       denoise: config.KWS_DENOISE === 'true',
+      tokens: wakeTokens(),
     },
     configured: config.PROVIDER !== 'dashscope' || !!config.DASHSCOPE_API_KEY,
     assets: {
@@ -228,7 +259,9 @@ const cleanup = setInterval(() => {
 }, 60000);
 cleanup.unref();
 server.listen(config.PORT, config.HOST, () =>
-  console.log(`超宝服务已启动：http://${config.HOST}:${config.PORT}，Provider=${config.PROVIDER}`),
+  console.log(
+    `超宝服务已启动：http://${config.HOST}:${config.PORT}，Provider=${config.PROVIDER}，唤醒词=${config.WAKE_WORD}（${wakeTokens().join(' / ') || '本地唤醒不可用'}）`,
+  ),
 );
 for (const signal of ['SIGINT', 'SIGTERM'] as const)
   process.on(signal, () => {

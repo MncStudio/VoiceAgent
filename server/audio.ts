@@ -67,6 +67,35 @@ export function syllables(text: string) {
     : [];
   return chars.map((c, i) => ({ ...c, sound: normalizeSyllable(spoken[i] ?? c.char) }));
 }
+// 本地唤醒模型（sherpa-onnx wenetspeech KWS）的建模单元：声母 + 带调韵母，y/w 也按声母切，
+// 如“你好小圆” → n ǐ h ǎo x iǎo y uán。
+const initials = /^(zh|ch|sh|[bpmfdtnlgkhjqxrzcsyw])(.+)$/u;
+const toThird = new Map([...'ǎǒěǐǔǚ'].map((c, i) => [c, 'áóéíúǘ'[i]]));
+function syllableTokens(syllable: string) {
+  const m = initials.exec(syllable);
+  return m ? [m[1], m[2]] : [syllable];
+}
+/**
+ * 唤醒词 → 本地唤醒模型的拼音 token 序列（每个元素是一种读法）。
+ * 除标准读音外，再加三声连读变调的读法（“你好”实际读 ní hǎo），覆盖口语发音。
+ */
+export function kwsTokens(word: string) {
+  const han = Array.from(word)
+    .filter((c) => /\p{Script=Han}/u.test(c))
+    .join('');
+  if (!han) return [];
+  const spoken = pinyin(han, { toneType: 'symbol', type: 'array' }) as string[];
+  const third = (s: string) => [...s].some((c) => toThird.has(c));
+  const sandhi = (s: string) => [...s].map((c) => toThird.get(c) ?? c).join('');
+  const pairs = spoken.flatMap((s, i) => (third(s) && third(spoken[i + 1] ?? '') ? [i] : []));
+  const variants = [
+    spoken,
+    // 每处三声连读单独变调，以及全部变调
+    ...pairs.map((p) => spoken.map((s, i) => (i === p ? sandhi(s) : s))),
+    spoken.map((s, i) => (pairs.includes(i) ? sandhi(s) : s)),
+  ];
+  return [...new Set(variants.map((v) => v.flatMap(syllableTokens).join(' ')))].slice(0, 4);
+}
 /**
  * 在识别文本中定位唤醒词。loose=true 时（本地唤醒已命中后的复核）再容忍一个音节的
  * 识别错误或漏字，但唤醒词的最后两个音节（如“超宝”）必须完全对上；四个音节以下不放宽。

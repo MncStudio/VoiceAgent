@@ -26,6 +26,8 @@ const schema = z.object({
   LIVEKIT_API_SECRET: z.string().default('secret'),
   WAKE_WORD: z.string().default('你好超宝'),
   // 只说唤醒词时的语音应答，逗号分隔多条随机播报；设为空字符串则改为提示音。
+  /** 唤醒词的拼音 token（可选，多个读法用 | 分隔）；留空按 WAKE_WORD 自动生成。 */
+  WAKE_WORD_PINYIN: z.string().default(''),
   WAKE_ACK: z.string().default('我在'),
   // 本地唤醒（sherpa-onnx）灵敏度：阈值越低越容易唤醒，加权越高越容易唤醒。
   // 一级只负责“宁可多报”，误报由服务端 ASR 复核过滤。

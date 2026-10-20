@@ -43,8 +43,10 @@ export class MicrophonePipeline {
       /** 命令词只在播报/思考时生效，且不能是正在播报内容的回声。 */
       allowCommand: (keyword: string) => boolean;
       allowWake: () => boolean;
+      /** 唤醒词文字（服务端 WAKE_WORD），也用作本地唤醒模型的关键词标签。 */
+      wakeWord?: string;
       speakerThreshold: number;
-      kws?: { threshold: number; boost: number; denoise: boolean };
+      kws?: { threshold: number; boost: number; denoise: boolean; tokens?: string[] };
     } = { allowCommand: () => true, allowWake: () => true, speakerThreshold: 0.5 },
   ) {}
   private report(patch: Partial<AudioStatus>) {
@@ -100,14 +102,18 @@ export class MicrophonePipeline {
         this.report({ speaker: '模型加载失败' });
       }
     } else this.report({ speaker: '未安装声纹模型' });
-    if (assets.kws) {
+    // 旧版服务端不下发 tokens 时沿用默认唤醒词“你好超宝”。
+    const wakeLabel = (this.policy.wakeWord || '你好超宝').replace(/\s+/gu, '');
+    const wakeTokens = this.policy.kws?.tokens ?? ['n ǐ h ǎo ch āo b ǎo', 'n í h ǎo ch āo b ǎo'];
+    if (assets.kws && !wakeTokens.length) this.report({ kws: `不支持“${wakeLabel}” · 请点按唤醒` });
+    else if (assets.kws) {
       this.worker = createWorker('/kws-worker.js');
       this.worker.onmessage = async ({ data }) => {
-        if (data.type === 'ready') this.report({ kws: '你好超宝 · 本地' });
+        if (data.type === 'ready') this.report({ kws: `${wakeLabel} · 本地` });
         if (data.type === 'error') this.report({ kws: '不可用 · 请点按唤醒' });
         if (data.type === 'keyword') {
           if (Date.now() - this.lastWake < 1600) return;
-          if (data.keyword === '你好超宝') {
+          if (data.keyword === wakeLabel) {
             if (!this.policy.allowWake()) return;
             this.lastWake = Date.now();
             this.onWake();
@@ -130,9 +136,9 @@ export class MicrophonePipeline {
       this.worker.postMessage({
         type: 'init',
         keywords:
-          // 唤醒词：放低阈值、提高加权，保证一级“宁可多报”；另加“你好”的变调读法 ní hǎo。
-          `n ǐ h ǎo ch āo b ǎo :${boost} #${threshold} @你好超宝\n` +
-          `n í h ǎo ch āo b ǎo :${boost} #${threshold} @你好超宝\n` +
+          // 唤醒词：放低阈值、提高加权，保证一级“宁可多报”。拼音由服务端按 WAKE_WORD 生成，
+          // 含三声连读变调读法（如“你好”读 ní hǎo）。
+          wakeTokens.map((t) => `${t} :${boost} #${threshold} @${wakeLabel}\n`).join('') +
           // 命令词短、易误报：单独提高触发阈值、降低加权。
           'b ié sh uō l e :1.0 #0.35 @别说了\n' +
           'z àn t íng :1.0 #0.45 @暂停\n' +

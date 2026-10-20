@@ -21,7 +21,8 @@ export type AppConfig = {
   turnModel: string;
   speculative: boolean;
   speakerThreshold?: number;
-  kws?: { threshold: number; boost: number; denoise: boolean };
+  /** tokens：唤醒词的拼音 token 序列（每个元素一种读法），由服务端按 WAKE_WORD 生成。 */
+  kws?: { threshold: number; boost: number; denoise: boolean; tokens?: string[] };
   assets: { kws: boolean; vad: boolean; speaker: boolean };
 };
 export class AssistantClient {
@@ -270,6 +271,7 @@ export class AssistantClient {
           allowCommand: (keyword) =>
             (this.state === 'SPEAKING' || this.state === 'THINKING') && !this.echoing(keyword),
           allowWake: () => !this.echoing(config.wakeWord),
+          wakeWord: config.wakeWord,
           speakerThreshold: config.speakerThreshold ?? 0.5,
           kws: config.kws ?? { threshold: 0.15, boost: 2, denoise: true },
         },

@@ -222,7 +222,7 @@ function App() {
         const c = await ensure();
         await c.enableVoice(config);
         setVoice(true);
-        setNotice('麦克风已连接。说“你好超宝”，也可以点击下方按钮开始。');
+        setNotice(`麦克风已连接。说“${config.wakeWord}”，也可以点击下方按钮开始。`);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : '连接失败');
