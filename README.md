@@ -182,3 +182,13 @@ tests/              编排单元回归与浏览器集成测试
 ```
 
 官方接口与模型来源：[LiveKit 原始音轨](https://docs.livekit.io/transport/media/raw-tracks/)、[百炼 CosyVoice WebSocket](https://help.aliyun.com/zh/model-studio/cosyvoice-websocket-api)、[sherpa-onnx 唤醒模型](https://k2-fsa.github.io/sherpa/onnx/kws/index.html)、[官方 sherpa-onnx WebAssembly 包](https://pub.dev/packages/sherpa_onnx_web)、[CAM++ 模型](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models)。具体部署模型的许可证应以其权重与附带说明为准。
+
+### 宿主已有业务问答（流式 TTS）
+
+SDK 可使用 `new ChaobaoAssistant({ baseUrl: '/voice-api', external: true })`。
+监听 `question` 事件取得 `{ turnId, text }`，将问题送入宿主原有业务接口；每次收到正文增量，清理 Markdown/HTML 排版后调用 `bot.appendAnswer(turnId, plainText)`，接口完成时调用 `bot.appendAnswer(turnId, '', true)`。
+此模式不再调用 VoiceAgent 自己的业务 LLM，也不开启投机问答。正文到达后沿用两段并发预合成与顺序播放，可在业务 SSE 结束前开始朗读。
+
+宿主暂停按钮应同时取消业务请求并调用 `bot.stop()`；监听原始 `event` 中的 `interrupted` 也应取消宿主请求，覆盖语音打断的情况。暂停后的旧 turnId 增量被丢弃。宿主流最长等待 120 秒、每轮纯文本最多 20000 字，最后一包应明确 `done=true`。
+
+digital-employee 的具体接入与 Live2D 替换说明见该项目 `docs/voice-integration.md`。

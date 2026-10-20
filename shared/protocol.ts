@@ -38,12 +38,19 @@ export const clientEventSchema = z.discriminatedUnion('type', [
     heardChars: z.number().int().min(0).max(20000),
     done: z.boolean().optional(),
   }),
+  z.object({
+    type: z.literal('host-answer'),
+    turnId: z.string().uuid(),
+    text: z.string().max(2000),
+    done: z.boolean().optional(),
+  }),
   z.object({ type: z.literal('reset') }),
 ]);
 export type ClientEvent = z.infer<typeof clientEventSchema>;
 export type ServerEvent =
   | { type: 'state'; state: AssistantState; followupUntil?: number }
   | { type: 'transcript'; text: string; final: boolean }
+  | { type: 'question'; text: string; turnId: string }
   | { type: 'delta'; text: string; turnId: string }
   | {
       type: 'utterance';

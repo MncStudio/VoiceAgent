@@ -72,6 +72,7 @@ export class Conversation {
   private noSpeechMs = 6000;
   private decisionEpoch = 0;
   private decisionAbort?: AbortController;
+  private hostAnswer?: { turnId: string; queue: AsyncQueue<string>; size: number };
   private speculative?: { text: string; queue: AsyncQueue<string>; abort: AbortController };
   private speculationTimer?: ReturnType<typeof setTimeout>;
   constructor(
@@ -84,6 +85,8 @@ export class Conversation {
       followupMs: number;
       semantic?: SemanticPolicy;
       speculative?: boolean;
+      /** 宿主负责业务问答，只把正文增量交给语音队列。 */
+      external?: boolean;
       /** 整句声纹低于该分数且时长足够时才判为他人；默认 0.35。 */
       speakerReject?: number;
     },
@@ -161,6 +164,21 @@ export class Conversation {
     this.emit({ type: 'state', state, followupUntil: this.followupUntil });
   }
   handle(event: ClientEvent) {
+    if (event.type === 'host-answer') {
+      const host = this.hostAnswer;
+      if (!host || event.turnId !== host.turnId) return;
+      host.size += event.text.length;
+      if (host.size > 20000) {
+        this.fail(new Error('朗读内容超过 20000 字。'));
+        return;
+      }
+      if (event.text) host.queue.push(event.text);
+      if (event.done) {
+        clearTimeout(this.timeout);
+        host.queue.end();
+      }
+      return;
+    }
     // Stop/cancel must never sit behind a slow network operation.
     if (event.type === 'interrupt') {
       this.interrupt(event.reason, event.heardChars);
@@ -221,6 +239,8 @@ export class Conversation {
     this.pendingAudio = [];
   }
   private cancel() {
+    this.hostAnswer?.queue.end();
+    this.hostAnswer = undefined;
     this.stopAck();
     this.generation++;
     this.abort.abort();
@@ -249,6 +269,8 @@ export class Conversation {
     clearTimeout(this.duckTimer);
     clearTimeout(this.timeout);
     this.abortSpeculation();
+    this.hostAnswer?.queue.end();
+    this.hostAnswer = undefined;
     this.audio?.clear();
     this.emit({ type: 'duck', active: false });
     this.barge = false;
@@ -502,7 +524,7 @@ export class Conversation {
     clearTimeout(this.speculationTimer);
     this.decisionAbort?.abort();
     const decision = ++this.decisionEpoch;
-    if (this.opts.speculative && !incomplete(text))
+    if (this.opts.speculative && !this.opts.external && !incomplete(text))
       this.speculationTimer = setTimeout(() => this.startSpeculation(text), 120);
     const commit = async () => {
       const stale = () =>
@@ -699,6 +721,15 @@ export class Conversation {
     this.answer = '';
     this.heardChars = 0;
     this.setState('THINKING');
+    const host = this.opts.external
+      ? { turnId, queue: new AsyncQueue<string>(), size: 0 }
+      : undefined;
+    if (host) {
+      this.hostAnswer = host;
+      // 宿主失联/未完成时不能让会话永久停在 THINKING。
+      this.timeout = setTimeout(() => this.fail(new Error('业务回答超时，请重新提问。')), 120000);
+      this.emit({ type: 'question', turnId, text });
+    }
     const start = performance.now();
     let firstAudio = true;
     // 每句话一拿到就开始合成（最多 2 句并行），播放按顺序进行；
@@ -790,9 +821,11 @@ export class Conversation {
       speechError = e;
       jobs.end();
       controller.abort();
+      host?.queue.end();
     });
     try {
-      for await (const delta of speculative?.queue ??
+      for await (const delta of host?.queue ??
+        speculative?.queue ??
         this.p.llm.chat([this.prompt(), ...this.history], signal)) {
         signal.throwIfAborted();
         if (generation !== this.generation) return;
@@ -820,6 +853,8 @@ export class Conversation {
       await safeSpeaking;
       if (speechError) throw speechError;
       if (generation !== this.generation || signal.aborted) return;
+      clearTimeout(this.timeout);
+      this.hostAnswer = undefined;
       this.history.push({ role: 'assistant', content: this.answer });
       const answer = this.answer;
       this.answer = '';

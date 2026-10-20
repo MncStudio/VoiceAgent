@@ -17,6 +17,8 @@ export type ChaobaoMessage = {
   interrupted?: boolean;
 };
 export type ChaobaoOptions = {
+  /** 业务问答由宿主处理，通过 question 事件和 appendAnswer 回传正文。 */
+  external?: boolean;
   /** 超宝服务地址，如 https://chaobao.example.com 或 /chaobao；缺省为当前页面同源。 */
   baseUrl?: string;
   /** 断线后自动重连（默认 true）。 */
@@ -28,6 +30,7 @@ export type ChaobaoOptions = {
   rememberVoice?: boolean;
 };
 export type ChaobaoEventMap = {
+  question: { turnId: string; text: string };
   /** 助手状态：IDLE 待命 / CANDIDATE 疑似唤醒 / LISTENING 聆听 / THINKING 思考 / SPEAKING 回答 / INTERRUPT 打断。 */
   state: { state: AssistantState; followupUntil?: number };
   /** 用户语音的实时转写；final=true 时这句话已结束（同时会进入 messages）。 */
@@ -69,6 +72,7 @@ export class ChaobaoAssistant {
   private client?: AssistantClient;
   private handlers = new Map<keyof ChaobaoEventMap, Set<(payload: never) => void>>();
   private activeAnswer?: string;
+  private hostPending?: { turnId: string; text: string; done: boolean };
   /** 清空对话后，仍在路上的旧回答增量不能把消息“复活”。 */
   private discarded = new Set<string>();
   private recovering = false;
@@ -77,7 +81,13 @@ export class ChaobaoAssistant {
   private resumeVoice?: () => void;
   private options: Required<ChaobaoOptions>;
   constructor(options: ChaobaoOptions = {}) {
-    this.options = { baseUrl: '', reconnect: true, rememberVoice: false, ...options };
+    this.options = {
+      baseUrl: '',
+      reconnect: true,
+      rememberVoice: false,
+      external: false,
+      ...options,
+    };
     setServiceBase(this.options.baseUrl);
     if (this.options.rememberVoice && localStorage.getItem(voiceKey) === '1') {
       this.resumeVoice = () => {
@@ -136,6 +146,7 @@ export class ChaobaoAssistant {
   }
   private onEvent = (e: ServerEvent) => {
     this.emit('event', e);
+    if (e.type === 'question') this.emit('question', { turnId: e.turnId, text: e.text });
     if (e.type === 'state') {
       this.state = e.state;
       this.emit('state', { state: e.state, followupUntil: e.followupUntil });
@@ -180,6 +191,7 @@ export class ChaobaoAssistant {
       (s) => this.emit('audio', s),
       (level) => this.emit('level', level),
       () => void this.recover(),
+      this.options.external,
     );
   }
   /** 建立对话会话（文字即可用）；重复调用会复用已有连接。 */
@@ -253,12 +265,33 @@ export class ChaobaoAssistant {
       this.fail(error);
     }
   }
+  /** 按顺序回传纯文本正文；最后一包传 done=true。失效轮次由服务端丢弃。 */
+  appendAnswer(turnId: string, text: string, done = false) {
+    if (this.destroyed) return;
+    if (this.hostPending?.turnId === turnId) {
+      this.hostPending.text += text;
+      this.hostPending.done ||= done;
+      return;
+    }
+    const batch = { turnId, text, done };
+    this.hostPending = batch;
+    queueMicrotask(() => {
+      if (this.destroyed || this.hostPending !== batch) return;
+      this.hostPending = undefined;
+      for (let at = 0; at < batch.text.length; at += 2000)
+        this.client?.send({ type: 'host-answer', turnId, text: batch.text.slice(at, at + 2000) });
+      if (batch.done) this.client?.send({ type: 'host-answer', turnId, text: '', done: true });
+    });
+  }
+
   /** 停止当前回答。 */
   stop() {
+    this.hostPending = undefined;
     this.client?.send({ type: 'interrupt', reason: 'stop' });
   }
   /** 清空对话上下文与记录。 */
   reset() {
+    this.hostPending = undefined;
     if (this.activeAnswer) this.discarded.add(this.activeAnswer);
     this.client?.send({ type: 'reset' });
     this.partial = '';
@@ -306,6 +339,7 @@ export class ChaobaoAssistant {
   /** 断开并释放麦克风、模型与连接。组件卸载时调用。 */
   async destroy() {
     this.destroyed = true;
+    this.hostPending = undefined;
     this.clearResume();
     const old = this.client;
     this.client = undefined;

@@ -37,6 +37,8 @@ export type AppConfig = {
 };
 export type ServerEvent = { type: string; [key: string]: unknown };
 export type ChaobaoOptions = {
+  /** 业务问答由宿主处理，通过 question 事件和 appendAnswer 回传正文。 */
+  external?: boolean;
   /** 超宝服务地址，如 https://chaobao.example.com 或 /chaobao；缺省为当前页面同源。 */
   baseUrl?: string;
   /** 断线自动重连，默认 true。 */
@@ -45,6 +47,7 @@ export type ChaobaoOptions = {
   rememberVoice?: boolean;
 };
 export type ChaobaoEventMap = {
+  question: { turnId: string; text: string };
   state: { state: AssistantState; followupUntil?: number };
   transcript: { text: string; final: boolean };
   messages: ChaobaoMessage[];
@@ -88,6 +91,7 @@ export declare class ChaobaoAssistant {
   /** 点按唤醒 */
   wake(): Promise<void>;
   sendText(text: string): Promise<void>;
+  appendAnswer(turnId: string, text: string, done?: boolean): void;
   /** 停止当前回答 */
   stop(): void;
   /** 清空对话 */

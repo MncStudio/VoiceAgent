@@ -79,7 +79,7 @@ app.get('/api/config', (_req, res) =>
     },
   }),
 );
-app.post('/api/sessions', (_req, res) => {
+app.post('/api/sessions', (req, res) => {
   if (sessions.size >= 8) {
     res.status(429).json({ error: '会话数已满，请先断开已有连接。' });
     return;
@@ -108,7 +108,9 @@ app.post('/api/sessions', (_req, res) => {
       followupMs: config.FOLLOWUP_MS,
       speakerReject: Math.max(0, config.SPEAKER_THRESHOLD - 0.15),
       semantic,
-      speculative: config.QA_PROVIDER !== 'yuxi' && config.SPECULATIVE === 'true',
+      speculative:
+        !req.body?.external && config.QA_PROVIDER !== 'yuxi' && config.SPECULATIVE === 'true',
+      external: req.body?.external === true,
     },
   );
   sessions.set(id, { id, engine, events, created: Date.now() });

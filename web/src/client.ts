@@ -48,12 +48,15 @@ export class AssistantClient {
   }[] = [];
   private ticker?: ReturnType<typeof setInterval>;
   private stopped = false;
+  private responseTurn?: string;
+  private stoppedTurns = new Set<string>();
   constructor(
     private onEvent: (e: ServerEvent) => void,
     private onAudio: (s: AudioStatus) => void,
     private onLevel: (level: number) => void,
     /** 控制连接或语音连接意外断开时回调，由界面负责自动重连。 */
     private onLost: () => void = () => {},
+    private external = false,
   ) {}
   /** 正在（或即将）播报的句子里是否包含该词，用于识别命令词 / 唤醒词的回声误触发。 */
   private echoing(word: string) {
@@ -63,13 +66,22 @@ export class AssistantClient {
     );
   }
   async connect() {
-    const response = await fetch(serviceUrl('/api/sessions'), { method: 'POST' });
+    const response = await fetch(serviceUrl('/api/sessions'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ external: this.external }),
+    });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error ?? '无法建立会话');
     this.id = result.id;
     this.ws = new WebSocket(socketUrl(`/control?session=${this.id}`));
     this.ws.onmessage = ({ data }) => {
       const event = JSON.parse(data) as ServerEvent;
+      if ('turnId' in event && event.turnId && this.stoppedTurns.has(event.turnId)) {
+        if (event.type === 'interrupted') this.onEvent(event);
+        return;
+      }
+      if (event.type === 'question' || event.type === 'delta') this.responseTurn = event.turnId;
       if (event.type === 'state') this.state = event.state;
       if (event.type === 'duck') this.setVolume(event.active ? 0.2 : 1);
       if (event.type === 'wake-confirmed') {
@@ -138,7 +150,7 @@ export class AssistantClient {
       };
     });
     this.ticker = setInterval(() => {
-      if (this.analyser) {
+      if (this.analyser && !this.stopped) {
         const data = new Float32Array(this.analyser.fftSize);
         this.analyser.getFloatTimeDomainData(data);
         this.onLevel(Math.min(1, Math.sqrt(data.reduce((s, x) => s + x * x, 0) / data.length) * 5));
@@ -191,6 +203,11 @@ export class AssistantClient {
     };
   }
   stopPlayback() {
+    const turn = this.responseTurn ?? this.activeTurn;
+    if (turn) this.stoppedTurns.add(turn);
+    if (this.stoppedTurns.size > 100)
+      this.stoppedTurns.delete(this.stoppedTurns.values().next().value!);
+    this.onLevel(0);
     this.stopped = true;
     this.elements.forEach((e) => {
       e.volume = 0;

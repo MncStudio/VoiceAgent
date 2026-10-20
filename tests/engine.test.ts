@@ -348,3 +348,69 @@ describe('真实会话编排', () => {
     expect(chat).not.toHaveBeenCalled();
   });
 });
+
+describe('宿主流式回答', () => {
+  it('只请求一次宿主问答，未结束就开始合成，并按顺序播完', async () => {
+    const llm = {
+      chat: vi.fn(async function* () {
+        yield '不应调用';
+      }),
+    };
+    const synthesized: string[] = [];
+    const { c, events } = harness(
+      llm,
+      true,
+      { external: true },
+      {
+        async *synth(text) {
+          synthesized.push(text);
+          yield Buffer.alloc(960);
+        },
+      },
+    );
+    c.handle({ type: 'text', text: '业务问题' });
+    await flush();
+    const question = events.find((e) => e.type === 'question');
+    expect(question?.type).toBe('question');
+    if (question?.type !== 'question') throw new Error('缺少宿主事件');
+    c.handle({ type: 'host-answer', turnId: question.turnId, text: '第一句话。' });
+    await flush();
+    expect(synthesized).toEqual(['第一句话。']);
+    expect(events.some((e) => e.type === 'done')).toBe(false);
+    c.handle({ type: 'host-answer', turnId: question.turnId, text: '第二句话。', done: true });
+    await flush();
+    expect(synthesized).toEqual(['第一句话。', '第二句话。']);
+    expect(events.find((e) => e.type === 'done')).toMatchObject({ text: '第一句话。第二句话。' });
+    expect(llm.chat).not.toHaveBeenCalled();
+  });
+
+  it('暂停后丢弃旧增量，新一轮不串音、不重复问答', async () => {
+    const synthesized: string[] = [];
+    const { c, events } = harness(
+      undefined,
+      true,
+      { external: true },
+      {
+        async *synth(text) {
+          synthesized.push(text);
+          yield Buffer.alloc(960);
+        },
+      },
+    );
+    c.handle({ type: 'text', text: '旧问题' });
+    await flush();
+    const old = events.find((e) => e.type === 'question');
+    if (old?.type !== 'question') throw new Error('缺少宿主事件');
+    c.handle({ type: 'interrupt', reason: 'pause' });
+    c.handle({ type: 'host-answer', turnId: old.turnId, text: '不能播放。', done: true });
+    c.handle({ type: 'text', text: '新问题' });
+    await flush();
+    const next = events.filter((e) => e.type === 'question').at(-1);
+    if (next?.type !== 'question') throw new Error('缺少新问题');
+    c.handle({ type: 'host-answer', turnId: old.turnId, text: '不能串入新回答。' });
+    c.handle({ type: 'host-answer', turnId: next.turnId, text: '新回答。', done: true });
+    await flush();
+    expect(synthesized).toEqual(['新回答。']);
+    expect(events.filter((e) => e.type === 'done')).toHaveLength(1);
+  });
+});
