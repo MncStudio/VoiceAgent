@@ -65,6 +65,14 @@ export class Conversation {
   private acking?: AbortController;
   /** 唤醒复核期间最后一次识别结果，复核失败时写日志，便于判断是哪一级没通过。 */
   private lastVerifyText = '';
+  /** 唤醒已在哪条识别流上确认过：同一条流上晚到的 KWS 候选不再重新复核。 */
+  private wakeEpoch = -1;
+  /** 免唤醒打断停止回答的时刻与识别流：随后识别出唤醒词时按“回答中再次唤醒”处理。 */
+  private bargeStop = { epoch: -1, at: 0 };
+  /** 本地唤醒在哪条识别流期间命中过：命中过才允许宽松匹配（容忍一个音节听错）。 */
+  private kwsEpoch = -1;
+  /** 当前识别流最近一次原始识别结果。 */
+  private lastRaw = '';
   /** 刚播过的应答文本，识别结果开头若是它的回声需去掉。 */
   private ackEcho = '';
   /** 当前这句话说完后的整句声纹结果。 */
@@ -82,6 +90,8 @@ export class Conversation {
       wakeWord: string;
       /** 只说唤醒词时播报的短应答（随机选一条）；为空时只播提示音。 */
       wakeAck?: string[];
+      /** 回答过程中再次唤醒时的短应答；为空时沿用 wakeAck。 */
+      rewakeAck?: string[];
       followupMs: number;
       semantic?: SemanticPolicy;
       speculative?: boolean;
@@ -95,7 +105,8 @@ export class Conversation {
   attachAudio(audio: AudioOutput) {
     this.audio = audio;
     // 语音一接通就预合成应答，第一次唤醒也不用等 TTS。
-    for (const text of this.opts.wakeAck ?? []) void this.ackAudio(text).catch(() => {});
+    for (const text of [...(this.opts.wakeAck ?? []), ...(this.opts.rewakeAck ?? [])])
+      void this.ackAudio(text).catch(() => {});
   }
   private ackAudio(text: string) {
     let cached = ackCache.get(text);
@@ -114,8 +125,7 @@ export class Conversation {
    * 只说了唤醒词时，像小爱一样先应一声“我在”；唤醒词后紧接着说了命令（一句话直达）
    * 或用户已经开口，就不应答，直接听。应答过程中用户开口会立即停止播放。
    */
-  private async acknowledge() {
-    const texts = this.opts.wakeAck ?? [];
+  private async acknowledge(texts: string[]) {
     if (!texts.length || this.p.demo || !this.audio) return;
     const epoch = this.recognizerEpoch;
     const still = () =>
@@ -311,6 +321,18 @@ export class Conversation {
     void this.listen('query', reason === 'wake' ? 300 : 700).catch((e) => this.fail(e));
   }
   private async wake(source: 'button' | 'kws') {
+    if (source === 'kws' && this.state === 'LISTENING' && (this.asr || this.asrReady)) {
+      // 这条识别流上已确认过唤醒（识别结果先于本地唤醒到达），不重复复核、不重复应答。
+      // 浏览器命中本地唤醒时已先显示“疑似唤醒”，重发当前状态让界面恢复。
+      if (this.wakeEpoch === this.recognizerEpoch) return this.setState(this.state);
+      // 刚被免唤醒打断停掉回答：唤醒词就在这条识别流里，直接沿用它确认，不重开连接、不丢句首。
+      if (this.rewakeOpen()) {
+        this.kwsEpoch = this.recognizerEpoch;
+        if (hasWake(this.lastRaw, this.opts.wakeWord, true)) this.confirmWake(this.lastRaw, true);
+        else this.setState(this.state);
+        return;
+      }
+    }
     if (this.state === 'SPEAKING' || this.state === 'THINKING') {
       if (source === 'button') {
         this.interrupt('wake');
@@ -353,6 +375,7 @@ export class Conversation {
       verify = mode === 'verify' || mode === 'verify-speaking';
     this.transcript = '';
     this.committed = '';
+    this.lastRaw = '';
     this.lastFinal = false;
     this.lastResultAt = performance.now();
     this.noSpeechMs = noSpeechMs;
@@ -401,8 +424,47 @@ export class Conversation {
       this.duckTimer = setTimeout(() => this.finishBarge(), 1200);
     } else if (mode === 'query') this.armNoSpeech(noSpeechMs);
   }
+  private rewakeOpen() {
+    return (
+      this.bargeStop.epoch === this.recognizerEpoch && performance.now() - this.bargeStop.at < 4000
+    );
+  }
+  /**
+   * 唤醒确认。rewake=true 表示回答（思考 / 播报）过程中再次唤醒：立即停止回答，
+   * 只说了唤醒词就应答一声（REWAKE_ACK，默认“你好”）等用户提问；唤醒词后直接接了
+   * 问题（一句话直达）则不应答，直接听完回答新问题。
+   */
+  private confirmWake(raw: string, rewake: boolean) {
+    this.candidate = false;
+    this.wakeEpoch = this.recognizerEpoch;
+    this.lastVerifyText = '';
+    console.info(`[wake] ${rewake ? '回答中再次唤醒' : '复核通过'}：“${raw}”`);
+    if (this.state === 'SPEAKING' || this.state === 'THINKING' || this.barge || this.turnId)
+      this.stopResponse();
+    else {
+      clearTimeout(this.duckTimer);
+      this.emit({ type: 'duck', active: false });
+    }
+    this.barge = false;
+    this.followupListening = false;
+    this.setState('LISTENING');
+    const acks =
+      (rewake && this.opts.rewakeAck?.length ? this.opts.rewakeAck : this.opts.wakeAck) ?? [];
+    const voiceAck = !!acks.length && !this.p.demo && !!this.audio;
+    this.emit({ type: 'wake-confirmed', chime: !voiceAck });
+    this.emit({ type: 'notice', message: rewake ? '已停止回答，请说。' : '我在，请说。' });
+    // 打断时已显示的半句（多是唤醒词本身）清掉，下面按去掉唤醒词后的内容重新显示。
+    this.transcript = '';
+    this.committed = '';
+    this.emit({ type: 'transcript', text: '', final: false });
+    this.armNoSpeech(6000);
+    this.ackEcho = '';
+    // 本次结果里唤醒词后面已经有命令，就是一句话直达，不应答。
+    if (voiceAck && !stripWake(raw, this.opts.wakeWord).trim()) void this.acknowledge(acks);
+  }
   private onTranscript(raw: string, final: boolean, mode: ListenMode) {
     this.lastResultAt = performance.now();
+    this.lastRaw = raw;
     const speakingNow = this.state === 'SPEAKING' || this.state === 'THINKING';
     if (this.candidate) {
       if (!hasWake(raw, this.opts.wakeWord, true)) {
@@ -412,30 +474,29 @@ export class Conversation {
       // 播报内容本身含唤醒词时，残余回声不能算唤醒。
       if (speakingNow && hasWake(this.answer, this.opts.wakeWord) && isEcho(raw, this.answer))
         return;
-      this.candidate = false;
-      this.lastVerifyText = '';
-      console.info(`[wake] 复核通过：“${raw}”`);
-      if (speakingNow || mode === 'verify-speaking' || mode === 'barge') this.stopResponse();
-      this.barge = false;
-      this.setState('LISTENING');
-      const voiceAck = !!this.opts.wakeAck?.length && !this.p.demo && !!this.audio;
-      this.emit({ type: 'wake-confirmed', chime: !voiceAck });
-      this.emit({ type: 'notice', message: '我在，请说。' });
-      this.armNoSpeech(6000);
-      this.ackEcho = '';
-      // 本次结果里唤醒词后面已经有命令，就是一句话直达，不应答。
-      if (voiceAck && !stripWake(raw, this.opts.wakeWord).trim()) void this.acknowledge();
+      this.confirmWake(raw, speakingNow || mode === 'verify-speaking' || mode === 'barge');
     } else if (this.barge) {
       if (isEcho(raw, this.answer)) return;
-      if (isBackchannel(raw)) {
+      if (hasWake(raw, this.opts.wakeWord)) this.confirmWake(raw, true);
+      else if (isBackchannel(raw)) {
         if (final) this.finishBarge();
         return;
+      } else {
+        // 确认是真实打断：停止播报，沿用这条识别流继续聆听，不重新建连、不丢句首。
+        this.stopResponse();
+        this.bargeStop = { epoch: this.recognizerEpoch, at: performance.now() };
+        this.setState('LISTENING');
+        this.armNoSpeech(6000);
       }
-      // 确认是真实打断：停止播报，沿用这条识别流继续聆听，不重新建连、不丢句首。
-      this.stopResponse();
-      this.setState('LISTENING');
-      this.armNoSpeech(6000);
-    } else if (mode !== 'query' && this.state !== 'LISTENING') return;
+    } else if (
+      this.state === 'LISTENING' &&
+      this.wakeEpoch !== this.recognizerEpoch &&
+      this.rewakeOpen() &&
+      hasWake(raw, this.opts.wakeWord, this.kwsEpoch === this.recognizerEpoch)
+    )
+      // 打断时先听到“你好…”就停了回答，随后才认出完整唤醒词：同样按再次唤醒处理。
+      this.confirmWake(raw, true);
+    else if (mode !== 'query' && this.state !== 'LISTENING') return;
     let clean = stripWake(raw, this.opts.wakeWord);
     if (this.ackEcho) {
       // 应答“我在”的残余回声被识别进来时去掉，不当成用户的话。

@@ -399,6 +399,142 @@ describe('唤醒应答', () => {
     expect(events.some((e) => e.type === 'ack')).toBe(false);
   });
 });
+describe('回答中再次唤醒', () => {
+  /** 一段放不完的回答：hold 不释放就一直处于播报中。 */
+  const answering = async (opts = {}) => {
+    let signal: AbortSignal | undefined;
+    const asked: string[] = [];
+    const h = harness(
+      { wakeAck: ['我在'], rewakeAck: ['你好'], ...opts },
+      {
+        async *chat(messages, s) {
+          const q = messages.at(-1)!.content;
+          asked.push(q);
+          if (q !== '讲个故事') {
+            yield '新回答。';
+            return;
+          }
+          signal = s;
+          yield '从前有座山，山里有座庙。';
+          await new Promise((_, reject) => s.addEventListener('abort', () => reject(s.reason)));
+        },
+      },
+    );
+    h.c.handle({ type: 'text', text: '讲个故事' });
+    await wait(20);
+    expect(h.c.state).toBe('SPEAKING');
+    return { ...h, asked, aborted: () => !!signal?.aborted };
+  };
+  it('只说唤醒词：停止回答并应答“你好”，接着回答用户的新问题', async () => {
+    const { c, events, opened, asked, aborted } = await answering();
+    c.handle({ type: 'wake', source: 'kws' });
+    await wait(20);
+    opened[0].result({ text: '你好超宝', final: false });
+    await wait(20);
+    expect(aborted()).toBe(true);
+    expect(c.state).toBe('LISTENING');
+    expect(events.some((e) => e.type === 'interrupted')).toBe(true);
+    await wait(400);
+    expect(events.filter((e) => e.type === 'ack').map((e) => e.type === 'ack' && e.text)).toEqual([
+      '你好',
+    ]);
+    opened[0].result({ text: '你好超宝。你好，帮我查一下快递', final: true });
+    await wait(700);
+    expect(asked.at(-1)).toBe('帮我查一下快递');
+    expect(c.history.filter((m) => m.role === 'user').map((m) => m.content)).toEqual([
+      '讲个故事',
+      '帮我查一下快递',
+    ]);
+  });
+  it('唤醒词后直接接新问题：停止回答，不应答，直接回答新问题', async () => {
+    const { c, events, opened, asked, aborted } = await answering();
+    c.handle({ type: 'wake', source: 'kws' });
+    await wait(20);
+    opened[0].result({ text: '你好超宝明天天气怎么样', final: true });
+    await wait(20);
+    expect(aborted()).toBe(true);
+    await wait(700);
+    expect(events.some((e) => e.type === 'ack')).toBe(false);
+    expect(asked.at(-1)).toBe('明天天气怎么样');
+  });
+  it('思考中（还没出声）再次唤醒同样停止并应答', async () => {
+    let signal: AbortSignal | undefined;
+    const { c, events, opened } = harness(
+      { wakeAck: ['我在'], rewakeAck: ['你好'] },
+      {
+        async *chat(_m, s) {
+          signal = s;
+          await new Promise((_, reject) => s.addEventListener('abort', () => reject(s.reason)));
+        },
+      },
+    );
+    c.handle({ type: 'text', text: '讲个故事' });
+    await wait(20);
+    expect(c.state).toBe('THINKING');
+    c.handle({ type: 'wake', source: 'kws' });
+    await wait(20);
+    opened[0].result({ text: '你好超宝', final: false });
+    await wait(400);
+    expect(signal?.aborted).toBe(true);
+    expect(c.state).toBe('LISTENING');
+    expect(events.some((e) => e.type === 'ack' && e.text === '你好')).toBe(true);
+  });
+  it('免唤醒打断先停了回答、随后才认出唤醒词：按再次唤醒应答，晚到的本地唤醒不重复复核', async () => {
+    const { c, events, opened, aborted } = await answering();
+    c.handle({ type: 'speaker', locked: true, match: true });
+    c.handle({ type: 'vad', speaking: true, target: true });
+    await wait(20);
+    expect(opened).toHaveLength(1);
+    opened[0].result({ text: '你好', final: false });
+    await wait(20);
+    expect(aborted()).toBe(true);
+    opened[0].result({ text: '你好超宝', final: false });
+    c.handle({ type: 'wake', source: 'kws' });
+    c.handle({ type: 'vad', speaking: false, target: true });
+    await wait(500);
+    expect(opened).toHaveLength(1);
+    expect(events.filter((e) => e.type === 'wake-confirmed')).toHaveLength(1);
+    expect(events.filter((e) => e.type === 'ack').map((e) => e.type === 'ack' && e.text)).toEqual([
+      '你好',
+    ]);
+    expect(c.state).toBe('LISTENING');
+  });
+  it('本地唤醒先到、识别结果后到：沿用打断的识别流确认', async () => {
+    const { c, events, opened } = await answering();
+    c.handle({ type: 'speaker', locked: true, match: true });
+    c.handle({ type: 'vad', speaking: true, target: true });
+    await wait(20);
+    opened[0].result({ text: '你好', final: false });
+    await wait(20);
+    c.handle({ type: 'wake', source: 'kws' });
+    await wait(20);
+    // 本地唤醒命中过，识别听错一个字也能确认
+    opened[0].result({ text: '你号超宝', final: false });
+    c.handle({ type: 'vad', speaking: false, target: true });
+    await wait(500);
+    expect(opened).toHaveLength(1);
+    expect(events.some((e) => e.type === 'ack' && e.text === '你好')).toBe(true);
+  });
+  it('未配置 REWAKE_ACK 时沿用唤醒应答', async () => {
+    const { c, events, opened } = await answering({ rewakeAck: [] });
+    c.handle({ type: 'wake', source: 'kws' });
+    await wait(20);
+    opened[0].result({ text: '你好超宝', final: false });
+    await wait(400);
+    expect(events.some((e) => e.type === 'ack' && e.text === '我在')).toBe(true);
+  });
+  it('普通免唤醒打断不受影响，不应答', async () => {
+    const { c, events, opened, asked } = await answering();
+    c.handle({ type: 'speaker', locked: true, match: true });
+    c.handle({ type: 'vad', speaking: true, target: true });
+    await wait(20);
+    opened[0].result({ text: '帮我查一下天气', final: true });
+    c.handle({ type: 'vad', speaking: false, target: true });
+    await wait(700);
+    expect(events.some((e) => e.type === 'ack' || e.type === 'wake-confirmed')).toBe(false);
+    expect(asked.at(-1)).toBe('帮我查一下天气');
+  });
+});
 describe('百炼 TTS 预热连接', () => {
   it('预热连接被服务端判为空闲超时（InvalidParameter）时，换新连接重试且不报错', async () => {
     const server = new WebSocketServer({ port: 0 });

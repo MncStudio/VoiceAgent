@@ -29,6 +29,8 @@ const schema = z.object({
   /** 唤醒词的拼音 token（可选，多个读法用 | 分隔）；留空按 WAKE_WORD 自动生成。 */
   WAKE_WORD_PINYIN: z.string().default(''),
   WAKE_ACK: z.string().default('我在'),
+  // 回答过程中再次唤醒（停止当前回答）后的语音应答，逗号分隔；留空则沿用 WAKE_ACK。
+  REWAKE_ACK: z.string().default('你好'),
   // 本地唤醒（sherpa-onnx）灵敏度：阈值越低越容易唤醒，加权越高越容易唤醒。
   // 一级只负责“宁可多报”，误报由服务端 ASR 复核过滤。
   KWS_THRESHOLD: z.coerce.number().min(0.01).max(0.9).default(0.15),

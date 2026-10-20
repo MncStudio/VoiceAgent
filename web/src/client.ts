@@ -14,6 +14,8 @@ export type AppConfig = {
   wakeWord: string;
   followupMs: number;
   wakeAck?: string;
+  /** 回答中再次唤醒后的应答，逗号分隔；为空时沿用 wakeAck。 */
+  rewakeAck?: string;
   configured: boolean;
   llmModel: string;
   asrModel: string;

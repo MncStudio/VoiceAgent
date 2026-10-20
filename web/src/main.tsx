@@ -519,6 +519,10 @@ function App() {
                 唤醒应答: config?.wakeAck
                   ? `语音「${config.wakeAck.split(/[,，]/)[0]}」`
                   : '提示音',
+                打断唤醒应答:
+                  config?.rewakeAck || config?.wakeAck
+                    ? `语音「${(config.rewakeAck || config.wakeAck)!.split(/[,，]/)[0]}」`
+                    : '提示音',
                 端侧唤醒: audio?.kws ?? (config?.assets.kws ? '已安装，连接后加载' : '未安装'),
                 '端侧 VAD': audio?.vad ?? (config?.assets.vad ? '已安装，连接后加载' : '未安装'),
                 降噪: audio?.noise ?? '连接后加载',

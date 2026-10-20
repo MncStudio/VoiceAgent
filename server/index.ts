@@ -85,6 +85,7 @@ app.get('/api/config', (_req, res) =>
     qaProvider: config.PROVIDER === 'demo' ? 'demo' : config.QA_PROVIDER,
     wakeWord: config.WAKE_WORD,
     wakeAck: config.WAKE_ACK,
+    rewakeAck: config.REWAKE_ACK,
     followupMs: config.FOLLOWUP_MS,
     llmModel: config.QA_PROVIDER === 'yuxi' ? `yuxi / ${config.YUXI_AGENT_SLUG}` : config.LLM_MODEL,
     asrModel: config.ASR_MODEL,
@@ -134,6 +135,9 @@ app.post('/api/sessions', (req, res) => {
     {
       wakeWord: config.WAKE_WORD,
       wakeAck: config.WAKE_ACK.split(/[,，]/)
+        .map((s) => s.trim())
+        .filter(Boolean),
+      rewakeAck: config.REWAKE_ACK.split(/[,，]/)
         .map((s) => s.trim())
         .filter(Boolean),
       followupMs: config.FOLLOWUP_MS,
