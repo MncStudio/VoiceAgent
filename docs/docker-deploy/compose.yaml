@@ -1,0 +1,70 @@
+name: digital-employee-voice
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  livekit:
+    image: livekit/livekit-server:v1.13.10
+    restart: unless-stopped
+    environment:
+      LIVEKIT_CONFIG: |
+        port: 7880
+        bind_addresses: ["0.0.0.0"]
+        rtc:
+          node_ip: ${SERVER_IP:?请填写浏览器可访问的服务器IP}
+          use_external_ip: false
+          advertise_internal_ip: true
+          tcp_port: 7881
+          udp_port: 7882
+        keys:
+          ${LIVEKIT_API_KEY:?请填写LiveKit Key}: ${LIVEKIT_API_SECRET:?请填写LiveKit Secret}
+    ports:
+      - "127.0.0.1:7880:7880"
+      - "7881:7881/tcp"
+      - "7882:7882/udp"
+    logging: *logging
+
+  voice:
+    build:
+      context: ../..
+      dockerfile: docs/docker-deploy/Dockerfile.voice
+    image: voice-agent:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    init: true
+    depends_on: [livekit]
+    environment:
+      PROVIDER: dashscope
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:?请填写百炼Key}
+      QA_PROVIDER: openai
+      LIVEKIT_URL: ${LIVEKIT_URL:?例如wss://rtc.example.com}
+      LIVEKIT_INTERNAL_URL: ws://livekit:7880
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      ALLOWED_ORIGINS: ${WEB_ORIGIN:?例如https://employee.example.com}
+      HOST: 0.0.0.0
+      PORT: "3001"
+    logging: *logging
+
+  web:
+    build:
+      context: ${DIGITAL_EMPLOYEE_DIR:-../../../digital-employee}
+      dockerfile: ${WEB_DOCKERFILE:-../VoiceAgent/docs/docker-deploy/Dockerfile.web}
+    image: digital-employee-web:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      voice:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8088:80"
+    environment:
+      API_TARGET: ${API_TARGET:?请填写业务后端地址}
+      COCKPIT_TARGET: ${COCKPIT_TARGET:?请填写驾驶舱后端地址}
+      YUXI_TARGET: ${YUXI_TARGET:?请填写智能体后端地址}
+      YUXI_KEY: ${YUXI_KEY:?请填写智能体Key}
+    volumes:
+      - ./web.conf.template:/etc/nginx/templates/default.conf.template:ro
+    logging: *logging

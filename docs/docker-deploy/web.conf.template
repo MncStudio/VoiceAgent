@@ -1,0 +1,85 @@
+# 数字员工前端容器内 nginx 配置模板
+# 容器启动时，官方 nginx 镜像会用 envsubst 替换 ${API_TARGET} 等变量，
+# 输出到 /etc/nginx/conf.d/default.conf。nginx 自身变量（$uri、$http_upgrade 等）不受影响。
+
+server {
+    listen 80;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    client_max_body_size 20m;
+
+    gzip on;
+    gzip_min_length 1k;
+    gzip_comp_level 5;
+    gzip_types text/plain text/css application/javascript application/json image/svg+xml;
+
+    # 入口页不缓存，保证发版后立即生效
+    location = /index.html {
+        add_header Cache-Control "no-store";
+    }
+
+    # 前端静态资源；voice-api 由独立代理优先处理
+    location ~* \.(?:js|css|png|jpe?g|gif|svg|webp|woff2?|ttf)$ {
+        expires 7d;
+        add_header Cache-Control "public";
+        try_files $uri =404;
+    }
+
+    # 若依 / 霍洛湾综管：保留 /dev-api 前缀，与开发代理一致
+    location /dev-api/ {
+        proxy_pass ${API_TARGET};
+        proxy_http_version 1.1;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+    }
+
+    # 数据驾驶舱：去掉 /cockpit-api，目标本身已带 /data-service/api
+    location /cockpit-api/ {
+        proxy_pass ${COCKPIT_TARGET}/;
+        proxy_http_version 1.1;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+    }
+
+    # yuxi 智能体：去掉 /yuxi-api，目标本身已带 /yuxi；Key 只在此注入，不打进前端产物
+    location /yuxi-api/ {
+        proxy_pass ${YUXI_TARGET}/;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Authorization "Bearer ${YUXI_KEY}";
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # SSE 流式输出：必须关闭缓冲，否则回答会攒到最后一次性出现
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+    }
+
+    # VoiceAgent：唤醒、ASR、TTS，含 WebSocket
+    location ^~ /voice-api/ {
+        proxy_pass http://voice:3001/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # SPA 路由回退（history 模式）
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

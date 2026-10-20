@@ -1,0 +1,13 @@
+.git
+node_modules
+dist
+.runtime
+.env
+.env.*
+*.log
+test-results
+playwright-report
+web/public/models/*
+!web/public/models/.gitkeep
+web/public/vendor/*
+!web/public/vendor/.gitkeep
