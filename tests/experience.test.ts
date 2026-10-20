@@ -399,6 +399,51 @@ describe('唤醒应答', () => {
     expect(events.some((e) => e.type === 'ack')).toBe(false);
   });
 });
+describe('说一半想一想不抢答', () => {
+  const woke = async (opts = {}) => {
+    const asked: string[] = [];
+    const h = harness(
+      { incompleteMs: 1200, ...opts },
+      {
+        async *chat(messages) {
+          asked.push(messages.at(-1)!.content);
+          yield '好的。';
+        },
+      },
+    );
+    h.c.handle({ type: 'wake', source: 'button' });
+    await wait(20);
+    return { ...h, asked };
+  };
+  it('“帮我查询”后停顿思考，接着说的内容并入同一句', async () => {
+    const { c, opened, asked } = await woke();
+    c.handle({ type: 'vad', speaking: true, target: false });
+    opened[0].result({ text: '帮我查询。', final: true });
+    c.handle({ type: 'vad', speaking: false, target: false });
+    await wait(900);
+    expect(asked).toEqual([]);
+    expect(c.state).toBe('LISTENING');
+    c.handle({ type: 'vad', speaking: true, target: false });
+    opened[0].result({ text: 'A01的库存', final: true });
+    c.handle({ type: 'vad', speaking: false, target: false });
+    await wait(500);
+    expect(asked).toEqual(['帮我查询。A01的库存']);
+  });
+  it('只说了“帮我查询”就不再说话，等够停顿后照常回答', async () => {
+    const { c, opened, asked } = await woke();
+    opened[0].result({ text: '帮我查询', final: true });
+    await wait(900);
+    expect(asked).toEqual([]);
+    await wait(500);
+    expect(asked).toEqual(['帮我查询']);
+  });
+  it('完整的问题照常快速断句', async () => {
+    const { opened, asked } = await woke();
+    opened[0].result({ text: '帮我查询A01的库存', final: true });
+    await wait(400);
+    expect(asked).toEqual(['帮我查询A01的库存']);
+  });
+});
 describe('回答中再次唤醒', () => {
   /** 一段放不完的回答：hold 不释放就一直处于播报中。 */
   const answering = async (opts = {}) => {
@@ -425,7 +470,7 @@ describe('回答中再次唤醒', () => {
     expect(h.c.state).toBe('SPEAKING');
     return { ...h, asked, aborted: () => !!signal?.aborted };
   };
-  it('只说唤醒词：停止回答并应答“你好”，接着回答用户的新问题', async () => {
+  it('只说唤醒词：停止回答并应答，接着回答用户的新问题', async () => {
     const { c, events, opened, asked, aborted } = await answering();
     c.handle({ type: 'wake', source: 'kws' });
     await wait(20);

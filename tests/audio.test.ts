@@ -4,6 +4,7 @@ import {
   stripWake,
   isBackchannel,
   incomplete,
+  incompleteLevel,
   estimatedMarks,
   kwsTokens,
 } from '../server/audio';
@@ -42,6 +43,27 @@ describe('音频与协议边界', () => {
     expect(isBackchannel('好，帮我介绍一下')).toBe(false);
     expect(incomplete('帮我订一个')).toBe(true);
     expect(incomplete('介绍一下你自己。')).toBe(false);
+  });
+  it('只说了动词或句尾是连接词时判为明显没说完，已带宾语的照常断句', () => {
+    for (const t of [
+      '帮我查询',
+      '帮我查询。',
+      '我想查一下',
+      '打开',
+      '麻烦帮我看看',
+      '还有',
+      '帮我订一个',
+    ])
+      expect(incompleteLevel(t), t).toBe(2);
+    for (const t of [
+      '把灯打开',
+      '帮我查询库存',
+      '查一下A01的库存。',
+      '明天天气怎么样',
+      '介绍一下你自己',
+    ])
+      expect(incompleteLevel(t), t).toBe(0);
+    expect(incompleteLevel('要红色的')).toBe(1);
   });
   it('估算时间戳显式标记且有序', () => {
     const marks = estimatedMarks('你好', 400);

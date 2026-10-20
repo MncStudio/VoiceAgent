@@ -141,6 +141,7 @@ app.post('/api/sessions', (req, res) => {
         .map((s) => s.trim())
         .filter(Boolean),
       followupMs: config.FOLLOWUP_MS,
+      incompleteMs: config.INCOMPLETE_PAUSE_MS,
       speakerReject: Math.max(0, config.SPEAKER_THRESHOLD - 0.15),
       semantic,
       speculative:

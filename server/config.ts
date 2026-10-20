@@ -30,7 +30,7 @@ const schema = z.object({
   WAKE_WORD_PINYIN: z.string().default(''),
   WAKE_ACK: z.string().default('我在'),
   // 回答过程中再次唤醒（停止当前回答）后的语音应答，逗号分隔；留空则沿用 WAKE_ACK。
-  REWAKE_ACK: z.string().default('你好'),
+  REWAKE_ACK: z.string().default('我在'),
   // 本地唤醒（sherpa-onnx）灵敏度：阈值越低越容易唤醒，加权越高越容易唤醒。
   // 一级只负责“宁可多报”，误报由服务端 ASR 复核过滤。
   KWS_THRESHOLD: z.coerce.number().min(0.01).max(0.9).default(0.15),
@@ -48,6 +48,8 @@ const schema = z.object({
   LOCAL_LLM_API_KEY: z.string().default('local'),
   TURN_MODEL: z.string().default(''),
   SPECULATIVE: z.enum(['true', 'false']).default('true'),
+  // 句子明显没说完（如“帮我查询”“我想查一下”“还有”）时，停顿多久才当作说完（ms）。
+  INCOMPLETE_PAUSE_MS: z.coerce.number().min(800).max(8000).default(3000),
   FOLLOWUP_MS: z.coerce.number().min(1000).max(30000).default(8000),
 });
 export type Config = z.infer<typeof schema>;

@@ -6,6 +6,7 @@ import {
   estimatedMarks,
   hasWake,
   incomplete,
+  incompleteLevel,
   isBackchannel,
   isEcho,
   nextSegment,
@@ -93,6 +94,8 @@ export class Conversation {
       /** 回答过程中再次唤醒时的短应答；为空时沿用 wakeAck。 */
       rewakeAck?: string[];
       followupMs: number;
+      /** 句子明显没说完（“帮我查询”）时，停顿多久才当作说完；默认 3000ms。 */
+      incompleteMs?: number;
       semantic?: SemanticPolicy;
       speculative?: boolean;
       /** 宿主负责业务问答，只把正文增量交给语音队列。 */
@@ -630,9 +633,21 @@ export class Conversation {
       this.followupListening = false;
       void this.respond(this.transcript);
     };
+    const level = incompleteLevel(text),
+      dangling = level === 2,
+      pause = dangling ? (this.opts.incompleteMs ?? 3000) : 1500;
+    // 没说完时“无语音”超时不能早于断句等待，否则用户想下文时会被提前提交。
+    if (dangling && this.state === 'LISTENING') {
+      clearTimeout(this.timeout);
+      this.timeout = setTimeout(
+        () => this.finishListening(),
+        Math.max(this.noSpeechMs, pause + 1500),
+      );
+    }
     if (!this.opts.semantic) {
       // 已拿到句末 final（ASR 已确认静音断句）时字已齐，短等即可提交；否则先等 450ms 看是否继续说。
-      const wait = incomplete(text) ? 1500 : this.lastFinal ? 200 : 450;
+      // 明显没说完（“帮我查询”）时多等用户想一想，期间一开口就继续听同一句。
+      const wait = level ? pause : this.lastFinal ? 200 : 450;
       this.endpoint = setTimeout(() => void commit(), wait);
       return;
     }
@@ -647,11 +662,12 @@ export class Conversation {
         .catch(() => !incomplete(text))
         .then((complete) => {
           if (decision !== this.decisionEpoch || this.userSpeaking) return;
-          if (complete) void commit();
+          // 规则已判定没说完时，不因语义模型误判“完整”而抢答。
+          if (complete && !dangling) void commit();
           else
             this.endpoint = setTimeout(
               () => void commit(),
-              Math.max(0, 1500 - 200 - (performance.now() - started)),
+              Math.max(0, pause - 200 - (performance.now() - started)),
             );
         });
     }, 200);

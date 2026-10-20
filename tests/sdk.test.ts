@@ -4,16 +4,32 @@ const clients = vi.hoisted(() => [] as { sent: unknown[]; external: boolean }[])
 vi.mock('../web/src/client', () => ({
   AssistantClient: class {
     sent: unknown[] = [];
-    constructor(_event: unknown, _audio: unknown, _level: unknown, _lost: unknown, public external: boolean) { clients.push(this); }
+    constructor(
+      _event: unknown,
+      _audio: unknown,
+      _level: unknown,
+      _lost: unknown,
+      public external: boolean,
+    ) {
+      clients.push(this);
+    }
     async connect() {}
-    send(event: unknown) { this.sent.push(event); }
+    send(event: unknown) {
+      this.sent.push(event);
+    }
     async close() {}
   },
 }));
-afterEach(() => { clients.length = 0; vi.unstubAllGlobals(); });
+afterEach(() => {
+  clients.length = 0;
+  vi.unstubAllGlobals();
+});
 const turnId = '6d5f6325-b1e4-4974-8bc8-8cf22810ae51';
 async function bot() {
-  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ provider: 'demo' }))));
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => new Response(JSON.stringify({ provider: 'demo' }))),
+  );
   const instance = new ChaobaoAssistant({ external: true });
   await instance.connect();
   return instance;

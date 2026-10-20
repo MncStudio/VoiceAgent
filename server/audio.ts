@@ -160,6 +160,30 @@ export function nextSegment(buffer: string, first: boolean) {
 export function isBackchannel(text: string) {
   return /^[嗯啊哦噢好对是的呀恩唔哈\s，。！？]*$/u.test(text);
 }
+/** 句尾是没说完的连接词 / 请求词（“帮我订一个”“如果”“还有”）。 */
+const DANGLING =
+  /(?:一个|一下|一些|帮我|我想|我要|然后|还有|以及|还是|关于|比如|如果|因为|但是|所以|或者|把|被|给|对于)$/u;
+/** 句尾“的 / 和 / 到”等也可能是完整句（“红色的”），只稍等一下。 */
+const WEAK = /(?:的|和|跟|与|到|从)$/u;
+/**
+ * 只有“动词”、还没说要查什么 / 做什么（“帮我查询”“我想查一下”“打开”），用户多半在想下文。
+ * 动词前只允许请求类前缀，“把灯打开”“帮我查询库存”这类已带宾语的不算。
+ */
+const BARE_VERB = new RegExp(
+  '^(?:你|您|请|请你|麻烦|麻烦你|帮我|帮忙|帮|给我|替我|我要|我想|我想要|我需要|想|要|再|去|能不能|可不可以|可以|能)*' +
+    '(?:查询|查找|查看|查一查|查查|查|搜索|搜一搜|搜|找找|找|看看|看|打开|关闭|显示|统计|导出|打印|' +
+    '问问|问|告诉我|说说|讲讲|介绍|算算|计算|安排|预订|订|设置|播放|放)(?:一下|下)?$',
+  'u',
+);
+/**
+ * 这句话是否还没说完：2 = 明显没说完（句尾连接词或只有动词），断句要多等用户想一想；
+ * 1 = 可能没说完（句尾“的 / 和”），稍等；0 = 正常断句。
+ */
+export function incompleteLevel(text: string): 0 | 1 | 2 {
+  const t = text.replace(/[\s，,、。.！!~～…]+$/u, '');
+  if (DANGLING.test(t) || BARE_VERB.test(t)) return 2;
+  return WEAK.test(t) ? 1 : 0;
+}
 export function incomplete(text: string) {
-  return /(?:一个|一下|帮我|我想|然后|如果|因为|但是|的|和|或者|把|给|到|从)[，、\s]*$/u.test(text);
+  return incompleteLevel(text) > 0;
 }
