@@ -17,8 +17,14 @@ function connect(url: string, key: string, signal?: AbortSignal) {
     });
     if (signal) bindAbort(ws, signal);
     ws.once('open', () => resolve(ws));
-    ws.once('error', () => reject(new Error('百炼语音连接失败，请检查网络、地域和密钥。')));
-    ws.once('close', () => reject(new Error('语音连接已关闭。')));
+    ws.once('error', (error) =>
+      reject(
+        signal?.aborted
+          ? signal.reason
+          : new Error('百炼语音连接失败，请检查网络、地域和密钥。', { cause: error }),
+      ),
+    );
+    ws.once('close', () => reject(signal?.aborted ? signal.reason : new Error('语音连接已关闭。')));
   });
 }
 function bindAbort(ws: WebSocket, signal: AbortSignal) {
@@ -37,6 +43,7 @@ class RetryableError extends Error {}
 class WarmSocket {
   private spare?: { ws: WebSocket; at: number };
   private pending?: Promise<void>;
+  private warming?: AbortController;
   constructor(
     private url: string,
     private key: string,
@@ -52,8 +59,15 @@ class WarmSocket {
     if (this.pending || this.fresh()) return;
     this.spare?.ws.close();
     this.spare = undefined;
-    this.pending = connect(this.url, this.key)
+    const controller = new AbortController();
+    this.warming = controller;
+    const pending = connect(this.url, this.key, controller.signal)
       .then((ws) => {
+        // close() 可能发生在握手完成、这个回调尚未执行的间隙。
+        if (controller.signal.aborted) {
+          ws.close();
+          return;
+        }
         ws.on('error', () => {});
         ws.once('close', () => {
           if (this.spare?.ws === ws) this.spare = undefined;
@@ -62,12 +76,30 @@ class WarmSocket {
       })
       .catch(() => {})
       .finally(() => {
-        this.pending = undefined;
+        if (this.pending === pending) {
+          this.pending = undefined;
+          this.warming = undefined;
+        }
       });
+    this.pending = pending;
   }
   /** 返回连接以及它是否来自预热池（复用连接失败时调用方可换新连接重试）。 */
   async take(signal: AbortSignal, reuse = true): Promise<{ ws: WebSocket; reused: boolean }> {
-    if (reuse && !this.fresh() && this.pending) await this.pending;
+    signal.throwIfAborted();
+    if (reuse && !this.fresh() && this.pending) {
+      // 取消当前识别无需等共享预热握手结束，预热连接仍可留给下一轮。
+      const pending = this.pending;
+      let cancel: () => void = () => {};
+      try {
+        await new Promise<void>((resolve, reject) => {
+          cancel = () => reject(signal.reason);
+          signal.addEventListener('abort', cancel, { once: true });
+          void pending.then(resolve);
+        });
+      } finally {
+        signal.removeEventListener('abort', cancel);
+      }
+    }
     signal.throwIfAborted();
     const spare = reuse && this.fresh() ? this.spare : undefined;
     if (spare) {
@@ -78,6 +110,9 @@ class WarmSocket {
     return { ws: await connect(this.url, this.key, signal), reused: false };
   }
   close() {
+    this.warming?.abort();
+    this.warming = undefined;
+    this.pending = undefined;
     this.spare?.ws.close();
     this.spare = undefined;
   }

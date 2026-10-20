@@ -207,11 +207,16 @@ server.on('upgrade', (req, socket, head) => {
 });
 // SDK（npm run build:sdk 生成）供其他系统通过 ${baseUrl}/sdk/chaobao-sdk.js 加载。
 const sdk = path.resolve('dist/sdk');
-if (existsSync(sdk)) app.use('/sdk', express.static(sdk, { cacheControl: true, maxAge: 0 }));
+// 始终注册，允许服务启动后才构建 SDK；缺失资源不能落入后面的 SPA HTML 回退。
+app.use('/sdk', express.static(sdk, { cacheControl: true, maxAge: 0 }));
+app.use('/sdk', (_req, res) =>
+  res.status(404).json({ error: 'SDK 资源不存在，请在超宝服务目录运行 npm run build:sdk。' }),
+);
 const web = path.resolve('dist/web');
-if (existsSync(web)) app.use(express.static(web));
 // 开发模式（未构建前端）下同样提供端侧模型、Worker 与 AudioWorklet，SDK 接入方可直接连 3001。
+// public 是 SDK 配套资源的源文件，优先于旧 dist/web 中的副本，避免反代前缀等修复被旧构建覆盖。
 app.use(express.static(publicRoot));
+if (existsSync(web)) app.use(express.static(web));
 if (existsSync(web)) app.get('/{*path}', (_req, res) => res.sendFile(path.join(web, 'index.html')));
 // 只回收没有控制连接的会话；常驻使用的助手只要连接还在就不会被定时删除。
 // 有连接的会话在连接关闭 10 秒后由 close 回调回收。

@@ -119,7 +119,8 @@ npm start
 
 其他系统想用超宝、但界面自己做时，使用 SDK：唤醒、VAD、声纹、降噪、LiveKit 音频与对话协议都在 SDK 里，宿主页面只负责界面。
 
-1. 超宝服务执行 `npm run build`（或单独 `npm run build:sdk`）后，在 `/sdk/chaobao-sdk.js` 提供 SDK，类型声明在 `/sdk/chaobao-sdk.d.ts`（源文件 `sdk/chaobao-sdk.d.ts`）。端侧模型、Worker、AudioWorklet 仍由超宝服务按 `baseUrl` 提供，不需要拷贝到宿主项目；超宝升级后宿主无需重新构建。
+1. 超宝服务执行 `npm run build`（或单独 `npm run build:sdk`）后，在 `/sdk/chaobao-sdk.js` 提供 SDK，类型声明在 `/sdk/chaobao-sdk.d.ts`（源文件 `sdk/chaobao-sdk.d.ts`）。开发启动 `npm run dev` / `npm run dev:server` 会自动先构建 SDK。端侧模型、Worker、AudioWorklet 仍由超宝服务按 `baseUrl` 提供，不需要拷贝到宿主项目；超宝升级后宿主无需重新构建。
+   宿主页面的来源必须加入 `.env` 的 `ALLOWED_ORIGINS`；例如 WMS 使用 `http://localhost`（80 端口）时应填写 `http://localhost`，不要写成 `http://localhost:80`。修改 `.env` 后需重启超宝服务。
 2. 宿主页面运行时加载：
 
    ```js

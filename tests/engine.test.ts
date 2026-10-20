@@ -14,13 +14,14 @@ function harness(
   audio = false,
   options: Partial<ConstructorParameters<typeof Conversation>[2]> = {},
   tts?: Providers['tts'],
+  asr?: Providers['asr'],
 ) {
   const events: ServerEvent[] = [];
   let result: ((r: Transcript) => void) | undefined;
   let aborted = false;
   const p: Providers = {
     demo: false,
-    asr: {
+    asr: asr ?? {
       async open(onResult, _error, signal) {
         result = onResult;
         signal.addEventListener('abort', () => (aborted = true));
@@ -51,6 +52,47 @@ const flush = async () => {
   await new Promise((resolve) => setTimeout(resolve, 20));
 };
 describe('真实会话编排', () => {
+  it('旧追问的 ASR 握手延迟失败不能中断新的回答', async () => {
+    let rejectOpen: (error: Error) => void = () => {};
+    let releaseAnswer: () => void = () => {};
+    const hold = new Promise<void>((resolve) => (releaseAnswer = resolve));
+    let answerSignal: AbortSignal | undefined;
+    const { c, events } = harness(
+      {
+        async *chat(messages, signal) {
+          if (messages.at(-1)?.content === '新问题') {
+            answerSignal = signal;
+            await hold;
+            signal.throwIfAborted();
+          }
+          yield '有效回答。';
+        },
+      },
+      false,
+      {},
+      undefined,
+      {
+        open() {
+          return new Promise((_resolve, reject) => (rejectOpen = reject));
+        },
+      },
+    );
+    c.handle({ type: 'text', text: '第一个问题' });
+    await flush();
+    c.handle({ type: 'vad', speaking: true, target: false });
+    c.handle({ type: 'text', text: '新问题' });
+    await flush();
+    rejectOpen(new Error('百炼语音连接失败，请检查网络、地域和密钥。'));
+    await flush();
+    const aborted = answerSignal?.aborted;
+    releaseAnswer();
+    await flush();
+    expect(aborted).toBe(false);
+    expect(events.some((e) => e.type === 'error')).toBe(false);
+    expect(events.filter((e) => e.type === 'done')).toHaveLength(2);
+    expect(c.history.at(-1)?.content).toBe('有效回答。');
+  });
+
   it('旧 TTS 延迟报错不能取消新的回答', async () => {
     const { c, events } = harness(
       {

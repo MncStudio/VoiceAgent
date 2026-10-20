@@ -1,6 +1,7 @@
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
+import { readFileSync } from 'node:fs';
 import WebSocket from 'ws';
 let child: ChildProcess;
 const base = 'http://127.0.0.1:3109';
@@ -25,6 +26,12 @@ afterAll(async () => {
   child?.kill();
 });
 describe('本地 API 边界', () => {
+  it('SDK 使用当前唤醒 Worker，避免 dist/web 的旧副本覆盖反向代理路径修复', async () => {
+    const r = await fetch(`${base}/kws-worker.js`, { headers: { Origin: base } });
+    expect(r.status).toBe(200);
+    expect(r.headers.get('content-type')).toContain('javascript');
+    expect(await r.text()).toBe(readFileSync('web/public/kws-worker.js', 'utf8'));
+  });
   it('公共配置没有服务端密钥', async () => {
     const r = await fetch(`${base}/api/config`);
     const body = await r.text();

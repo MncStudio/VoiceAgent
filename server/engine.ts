@@ -343,7 +343,7 @@ export class Conversation {
           this.onTranscript(result.text, result.final, mode);
         },
         (error) => {
-          if (recognizerEpoch === this.recognizerEpoch) this.fail(error);
+          if (recognizerEpoch === this.recognizerEpoch && !signal.aborted) this.fail(error);
         },
         signal,
       );
@@ -359,7 +359,13 @@ export class Conversation {
       this.asrReady = undefined;
     })();
     this.asrReady = ready;
-    await ready;
+    try {
+      await ready;
+    } catch (error) {
+      // 旧连接的握手失败可能晚于打断 / 下一轮提问，不能再取消当前对话。
+      if (recognizerEpoch !== this.recognizerEpoch || signal.aborted) return;
+      throw error;
+    }
     if (recognizerEpoch !== this.recognizerEpoch) return;
     // 超时从识别连接就绪后开始计算，握手时间不再吃掉判断窗口。
     if (mode === 'verify' && this.candidate) {
