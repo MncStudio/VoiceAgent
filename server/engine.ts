@@ -104,6 +104,8 @@ export class Conversation {
       /** 回答过程中再次唤醒时的短应答；为空时沿用 wakeAck。 */
       rewakeAck?: string[];
       followupMs: number;
+      /** 每次提问都要先唤醒：关闭回答后的免唤醒追问，以及回答中本人开口即打断。 */
+      wakeRequired?: boolean;
       /** 句子明显没说完（“帮我查询”）时，停顿多久才当作说完；默认 3000ms。 */
       incompleteMs?: number;
       semantic?: SemanticPolicy;
@@ -623,7 +625,7 @@ export class Conversation {
       const stopped = this.rewaking && this.candidate;
       this.rewaking = false;
       this.cancel();
-      if (stopped) {
+      if (stopped && !this.opts.wakeRequired) {
         // 回答已因本地唤醒停止但复核没通过：打开追问窗口，用户可直接说话。
         this.followupUntil = Date.now() + this.opts.followupMs;
         this.timeout = setTimeout(() => {
@@ -801,6 +803,7 @@ export class Conversation {
     if (
       speaking &&
       target &&
+      !this.opts.wakeRequired &&
       (this.state === 'SPEAKING' || this.state === 'THINKING') &&
       !this.barge &&
       !this.candidate
@@ -1015,6 +1018,12 @@ export class Conversation {
       this.turnId = undefined;
       this.emit({ type: 'done', turnId, text: answer });
       this.ackEcho = '';
+      if (this.opts.wakeRequired) {
+        // 每次提问都要先唤醒：回答结束直接待命，不开追问窗口。
+        this.followupUntil = 0;
+        this.setState('IDLE');
+        return;
+      }
       this.followupUntil = Date.now() + this.opts.followupMs;
       this.setState('IDLE');
       this.timeout = setTimeout(() => {

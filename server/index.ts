@@ -84,6 +84,7 @@ app.get('/api/config', (_req, res) =>
     wakeAck: config.WAKE_ACK,
     rewakeAck: config.REWAKE_ACK,
     followupMs: config.FOLLOWUP_MS,
+    wakeRequired: config.WAKE_REQUIRED === 'true',
     llmModel: config.QA_PROVIDER === 'yuxi' ? `yuxi / ${config.YUXI_AGENT_SLUG}` : config.LLM_MODEL,
     asrModel: config.ASR_MODEL,
     ttsModel: config.TTS_MODEL,
@@ -138,6 +139,7 @@ app.post('/api/sessions', (req, res) => {
         .map((s) => s.trim())
         .filter(Boolean),
       followupMs: config.FOLLOWUP_MS,
+      wakeRequired: config.WAKE_REQUIRED === 'true',
       incompleteMs: config.INCOMPLETE_PAUSE_MS,
       speakerReject: Math.max(0, config.SPEAKER_THRESHOLD - 0.15),
       semantic,

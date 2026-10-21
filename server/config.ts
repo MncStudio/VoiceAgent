@@ -52,6 +52,8 @@ const schema = z.object({
   SPECULATIVE: z.enum(['true', 'false']).default('true'),
   // 句子明显没说完（如“帮我查询”“我想查一下”“还有”）时，停顿多久才当作说完（ms）。
   INCOMPLETE_PAUSE_MS: z.coerce.number().min(800).max(8000).default(3000),
+  // 每次提问都要先说唤醒词：关闭回答后的免唤醒追问和回答中本人开口即打断（唤醒词、“别说了 / 暂停”仍可打断）。
+  WAKE_REQUIRED: z.enum(['true', 'false']).default('true'),
   FOLLOWUP_MS: z.coerce.number().min(1000).max(30000).default(8000),
 });
 export type Config = z.infer<typeof schema>;

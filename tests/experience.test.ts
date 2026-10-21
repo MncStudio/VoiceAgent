@@ -456,6 +456,59 @@ describe('说一半想一想不抢答', () => {
     expect(asked).toEqual(['帮我查询A01的库存']);
   });
 });
+describe('每次提问都要先唤醒（WAKE_REQUIRED）', () => {
+  it('回答结束直接待命，不开追问窗口，开口也不识别', async () => {
+    const { c, events, opened } = harness({ wakeRequired: true });
+    c.handle({ type: 'text', text: '天气' });
+    await wait(50);
+    expect(c.state).toBe('IDLE');
+    expect(events.filter((e) => e.type === 'state').at(-1)).toMatchObject({ followupUntil: 0 });
+    c.handle({ type: 'vad', speaking: true, target: false });
+    await wait(20);
+    expect(opened).toHaveLength(0);
+    expect(c.state).toBe('IDLE');
+  });
+  it('回答中本人开口不打断', async () => {
+    let signal: AbortSignal | undefined;
+    const { c, opened } = harness(
+      { wakeRequired: true },
+      {
+        async *chat(_m, s) {
+          signal = s;
+          yield '从前有座山。';
+          await new Promise((_, reject) => s.addEventListener('abort', () => reject(s.reason)));
+        },
+      },
+    );
+    c.handle({ type: 'text', text: '讲个故事' });
+    await wait(20);
+    c.handle({ type: 'speaker', locked: true, match: true });
+    c.handle({ type: 'vad', speaking: true, target: true });
+    await wait(20);
+    expect(opened).toHaveLength(0);
+    expect(signal?.aborted).toBe(false);
+    expect(c.state).toBe('SPEAKING');
+  });
+  it('回答中说唤醒词仍立即打断并应答；复核没通过直接待命', async () => {
+    const { c, events } = harness(
+      { wakeRequired: true, wakeAck: ['我在'] },
+      {
+        async *chat(_m, s) {
+          yield '从前有座山。';
+          await new Promise((_, reject) => s.addEventListener('abort', () => reject(s.reason)));
+        },
+      },
+    );
+    c.handle({ type: 'text', text: '讲个故事' });
+    await wait(20);
+    c.handle({ type: 'wake', source: 'kws' });
+    await wait(20);
+    expect(events.some((e) => e.type === 'interrupted')).toBe(true);
+    await wait(2700);
+    expect(c.state).toBe('IDLE');
+    expect(events.filter((e) => e.type === 'state').at(-1)).toMatchObject({ followupUntil: 0 });
+  });
+});
 describe('思考中声纹续问与关键词打断', () => {
   const thinking = async (question = '帮我查询') => {
     let signal: AbortSignal | undefined;

@@ -24,6 +24,8 @@ export type AppConfig = {
   qaProvider: 'demo' | 'openai' | 'yuxi';
   wakeWord: string;
   followupMs: number;
+  /** 每次提问都要先唤醒（不能免唤醒追问 / 打断）。 */
+  wakeRequired?: boolean;
   wakeAck?: string;
   /** 回答中再次唤醒后的应答，逗号分隔；为空时沿用 wakeAck。 */
   rewakeAck?: string;
