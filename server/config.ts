@@ -38,6 +38,8 @@ const schema = z.object({
   // 唤醒链路是否叠加 RNNoise（浏览器已自带降噪，叠加可能损伤语音，建议实测对比）。
   KWS_DENOISE: z.enum(['true', 'false']).default('true'),
   PORT: z.coerce.number().default(3001),
+  // 同时在线的语音页面数量；失联连接由服务端心跳回收。
+  MAX_SESSIONS: z.coerce.number().int().min(1).max(256).default(32),
   // 监听地址，默认 0.0.0.0（本机和局域网都能访问）；只允许本机访问时填 127.0.0.1。
   // 只能填一个地址，误填成逗号分隔的多个地址时按 0.0.0.0 处理。
   HOST: z

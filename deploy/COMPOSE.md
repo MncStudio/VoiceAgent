@@ -1,5 +1,7 @@
 # VoiceAgent 的 Docker Compose 生产部署
 
+2026-10-22 systemd 语音服务更新：将硬编码的 8 会话上限改为 `MAX_SESSIONS`（默认 32，上限 256），增加 30 秒 WebSocket 心跳并回收失联连接。`/api/health` 返回 `sessions` 和 `maxSessions`，便于确认当前容量。只更新当前 systemd 工作目录下的 `dist/server/index.js`，沿用原模型、SDK 与 `.env`；类型检查和服务构建通过，未执行语音联调测试。当前构建 SHA-256：`65d78567c272963fb8e2fc6fa1f1f449bec9263e3dd2ed6765074c86ed1ba9b4`。本地对应修改在 `server/config.ts` 与 `server/index.ts`，后续发版需包含这两个文件。
+
 > 当前状态（2026-10-21）：已按用户要求切回 systemd，Compose 语音容器已停止并移除。本文件以下内容为此前 Compose 部署记录，不代表当前运行方式。
 >
 > 当前语音代码目录：`/opt/digital-employee-9600/releases/release-20261021-2200/voiceagent`，2026-10-21 晚间与 digital-employee 一起更新，包含本地未提交改动。`.env` 链接至原 `/opt/digital-employee-9600/shared/voiceagent.env`。服务为 `digital-employee-voiceagent.service` 和 `digital-employee-livekit.service`，已启用开机启动。工作目录覆盖文件为 `/etc/systemd/system/digital-employee-voiceagent.service.d/20-native-release.conf`。生产构建通过，按用户要求未运行单元及联调测试。旧 native 和 Compose 文件保留用于历史记录。

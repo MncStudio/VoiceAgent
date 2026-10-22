@@ -42,6 +42,7 @@ type Session = {
   events: Set<WebSocket>;
   agent?: Awaited<ReturnType<typeof joinAgent>>;
   created: number;
+  disconnectedAt?: number;
   voicePending?: Promise<void>;
 };
 const sessions = new Map<string, Session>();
@@ -75,7 +76,7 @@ function wakeTokens() {
   }
   return valid;
 }
-app.get('/api/health', (_req, res) => res.json({ ok: true, provider: config.PROVIDER }));
+app.get('/api/health', (_req, res) => res.json({ ok: true, provider: config.PROVIDER, sessions: sessions.size, maxSessions: config.MAX_SESSIONS }));
 app.get('/api/config', (_req, res) =>
   res.json({
     provider: config.PROVIDER,
@@ -110,8 +111,10 @@ app.get('/api/config', (_req, res) =>
   }),
 );
 app.post('/api/sessions', (req, res) => {
-  if (sessions.size >= 8) {
-    res.status(429).json({ error: '会话数已满，请先断开已有连接。' });
+  reapDisconnectedSessions();
+  if (sessions.size >= config.MAX_SESSIONS) {
+    res.setHeader('Retry-After', '15');
+    res.status(429).json({ error: `语音会话已达上限（${config.MAX_SESSIONS}），请关闭其他语音页面或稍后重试。` });
     return;
   }
   const id = randomUUID();
@@ -199,6 +202,22 @@ app.delete('/api/sessions/:id', async (req, res) => {
   res.sendStatus(204);
 });
 const wss = new WebSocketServer({ noServer: true, maxPayload: 8192 });
+// 浏览器自动响应协议层 ping，失联网页不能永久占用会话名额。
+const awaitingPong = new WeakSet<WebSocket>();
+const heartbeat = setInterval(() => {
+  for (const ws of wss.clients) {
+    if (awaitingPong.has(ws)) {
+      ws.terminate();
+      continue;
+    }
+    if (ws.readyState === WebSocket.OPEN) {
+      awaitingPong.add(ws);
+      ws.ping();
+    }
+  }
+}, 30000);
+heartbeat.unref();
+wss.on('close', () => clearInterval(heartbeat));
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url ?? '/', 'http://localhost');
   const id = url.searchParams.get('session') ?? '';
@@ -209,6 +228,8 @@ server.on('upgrade', (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, (ws) => {
     const session = sessions.get(id)!;
     session.events.add(ws);
+    session.disconnectedAt = undefined;
+    ws.on('pong', () => awaitingPong.delete(ws));
     ws.send(JSON.stringify({ type: 'state', state: session.engine.state }));
     let count = 0,
       windowStart = Date.now();
@@ -231,8 +252,11 @@ server.on('upgrade', (req, socket, head) => {
     });
     ws.on('close', () => {
       session.events.delete(ws);
+      if (session.events.size) return;
+      const disconnectedAt = Date.now();
+      session.disconnectedAt = disconnectedAt;
       setTimeout(() => {
-        if (!session.events.size) void remove(id);
+        if (!session.events.size && session.disconnectedAt === disconnectedAt) void remove(id);
       }, 10000).unref();
     });
   });
@@ -252,10 +276,12 @@ if (existsSync(web)) app.use(express.static(web));
 if (existsSync(web)) app.get('/{*path}', (_req, res) => res.sendFile(path.join(web, 'index.html')));
 // 只回收没有控制连接的会话；常驻使用的助手只要连接还在就不会被定时删除。
 // 有连接的会话在连接关闭 10 秒后由 close 回调回收。
-const cleanup = setInterval(() => {
+function reapDisconnectedSessions() {
   for (const [id, s] of sessions)
-    if (!s.events.size && Date.now() - s.created > 5 * 60 * 1000) void remove(id);
-}, 60000);
+    if (!s.events.size && Date.now() > (s.disconnectedAt === undefined ? s.created + 60000 : s.disconnectedAt + 10000))
+      void remove(id);
+}
+const cleanup = setInterval(reapDisconnectedSessions, 15000);
 cleanup.unref();
 server.listen(config.PORT, config.HOST, () => {
   const lan =
