@@ -2,6 +2,11 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AssistantClient, type AppConfig } from './client';
 import { Avatar } from './Avatar';
+import { Pet } from './pet/Pet';
+import { PetSprite } from './pet/PetSprite';
+import { Scene } from './pet/Scene';
+import { skins, type SkinId } from './pet/skins';
+import { Gallery } from './pet/Gallery';
 import type { AudioStatus } from './audio';
 import type { AssistantState, ServerEvent } from '../../shared/protocol';
 import './style.css';
@@ -21,6 +26,26 @@ const headlines: Record<AssistantState, string> = {
   SPEAKING: '',
   INTERRUPT: '好的，你说',
 };
+const SKIN_KEY = 'chaobao.skin',
+  THEME_KEY = 'chaobao.theme';
+type Theme = 'auto' | 'day' | 'night';
+const params = new URLSearchParams(location.search);
+const stored = (key: string) => {
+  try {
+    return localStorage.getItem(key) ?? undefined;
+  } catch {
+    return undefined;
+  }
+};
+const initialSkin = (): SkinId => {
+  const id = params.get('skin') ?? stored(SKIN_KEY);
+  return id && id in skins ? (id as SkinId) : 'neko';
+};
+const initialTheme = (): Theme => {
+  const id = params.get('theme') ?? stored(THEME_KEY);
+  return id === 'day' || id === 'night' ? id : 'auto';
+};
+const suggestions = ['介绍一下你自己', '帮我整理今天的工作思路', '如何在回答时打断你？'];
 type Entry = { id: string; role: 'user' | 'assistant'; text: string; interrupted?: boolean };
 function Icon({ name, size = 20 }: { name: string; size?: number }) {
   const paths: Record<string, React.ReactNode> = {
@@ -110,6 +135,9 @@ function App() {
     [now, setNow] = useState(Date.now());
   const [latency, setLatency] = useState<number>(),
     [vrm, setVrm] = useState<string>();
+  const [skinId, setSkinId] = useState<SkinId>(initialSkin),
+    [theme, setTheme] = useState<Theme>(initialTheme);
+  const hour = new Date(now).getHours();
   const client = useRef<AssistantClient | undefined>(undefined),
     list = useRef<HTMLDivElement>(null);
   const activeAnswer = useRef<string | undefined>(undefined);
@@ -271,7 +299,7 @@ function App() {
         ? '还想问什么？直接说'
         : voice
           ? `说「${wakeWord}」唤醒我`
-          : '你好，我是你的数字伙伴');
+          : `我是${skins[skinId].name}，你的桌面伙伴`);
   // 舞台字幕：聆听时显示实时转写，回答时显示正在播报的内容。
   const live =
     partial ||
@@ -287,17 +315,52 @@ function App() {
               ? '当前为演示模式，可在下方输入文字体验'
               : '连接麦克风后即可语音对话，也可以直接输入文字');
   const micLevel = state === 'LISTENING' || state === 'CANDIDATE' ? (audio?.level ?? 0) : level;
-  const ring = 2 * Math.PI * 54;
+  const ring = 2 * Math.PI * 31;
+  const night = theme === 'night' || (theme === 'auto' && (hour >= 19 || hour < 6));
+  const pickSkin = (id: SkinId) => {
+    setSkinId(id);
+    try {
+      localStorage.setItem(SKIN_KEY, id);
+    } catch {
+      /* 隐私模式下忽略 */
+    }
+  };
   return (
     <div
       className={`app state-${state.toLowerCase()} ${historyOpen ? 'history-open' : ''}`}
       style={{ '--level': Math.min(1, micLevel).toFixed(3) } as React.CSSProperties}
     >
+      <Scene night={night} notes={suggestions} onNote={(text) => void send(text)}>
+        {vrm ? (
+          <div className="vrm-stage">
+            <div className="caption">
+              <h1>{headline}</h1>
+              <p className={`live-text ${partial ? 'is-partial' : ''}`} aria-live="polite">
+                {live}
+              </p>
+            </div>
+            <Avatar state={state} level={level} vrmUrl={vrm} />
+          </div>
+        ) : (
+          <Pet
+            skin={skins[skinId]}
+            state={state}
+            mouth={level}
+            voice={voice}
+            wakeWord={wakeWord}
+            headline={headline}
+            live={live}
+            partial={!!partial}
+            important={state !== 'IDLE' || countdown > 0 || !!partial}
+            onWake={() => void wake()}
+          />
+        )}
+      </Scene>
       <header className="topbar">
         <a className="brand" href="/" aria-label="超宝首页">
-          <img src="/favicon.svg" alt="" width={34} height={34} />
+          <img src="/favicon.svg" alt="" width={32} height={32} />
           <strong>超宝</strong>
-          <span>数字人语音助手</span>
+          <span>桌宠语音助手</span>
         </a>
         <div className="topbar-status">
           <span className={`status-pill ${voice ? 'online' : ''}`}>
@@ -305,6 +368,7 @@ function App() {
             {voice ? '语音已连接' : '语音未连接'}
           </span>
           <span className="mode-pill">
+            {labels[state]} ·{' '}
             {config?.provider === 'demo'
               ? '演示模式'
               : config?.qaProvider === 'yuxi'
@@ -329,171 +393,146 @@ function App() {
           </button>
         </div>
       </header>
-      <main className="layout">
-        <section className="stage" aria-label="语音对话">
-          <div className="visual">
-            <div className="aura" aria-hidden="true">
-              <i className="aura-glow" />
-              <i className="aura-ring one" />
-              <i className="aura-ring two" />
-            </div>
-            <Avatar state={state} level={level} vrmUrl={vrm} />
-          </div>
-          <div className="caption">
-            <span className="state-chip">
-              <i />
-              {labels[state]}
-            </span>
-            <h1>{headline}</h1>
-            <p className={`live-text ${partial ? 'is-partial' : ''}`} aria-live="polite">
-              {live}
-              {partial && <span className="typing-cursor" />}
-            </p>
-          </div>
-          {(error || notice) && (
-            <div className={`toast ${error ? 'error' : ''}`} role={error ? 'alert' : 'status'}>
-              <span>{error || notice}</span>
-              <button
-                aria-label="关闭提示"
-                onClick={() => {
-                  setError('');
-                  setNotice('');
-                }}
-              >
-                <Icon name="close" size={14} />
-              </button>
-            </div>
-          )}
-          <div className="dock">
-            <button
-              className={`dock-button ${voice ? 'active' : ''}`}
-              onClick={connectVoice}
-              disabled={busy || config?.provider === 'demo'}
-              aria-label={voice ? '断开麦克风' : '连接麦克风'}
-              title={voice ? '断开麦克风' : '连接麦克风'}
-            >
-              <Icon name={voice ? 'mic' : 'micOff'} />
-              <span>{busy ? '连接中' : voice ? '麦克风开' : '连接麦克风'}</span>
-            </button>
-            <div className="orb-wrap">
-              <svg className="orb-ring" viewBox="0 0 120 120" aria-hidden="true">
-                <circle cx="60" cy="60" r="54" />
-                <circle
-                  className="progress"
-                  cx="60"
-                  cy="60"
-                  r="54"
-                  strokeDasharray={ring}
-                  strokeDashoffset={ring * (1 - followupLeft)}
-                />
-              </svg>
-              <button
-                className="orb"
-                onClick={wake}
-                disabled={busy}
-                aria-label={answering ? '打断并提问' : '点按唤醒'}
-                title={answering ? '打断并提问' : '点按唤醒'}
-              >
-                <span className="orb-bars" aria-hidden="true">
-                  {[0.55, 0.85, 1, 0.85, 0.55].map((k, i) => (
-                    <i key={i} style={{ '--k': k } as React.CSSProperties} />
-                  ))}
-                </span>
-                <Icon name="mic" size={30} />
-              </button>
-            </div>
-            <button
-              className={`dock-button stop ${answering ? 'armed' : ''}`}
-              onClick={() => client.current?.send({ type: 'interrupt', reason: 'stop' })}
-              disabled={!connected}
-              aria-label="停止回答"
-              title="停止回答"
-            >
-              <Icon name="square" />
-              <span>停止</span>
-            </button>
-          </div>
-          <form
-            className="composer"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void send();
+      {(error || notice) && (
+        <div className={`toast ${error ? 'error' : ''}`} role={error ? 'alert' : 'status'}>
+          <span>{error || notice}</span>
+          <button
+            aria-label="关闭提示"
+            onClick={() => {
+              setError('');
+              setNotice('');
             }}
           >
-            <input
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="输入文字和超宝聊天…"
-              aria-label="输入消息"
-              maxLength={2000}
+            <Icon name="close" size={14} />
+          </button>
+        </div>
+      )}
+      <div className="dock">
+        <button
+          className={`dock-button ${voice ? 'active' : ''}`}
+          onClick={connectVoice}
+          disabled={busy || config?.provider === 'demo'}
+          aria-label={voice ? '断开麦克风' : '连接麦克风'}
+          title={voice ? '断开麦克风' : '连接麦克风'}
+        >
+          <Icon name={voice ? 'mic' : 'micOff'} />
+          <span>{busy ? '连接中' : voice ? '麦克风开' : '连接麦克风'}</span>
+        </button>
+        <div className="orb-wrap">
+          <svg className="orb-ring" viewBox="0 0 70 70" aria-hidden="true">
+            <circle cx="35" cy="35" r="31" />
+            <circle
+              className="progress"
+              cx="35"
+              cy="35"
+              r="31"
+              strokeDasharray={ring}
+              strokeDashoffset={ring * (1 - followupLeft)}
             />
-            <button aria-label="发送消息" disabled={!input.trim() || busy}>
-              <Icon name="send" size={18} />
-            </button>
-          </form>
-        </section>
-        <aside className="history" aria-label="对话记录面板">
-          <div className="history-header">
-            <h2>
-              对话记录 <span>{entries.length}</span>
-            </h2>
-            <button className="icon-button small" aria-label="清空对话" onClick={reset}>
-              <Icon name="refresh" size={16} />
-            </button>
-            <button
-              className="icon-button small history-close"
-              aria-label="收起对话记录"
-              onClick={() => setHistoryOpen(false)}
-            >
-              <Icon name="close" size={16} />
-            </button>
-          </div>
-          <div className="messages" ref={list}>
-            {entries.length === 0 ? (
-              <div className="empty-conversation">
-                <h3>你好，我是超宝</h3>
-                <p>想聊什么，尽管开口。也可以从这些话题开始：</p>
-                <div className="suggestions">
-                  {['介绍一下你自己', '帮我整理今天的工作思路', '如何在回答时打断你？'].map(
-                    (text) => (
-                      <button onClick={() => void send(text)} key={text}>
-                        {text}
-                        <Icon name="arrow" size={14} />
-                      </button>
-                    ),
-                  )}
+          </svg>
+          <button
+            className="orb"
+            onClick={wake}
+            disabled={busy}
+            aria-label={answering ? '打断并提问' : '点按唤醒'}
+            title={answering ? '打断并提问' : '点按唤醒'}
+          >
+            <span className="orb-bars" aria-hidden="true">
+              {[0.55, 0.85, 1, 0.85, 0.55].map((k, i) => (
+                <i key={i} style={{ '--k': k } as React.CSSProperties} />
+              ))}
+            </span>
+            <Icon name="mic" size={24} />
+          </button>
+        </div>
+        <form
+          className="composer"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void send();
+          }}
+        >
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder={`和${skins[skinId].name}聊点什么…`}
+            aria-label="输入消息"
+            maxLength={2000}
+          />
+          <button aria-label="发送消息" disabled={!input.trim() || busy}>
+            <Icon name="send" size={18} />
+          </button>
+        </form>
+        <button
+          className={`dock-button stop ${answering ? 'armed' : ''}`}
+          onClick={() => client.current?.send({ type: 'interrupt', reason: 'stop' })}
+          disabled={!connected}
+          aria-label="停止回答"
+          title="停止回答"
+        >
+          <Icon name="square" />
+          <span>停止</span>
+        </button>
+      </div>
+      <aside className="history" aria-label="对话记录面板">
+        <div className="history-header">
+          <h2>
+            对话记录 <span>{entries.length}</span>
+          </h2>
+          <button className="icon-button small" aria-label="清空对话" onClick={reset}>
+            <Icon name="refresh" size={16} />
+          </button>
+          <button
+            className="icon-button small history-close"
+            aria-label="收起对话记录"
+            onClick={() => setHistoryOpen(false)}
+          >
+            <Icon name="close" size={16} />
+          </button>
+        </div>
+        <div className="messages" ref={list}>
+          {entries.length === 0 ? (
+            <div className="empty-conversation">
+              <h3>你好，我是超宝</h3>
+              <p>想聊什么，尽管开口。也可以从这些话题开始：</p>
+              <div className="suggestions">
+                {suggestions.map((text) => (
+                  <button onClick={() => void send(text)} key={text}>
+                    {text}
+                    <Icon name="arrow" size={14} />
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : (
+            entries.map((item) => (
+              <article className={`message ${item.role}`} key={item.id}>
+                <div className="message-author">
+                  {item.role === 'user' ? '你' : '超宝'}
+                  {item.interrupted && <small>已打断</small>}
                 </div>
-              </div>
-            ) : (
-              entries.map((item) => (
-                <article className={`message ${item.role}`} key={item.id}>
-                  <div className="message-author">
-                    {item.role === 'user' ? '你' : '超宝'}
-                    {item.interrupted && <small>已打断</small>}
-                  </div>
-                  <div className="message-text">
-                    {item.text || (item.interrupted ? '回答已停止' : '…')}
-                  </div>
-                </article>
-              ))
-            )}
-            {partial && (
-              <article className="message user partial">
-                <div className="message-author">正在识别</div>
-                <div className="message-text">{partial}</div>
+                <div className="message-text">
+                  {item.text || (item.interrupted ? '回答已停止' : '…')}
+                </div>
               </article>
-            )}
-            {state === 'THINKING' && (
-              <div className="thinking-dots" aria-label="思考中">
-                <i />
-                <i />
-                <i />
-              </div>
-            )}
-          </div>
-          <p className="history-tip">回复由 AI 生成，请核实重要信息</p>
-        </aside>
-      </main>
+            ))
+          )}
+          {partial && (
+            <article className="message user partial">
+              <div className="message-author">正在识别</div>
+              <div className="message-text">{partial}</div>
+            </article>
+          )}
+          {state === 'THINKING' && (
+            <div className="thinking-dots" aria-label="思考中">
+              <i />
+              <i />
+              <i />
+            </div>
+          )}
+        </div>
+        <p className="history-tip">回复由 AI 生成，请核实重要信息</p>
+      </aside>
       {settings && (
         <div className="modal-backdrop" onClick={() => setSettings(false)}>
           <section
@@ -504,7 +543,7 @@ function App() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="modal-header">
-              <h2 id="settings-title">语音与形象</h2>
+              <h2 id="settings-title">桌宠与语音</h2>
               <button
                 className="icon-button small"
                 aria-label="关闭设置"
@@ -513,6 +552,54 @@ function App() {
                 <Icon name="close" />
               </button>
             </div>
+            <h3 className="settings-section">桌宠形象</h3>
+            <div className="skin-picker" role="radiogroup" aria-label="桌宠形象">
+              {Object.values(skins).map((s) => (
+                <button
+                  key={s.id}
+                  role="radio"
+                  aria-checked={!vrm && s.id === skinId}
+                  className="skin-card"
+                  onClick={() => {
+                    pickSkin(s.id);
+                    if (vrm) {
+                      URL.revokeObjectURL(vrm);
+                      setVrm(undefined);
+                    }
+                  }}
+                >
+                  <PetSprite skin={s} pose="sit" mouth={0} />
+                  <b>{s.name}</b>
+                  <small>{s.intro}</small>
+                </button>
+              ))}
+            </div>
+            <div className="theme-picker" role="radiogroup" aria-label="场景">
+              {(
+                [
+                  ['auto', '跟随时间'],
+                  ['day', '白天'],
+                  ['night', '夜晚'],
+                ] as const
+              ).map(([id, name]) => (
+                <button
+                  key={id}
+                  role="radio"
+                  aria-checked={theme === id}
+                  onClick={() => {
+                    setTheme(id);
+                    try {
+                      localStorage.setItem(THEME_KEY, id);
+                    } catch {
+                      /* 忽略 */
+                    }
+                  }}
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+            <h3 className="settings-section">语音能力</h3>
             <div className="capabilities">
               {Object.entries({
                 唤醒词: wakeWord,
@@ -536,7 +623,7 @@ function App() {
               ))}
             </div>
             <label className="upload-label">
-              导入自己的 VRM 形象
+              {vrm ? '更换 VRM 形象' : '改用自己的 VRM 3D 形象'}
               <input
                 type="file"
                 accept=".vrm"
@@ -550,8 +637,8 @@ function App() {
               />
             </label>
             <p className="settings-hint">
-              VRM
-              仅在浏览器内读取。追问无需唤醒词，锁定声纹后明显不是本人的话会被忽略；免唤醒打断需要声纹匹配。口型目前按音频能量驱动，字级时间戳为估算。
+              桌宠会自己散步、敲电脑、喝咖啡、打盹；可以拖着它走，点它可以唤醒（未连麦克风时是摸摸头）。VRM
+              仅在浏览器内读取，选回上面的桌宠形象即可恢复。
             </p>
           </section>
         </div>
@@ -559,4 +646,4 @@ function App() {
     </div>
   );
 }
-createRoot(document.getElementById('root')!).render(<App />);
+createRoot(document.getElementById('root')!).render(params.has('gallery') ? <Gallery /> : <App />);

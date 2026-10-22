@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import './avatar.css';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils, type VRM } from '@pixiv/three-vrm';
