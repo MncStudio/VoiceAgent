@@ -94,6 +94,20 @@ export class Conversation {
   private hostAnswer?: { turnId: string; queue: AsyncQueue<string>; size: number };
   private speculative?: { text: string; queue: AsyncQueue<string>; abort: AbortController };
   private speculationTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * 未唤醒旁听：待机（以及 WAKE_REQUIRED 下回答中）有人开口但端侧唤醒没命中时，
+   * 单独开一条识别流听这句话，说完只写日志“听成了什么”，不触发任何对话。
+   */
+  private probe?: {
+    stream?: ASRStream;
+    pending: Buffer[];
+    abort: AbortController;
+    committed: string;
+    partial: string;
+    state: AssistantState;
+    done?: ReturnType<typeof setTimeout>;
+    limit: ReturnType<typeof setTimeout>;
+  };
   constructor(
     private p: Providers,
     private emit: (e: ServerEvent) => void,
@@ -114,6 +128,8 @@ export class Conversation {
       external?: boolean;
       /** 整句声纹低于该分数且时长足够时才判为他人；默认 0.35。 */
       speakerReject?: number;
+      /** 没唤醒时也识别开口的内容并写日志（排查唤醒词没喊醒 / 听错），不影响对话；默认关闭。 */
+      missLog?: boolean;
     },
     private audio?: AudioOutput,
   ) {}
@@ -197,6 +213,8 @@ export class Conversation {
     this.audio?.clear();
   }
   private setState(state: AssistantState) {
+    // 状态变化（唤醒、开始回答、回答结束）时旁听作废：这句话已经有了去处。
+    if (this.probe && state !== this.probe.state) this.closeProbe();
     this.state = state;
     this.emit({ type: 'state', state, followupUntil: this.followupUntil });
   }
@@ -262,6 +280,10 @@ export class Conversation {
   }
   ingest(pcm: Buffer) {
     this.ring.push(pcm);
+    if (this.probe) {
+      if (this.probe.stream) this.probe.stream.write(pcm);
+      else if (this.probe.pending.length < 150) this.probe.pending.push(Buffer.from(pcm));
+    }
     if (this.asr) this.asr.write(pcm);
     else if (this.asrReady && this.pendingAudio.length < 150)
       this.pendingAudio.push(Buffer.from(pcm));
@@ -355,6 +377,7 @@ export class Conversation {
     if (reason === 'wake') this.acknowledge(this.acks(true));
   }
   private async wake(source: 'button' | 'kws') {
+    this.closeProbe();
     if (source === 'kws' && this.state === 'LISTENING' && (this.asr || this.asrReady)) {
       // 这条识别流上已确认过唤醒（识别结果先于本地唤醒到达），不重复复核、不重复应答。
       // 浏览器命中本地唤醒时已先显示“疑似唤醒”，重发当前状态让界面恢复。
@@ -791,6 +814,7 @@ export class Conversation {
       // 用户一开口就预热识别连接；唤醒词说完时握手已完成。
       if (!this.asr && !this.asrReady) this.p.asr.warm?.();
     }
+    this.probeVad(speaking);
     if (speaking) {
       clearTimeout(this.endpoint);
       clearTimeout(this.speculationTimer);
@@ -825,6 +849,83 @@ export class Conversation {
       this.setState('LISTENING');
       void this.listen('query', this.preRoll(), 3000).catch((e) => this.fail(e));
     }
+  }
+  /** 未唤醒旁听：开口时开流（续说沿用同一条），说完 1.5s 内等最终结果再写日志。 */
+  private probeVad(speaking: boolean) {
+    const probe = this.probe;
+    if (probe) {
+      clearTimeout(probe.done);
+      if (!speaking) probe.done = setTimeout(() => this.closeProbe(true), 1500);
+      return;
+    }
+    if (!speaking || !this.opts.missLog || this.p.demo || this.disposed) return;
+    const idle =
+      this.state === 'IDLE' && Date.now() >= this.followupUntil && !this.followupListening;
+    const answering =
+      !!this.opts.wakeRequired &&
+      (this.state === 'SPEAKING' || this.state === 'THINKING') &&
+      !this.barge &&
+      !this.candidate;
+    if (!idle && !answering) return;
+    if (this.asr || this.asrReady) return;
+    const abort = new AbortController();
+    const next: NonNullable<Conversation['probe']> = {
+      pending: [],
+      abort,
+      committed: '',
+      partial: '',
+      state: this.state,
+      // 一直有人声（电视、旁人聊天）也最多旁听 15s。
+      limit: setTimeout(() => this.probe === next && this.closeProbe(true), 15000),
+    };
+    this.probe = next;
+    const initial = this.ring.snapshot();
+    const bytes = Math.floor(this.preRoll() * 16) * 2;
+    void this.p.asr
+      .open(
+        (result) => {
+          if (this.probe !== next) return;
+          if (result.final) {
+            next.committed += result.text;
+            next.partial = '';
+          } else next.partial = result.text;
+        },
+        () => {
+          if (this.probe === next) this.closeProbe();
+        },
+        abort.signal,
+      )
+      .then((stream) => {
+        if (this.probe !== next || abort.signal.aborted) return stream.close();
+        next.stream = stream;
+        stream.write(initial.subarray(Math.max(0, initial.length - bytes)));
+        for (const pcm of next.pending) stream.write(pcm);
+        next.pending = [];
+      })
+      .catch(() => {
+        if (this.probe === next) this.closeProbe();
+      });
+  }
+  private closeProbe(log = false) {
+    const probe = this.probe;
+    if (!probe) return;
+    this.probe = undefined;
+    clearTimeout(probe.done);
+    clearTimeout(probe.limit);
+    probe.abort.abort();
+    probe.stream?.close();
+    const text = (probe.committed + probe.partial).trim();
+    if (!log || !text) return;
+    const answering = probe.state === 'SPEAKING' || probe.state === 'THINKING';
+    // 回答中旁听到的多半是播报回声，回声不记。
+    if (answering && isEcho(text, this.answer)) return;
+    const where = answering ? '回答中' : '待机时';
+    const hint = hasWake(text, this.opts.wakeWord)
+      ? '，识别结果含唤醒词，端侧唤醒没命中'
+      : hasWake(text, this.opts.wakeWord, true)
+        ? '，接近唤醒词（差一个音节），端侧唤醒没命中'
+        : '';
+    console.info(`[wake] ${where}未唤醒，听到：“${text}”${hint}`);
   }
   private logRejected() {
     console.info(
@@ -879,7 +980,10 @@ export class Conversation {
     if (host) {
       this.hostAnswer = host;
       // 宿主失联/未完成时不能让会话永久停在 THINKING。
-      this.timeout = setTimeout(() => this.fail(new Error('业务回答超时，请重新提问。')), 10 * 60 * 1000);
+      this.timeout = setTimeout(
+        () => this.fail(new Error('业务回答超时，请重新提问。')),
+        10 * 60 * 1000,
+      );
       this.emit({ type: 'question', turnId, text });
     }
     const start = performance.now();
@@ -1054,6 +1158,7 @@ export class Conversation {
   }
   close() {
     this.disposed = true;
+    this.closeProbe();
     this.cancel();
     this.ring.clear();
     this.p.asr.close?.();
