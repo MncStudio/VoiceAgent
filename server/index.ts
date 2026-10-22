@@ -143,6 +143,7 @@ app.post('/api/sessions', (req, res) => {
         .filter(Boolean),
       followupMs: config.FOLLOWUP_MS,
       wakeRequired: config.WAKE_REQUIRED === 'true',
+      missLog: config.WAKE_MISS_LOG === 'true',
       incompleteMs: config.INCOMPLETE_PAUSE_MS,
       speakerReject: Math.max(0, config.SPEAKER_THRESHOLD - 0.15),
       semantic,

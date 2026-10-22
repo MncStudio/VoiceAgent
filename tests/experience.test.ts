@@ -795,3 +795,51 @@ describe('百炼 TTS 预热连接', () => {
     server.close();
   });
 });
+describe('没唤醒时打印听到的内容（WAKE_MISS_LOG）', () => {
+  it('待机时开口但端侧唤醒没命中：单独识别并写日志，不触发对话', async () => {
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const { c, opened, events } = harness({ missLog: true, wakeRequired: true });
+    c.handle({ type: 'vad', speaking: true, target: false });
+    await wait(10);
+    expect(opened).toHaveLength(1);
+    opened[0].result({ text: '你好朝宝', final: false });
+    opened[0].result({ text: '你好朝宝，几点了', final: true });
+    c.handle({ type: 'vad', speaking: false, target: false });
+    await wait(1600);
+    expect(opened[0].closed).toBe(true);
+    expect(c.state).toBe('IDLE');
+    expect(events.some((e) => e.type === 'transcript' && e.text)).toBe(false);
+    const line = log.mock.calls.map((a) => String(a[0])).find((m) => m.includes('未唤醒'));
+    expect(line).toContain('待机时未唤醒，听到：“你好朝宝，几点了”');
+    expect(line).toContain('端侧唤醒没命中');
+    log.mockRestore();
+  });
+  it('旁听期间端侧唤醒命中：旁听作废不写日志，按正常唤醒复核', async () => {
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const { c, opened } = harness({ missLog: true });
+    c.handle({ type: 'vad', speaking: true, target: false });
+    await wait(10);
+    opened[0].result({ text: '你好超宝', final: false });
+    c.handle({ type: 'wake', source: 'kws' });
+    await wait(20);
+    expect(opened[0].closed).toBe(true);
+    expect(opened).toHaveLength(2);
+    expect(c.state).toBe('CANDIDATE');
+    c.handle({ type: 'vad', speaking: false, target: false });
+    await wait(1600);
+    expect(log.mock.calls.some((a) => String(a[0]).includes('未唤醒'))).toBe(false);
+    log.mockRestore();
+  });
+  it('普通说话不含唤醒词：只记听到的内容', async () => {
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const { c, opened } = harness({ missLog: true });
+    c.handle({ type: 'vad', speaking: true, target: false });
+    await wait(10);
+    opened[0].result({ text: '今天吃什么', final: true });
+    c.handle({ type: 'vad', speaking: false, target: false });
+    await wait(1600);
+    const line = log.mock.calls.map((a) => String(a[0])).find((m) => m.includes('未唤醒'));
+    expect(line).toBe('[wake] 待机时未唤醒，听到：“今天吃什么”');
+    log.mockRestore();
+  });
+});

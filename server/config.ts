@@ -56,6 +56,9 @@ const schema = z.object({
   INCOMPLETE_PAUSE_MS: z.coerce.number().min(800).max(8000).default(3000),
   // 每次提问都要先说唤醒词：关闭回答后的免唤醒追问和回答中本人开口即打断（唤醒词、“别说了 / 暂停”仍可打断）。
   WAKE_REQUIRED: z.enum(['true', 'false']).default('true'),
+  // 没唤醒时也识别开口的内容并写日志“[wake] 待机时未唤醒，听到：…”，排查唤醒词没喊醒 / 听错。
+  // 只写日志不触发对话；开启后待机时的说话声也会送去识别（有识别用量）。
+  WAKE_MISS_LOG: z.enum(['true', 'false']).default('true'),
   FOLLOWUP_MS: z.coerce.number().min(1000).max(30000).default(8000),
 });
 export type Config = z.infer<typeof schema>;
