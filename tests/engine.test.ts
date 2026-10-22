@@ -350,6 +350,37 @@ describe('真实会话编排', () => {
 });
 
 describe('宿主流式回答', () => {
+  it('业务回答可等待超过两分钟，满十分钟仍未完成才超时', async () => {
+    vi.useFakeTimers();
+    const { c, events } = harness(undefined, false, { external: true, wakeRequired: true });
+    c.handle({ type: 'text', text: '耗时业务问题' });
+    await vi.advanceTimersByTimeAsync(120000);
+    expect(events.some((e) => e.type === 'question')).toBe(true);
+    expect(events.some((e) => e.type === 'error')).toBe(false);
+    expect(c.state).toBe('THINKING');
+    await vi.advanceTimersByTimeAsync(480000 - 1);
+    expect(events.some((e) => e.type === 'error')).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(events.filter((e) => e.type === 'error')).toEqual([
+      { type: 'error', message: '业务回答超时，请重新提问。' },
+    ]);
+    expect(c.state).toBe('IDLE');
+  });
+
+  it('超过两分钟后正常收到完整业务回答，清除超时计时器', async () => {
+    vi.useFakeTimers();
+    const { c, events } = harness(undefined, false, { external: true, wakeRequired: true });
+    c.handle({ type: 'text', text: '耗时业务问题' });
+    await vi.advanceTimersByTimeAsync(180000);
+    const question = events.find((e) => e.type === 'question');
+    if (question?.type !== 'question') throw new Error('缺少宿主事件');
+    c.handle({ type: 'host-answer', turnId: question.turnId, text: '业务回答。', done: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events.find((e) => e.type === 'done')).toMatchObject({ text: '业务回答。' });
+    await vi.advanceTimersByTimeAsync(600000);
+    expect(events.some((e) => e.type === 'error')).toBe(false);
+  });
+
   it('只请求一次宿主问答，未结束就开始合成，并按顺序播完', async () => {
     const llm = {
       chat: vi.fn(async function* () {

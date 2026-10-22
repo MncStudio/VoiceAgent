@@ -835,7 +835,7 @@ export class Conversation {
   private finishBarge() {
     if (this.candidate) this.logRejected();
     this.closeRecognizer();
-    // timeout 此时可能是宿主问答的 120 秒兜底，只有唤醒复核才需要清掉。
+    // timeout 此时可能是宿主问答的 10 分钟兜底，只有唤醒复核才需要清掉。
     if (this.candidate) clearTimeout(this.timeout);
     this.barge = false;
     this.candidate = false;
@@ -879,7 +879,7 @@ export class Conversation {
     if (host) {
       this.hostAnswer = host;
       // 宿主失联/未完成时不能让会话永久停在 THINKING。
-      this.timeout = setTimeout(() => this.fail(new Error('业务回答超时，请重新提问。')), 120000);
+      this.timeout = setTimeout(() => this.fail(new Error('业务回答超时，请重新提问。')), 10 * 60 * 1000);
       this.emit({ type: 'question', turnId, text });
     }
     const start = performance.now();

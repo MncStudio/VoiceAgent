@@ -8,18 +8,20 @@ const base = 'http://127.0.0.1:3109';
 const ids: string[] = [];
 beforeAll(async () => {
   child = spawn(process.execPath, ['--import', 'tsx', 'server/index.ts'], {
-    env: { ...process.env, PROVIDER: 'demo', PORT: '3109', HOST: '127.0.0.1' },
+    env: { ...process.env, PROVIDER: 'demo', PORT: '3109', HOST: '127.0.0.1', WAKE_WORD: '你好超宝' },
     stdio: 'pipe',
     windowsHide: true,
   });
-  for (let i = 0; i < 80; i++) {
+  // tsx 冷启动在 Windows 或繁忙构建机上可能超过四秒。
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
     try {
       if ((await fetch(`${base}/api/health`)).ok) return;
     } catch {}
     await new Promise((r) => setTimeout(r, 50));
   }
   throw new Error('测试服务启动超时');
-});
+}, 20000);
 afterAll(async () => {
   for (const id of ids)
     await fetch(`${base}/api/sessions/${id}`, { method: 'DELETE' }).catch(() => {});
