@@ -1,0 +1,63 @@
+/* 3D 桌宠：WebGL 画布铺满场景，气泡 / 状态牌 / 特效是跟随桌宠投影坐标的 HTML 叠层。 */
+.pet3d,
+.pet3d-canvas,
+.pet3d-overlay {
+  position: absolute;
+  inset: 0;
+}
+.pet-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+.pet3d-overlay {
+  --hx: -999px;
+  --hy: -999px;
+  --fx: -999px;
+  --fy: -999px;
+  --shift: 0px;
+  pointer-events: none;
+  z-index: 2;
+}
+.pet3d-overlay .pet-bubble {
+  left: var(--hx);
+  top: var(--hy);
+  bottom: auto;
+  transform: translate(calc(-50% + var(--shift)), calc(-100% - 12px));
+}
+.pet3d-overlay .pet-tag {
+  left: var(--fx);
+  top: calc(var(--fy) + 10px);
+}
+.pet3d-overlay .pet-fx {
+  left: var(--hx);
+  top: calc(var(--hy) + 30px);
+}
+.pet3d-overlay .fx-zzz {
+  left: 60px;
+  top: 10px;
+}
+.pet3d-overlay .fx-mark {
+  left: 70px;
+  top: -6px;
+}
+.pet3d-a11y {
+  position: absolute;
+  left: var(--hx);
+  top: var(--hy);
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  opacity: 0;
+}
+.pet3d-a11y:focus-visible {
+  width: 200px;
+  height: 220px;
+  margin-left: -100px;
+  opacity: 1;
+  border-radius: 40%;
+  outline: 3px solid var(--accent-soft);
+  background: transparent;
+}

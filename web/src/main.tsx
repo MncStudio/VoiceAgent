@@ -7,6 +7,32 @@ import { PetSprite } from './pet/PetSprite';
 import { Scene } from './pet/Scene';
 import { skins, type SkinId } from './pet/skins';
 import { Gallery } from './pet/Gallery';
+import { Pet3D } from './pet3d/Pet3D';
+import { hasWebGL, snapshots } from './pet3d/world';
+const webgl = hasWebGL();
+
+const thumbs: Partial<Record<SkinId, string>> = {};
+/** 设置面板里的形象缩略图：有 WebGL 时离屏渲染一张 3D 照片（缓存），否则用平面版。 */
+function SkinThumb({ skin }: { skin: (typeof skins)[SkinId] }) {
+  const [src, setSrc] = useState(thumbs[skin.id]);
+  useEffect(() => {
+    if (!webgl || src) return;
+    const t = setTimeout(() => {
+      try {
+        thumbs[skin.id] ??= snapshots(skin, ['sit'], 240, 280)[0];
+        setSrc(thumbs[skin.id]);
+      } catch {
+        /* 渲染失败就继续用平面版 */
+      }
+    }, 60);
+    return () => clearTimeout(t);
+  }, [skin, src]);
+  return src ? (
+    <img className="skin-thumb" src={src} alt="" />
+  ) : (
+    <PetSprite skin={skin} pose="sit" mouth={0} />
+  );
+}
 import type { AudioStatus } from './audio';
 import type { AssistantState, ServerEvent } from '../../shared/protocol';
 import './style.css';
@@ -138,6 +164,12 @@ function App() {
   const [skinId, setSkinId] = useState<SkinId>(initialSkin),
     [theme, setTheme] = useState<Theme>(initialTheme);
   const hour = new Date(now).getHours();
+  const [wide, setWide] = useState(() => innerWidth >= 1100);
+  useEffect(() => {
+    const onResize = () => setWide(innerWidth >= 1100);
+    addEventListener('resize', onResize);
+    return () => removeEventListener('resize', onResize);
+  }, []);
   const client = useRef<AssistantClient | undefined>(undefined),
     list = useRef<HTMLDivElement>(null);
   const activeAnswer = useRef<string | undefined>(undefined);
@@ -316,6 +348,7 @@ function App() {
               : '连接麦克风后即可语音对话，也可以直接输入文字');
   const micLevel = state === 'LISTENING' || state === 'CANDIDATE' ? (audio?.level ?? 0) : level;
   const ring = 2 * Math.PI * 31;
+  const important = state !== 'IDLE' || countdown > 0 || !!partial;
   const night = theme === 'night' || (theme === 'auto' && (hour >= 19 || hour < 6));
   const pickSkin = (id: SkinId) => {
     setSkinId(id);
@@ -330,32 +363,52 @@ function App() {
       className={`app state-${state.toLowerCase()} ${historyOpen ? 'history-open' : ''}`}
       style={{ '--level': Math.min(1, micLevel).toFixed(3) } as React.CSSProperties}
     >
-      <Scene night={night} notes={suggestions} onNote={(text) => void send(text)}>
-        {vrm ? (
-          <div className="vrm-stage">
-            <div className="caption">
-              <h1>{headline}</h1>
-              <p className={`live-text ${partial ? 'is-partial' : ''}`} aria-live="polite">
-                {live}
-              </p>
+      {vrm || !webgl ? (
+        <Scene night={night} notes={suggestions} onNote={(text) => void send(text)}>
+          {vrm ? (
+            <div className="vrm-stage">
+              <div className="caption">
+                <h1>{headline}</h1>
+                <p className={`live-text ${partial ? 'is-partial' : ''}`} aria-live="polite">
+                  {live}
+                </p>
+              </div>
+              <Avatar state={state} level={level} vrmUrl={vrm} />
             </div>
-            <Avatar state={state} level={level} vrmUrl={vrm} />
-          </div>
-        ) : (
-          <Pet
-            skin={skins[skinId]}
-            state={state}
-            mouth={level}
-            voice={voice}
-            wakeWord={wakeWord}
-            headline={headline}
-            live={live}
-            partial={!!partial}
-            important={state !== 'IDLE' || countdown > 0 || !!partial}
-            onWake={() => void wake()}
-          />
-        )}
-      </Scene>
+          ) : (
+            <Pet
+              skin={skins[skinId]}
+              state={state}
+              mouth={level}
+              voice={voice}
+              wakeWord={wakeWord}
+              headline={headline}
+              live={live}
+              partial={!!partial}
+              important={important}
+              onWake={() => void wake()}
+            />
+          )}
+        </Scene>
+      ) : (
+        <Pet3D
+          skin={skins[skinId]}
+          night={night}
+          state={state}
+          mouth={level}
+          micLevel={audio?.level ?? 0}
+          voice={voice}
+          wakeWord={wakeWord}
+          headline={headline}
+          live={live}
+          partial={!!partial}
+          important={important}
+          side={historyOpen && wide ? 384 : 0}
+          notes={suggestions}
+          onNote={(text) => void send(text)}
+          onWake={() => void wake()}
+        />
+      )}
       <header className="topbar">
         <a className="brand" href="/" aria-label="超宝首页">
           <img src="/favicon.svg" alt="" width={32} height={32} />
@@ -568,7 +621,7 @@ function App() {
                     }
                   }}
                 >
-                  <PetSprite skin={s} pose="sit" mouth={0} />
+                  <SkinThumb skin={s} />
                   <b>{s.name}</b>
                   <small>{s.intro}</small>
                 </button>

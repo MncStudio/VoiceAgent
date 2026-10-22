@@ -43,7 +43,8 @@ npm run setup:livekit
 
 - React + TypeScript 沉浸式语音舞台：数字形象居中，光环与配色随六种对话状态变化（待命 / 聆听 / 思考 / 回答 / 打断），舞台字幕实时显示转写和正在播报的内容；底部控制坞为麦克风开关、可点按唤醒的主按钮（外圈显示追问倒计时、内部随音量跳动）和停止按钮；对话记录为可收起侧栏（手机端在舞台下方）；设置中查看模型状态与首音频延迟。
 - 唤醒应答：只说唤醒词时像小爱一样先应答“我在”（`WAKE_ACK`，预合成缓存、零等待），唤醒词后直接接命令则不应答、直接回答；应答中开口会立即停止，应答的回声不会混入识别结果。
-- 默认形象是**桌宠**（`web/src/pet/`，纯 SVG + CSS 动画）：在书桌上自己散步、敲电脑、喝咖啡、伸懒腰、打盹，可拖拽、点击唤醒；对话状态映射为动作（听到呼唤 / 扶耳机聆听 / 敲电脑思考 / 说话口型）。三套形象喵宝 / 狐宝 / 兔宝在设置里切换，`?gallery`、`?gallery=poses&skin=fox` 可查看形象与动作一览。
+- 默认形象是 **3D 桌宠**（`web/src/pet3d/`，three.js 实时渲染）：珍珠白亮面外壳 + 深色玻璃面罩里的发光表情，PBR 材质、柔和阴影、泛光与景深，坐在木质书桌上；会自己散步、东张西望、敲电脑、喝咖啡、伸懒腰、打盹，可拖起来再放下、点击唤醒，墙上的便利贴就是推荐问题（点了直接发送）。对话状态映射为动作（听到呼唤 / 扶耳机聆听 / 敲电脑思考 / 说话口型随音量）。三套形象喵宝 / 狐宝 / 兔宝在设置里切换，场景跟随时间切换白天 / 夜晚（也可手动）。
+- 没有 WebGL 或只有软件渲染（无显卡虚拟机、远程桌面、CI）时自动退回 2D 版（`web/src/pet/`，SVG + CSS 动画）；`?flat` 强制 2D，`?3d` 强制 3D。`?gallery`、`?gallery=poses&skin=fox`、`?gallery=hero&skin=bunny&pose=work` 可查看形象与动作一览（加 `&flat` 看 2D 版），`?skin=`、`?theme=day|night` 可直接指定形象和场景。
 - three.js / three-vrm 渲染用户导入的 `.vrm` 文件，浏览器内读取；呼吸、眨眼、倾听姿态和音频能量口型。导入 VRM 后替代桌宠。
 - `getUserMedia` AEC / NS / AGC；AudioWorklet 16kHz PCM 采集；RNNoise 仅用于本地唤醒链路；Silero VAD 本地运行；不开启摄像头。
 - sherpa-onnx WASM Web Worker 连续检测“你好超宝 / 别说了 / 暂停 / 下一个”；一级候选视觉反馈，服务端以缓冲音频的 ASR 转写复核（按拼音音节匹配，容忍同音/近音字与 zh/z、l/n、an/ang 等口音差异）；本地已命中时复核再容忍一个音节听错或漏字（如“好超宝”，但“超宝”两字必须对上）；确认后提示音；失败自动恢复，服务端日志 `[wake]` 会打印复核未通过时的识别结果，便于区分“一级没触发”还是“复核没通过”。一级灵敏度由 `KWS_THRESHOLD` / `KWS_BOOST` 调节，并内置“nǐ→ní”变调写法；`KWS_DENOISE=false` 可关闭唤醒链路的 RNNoise 叠加。采集重采样使用带抗混叠低通的 FIR 抽取。“别说了 / 暂停”等命令词只在播报或思考时生效，且与当前播报内容重合时视为回声忽略。
@@ -175,7 +176,7 @@ npx playwright test tests/e2e/voice.spec.ts
 server/             会话编排、HTTP/控制连接、LiveKit 音轨
 server/providers/   线上/本地 ASR、LLM、TTS Provider
 shared/             带运行时校验的事件协议
-web/src/            页面、音频处理、声纹与 VRM 渲染；pet/ 为桌宠形象与行为；sdk.ts 为对外 SDK 入口
+web/src/            页面、音频处理、声纹与 VRM 渲染；pet3d/ 为 3D 桌宠（模型、场景、渲染），pet/ 为桌宠行为、形象配置与 2D 兜底版；sdk.ts 为对外 SDK 入口
 sdk/                SDK 类型声明（构建产物在 dist/sdk）
 web/public/         AudioWorklet、KWS Worker、本地模型
 scripts/            资源下载、服务启动与接口诊断
