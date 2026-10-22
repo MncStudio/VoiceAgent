@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { config } from './config.js';
-import { kwsTokens } from './audio.js';
+import { kwsTokens, unmatchedPinyin, wakeList } from './audio.js';
 import { Conversation } from './engine.js';
 import { createProviders } from './providers/index.js';
 import { clientEventSchema, type ServerEvent } from '../shared/protocol.js';
@@ -47,32 +47,47 @@ type Session = {
 };
 const sessions = new Map<string, Session>();
 const publicRoot = path.resolve('web/public');
+const wakeWords = wakeList(config.WAKE_WORD);
+const wakeAliases = wakeList(config.WAKE_WORD_ALIASES).filter((w) => !wakeWords.includes(w));
+/** 界面显示 / 本地唤醒标签用的主唤醒词（WAKE_WORD 的第一个）。 */
+const primaryWake = wakeWords[0] ?? '你好超宝';
 /**
- * 本地唤醒模型要用的唤醒词拼音 token：WAKE_WORD_PINYIN 优先，否则按 WAKE_WORD 自动生成。
+ * 本地唤醒模型要用的唤醒词拼音 token：WAKE_WORD_PINYIN 优先，否则按 WAKE_WORD 自动生成；
+ * WAKE_WORD_ALIASES 的读音总是自动追加。
  * 模型词表里没有的 token 会让唤醒模型初始化失败，这里先按 tokens.txt 过滤并提示。
  */
 let wakeWarned = '';
 function wakeTokens() {
-  const wanted = config.WAKE_WORD_PINYIN.trim()
-    ? config.WAKE_WORD_PINYIN.split('|')
-        .map((s) => s.trim().replace(/\s+/gu, ' '))
-        .filter(Boolean)
-    : kwsTokens(config.WAKE_WORD);
+  const manual = config.WAKE_WORD_PINYIN.split('|')
+    .map((s) => s.trim().replace(/\s+/gu, ' '))
+    .filter(Boolean);
+  const wanted = [
+    ...new Set([...(manual.length ? manual : kwsTokens(wakeWords)), ...kwsTokens(wakeAliases)]),
+  ];
   const file = path.join(publicRoot, 'models/kws/tokens.txt');
-  if (!existsSync(file)) return wanted;
-  const vocab = new Set(
-    readFileSync(file, 'utf8')
-      .split(/\r?\n/u)
-      .map((l) => l.split(' ')[0]),
-  );
-  const valid = wanted.filter((line) => line.split(' ').every((t) => vocab.has(t)));
+  const vocab = existsSync(file)
+    ? new Set(
+        readFileSync(file, 'utf8')
+          .split(/\r?\n/u)
+          .map((l) => l.split(' ')[0]),
+      )
+    : undefined;
+  const valid = vocab
+    ? wanted.filter((line) => line.split(' ').every((t) => vocab.has(t)))
+    : wanted;
   const key = wanted.join('|');
-  if (valid.length < wanted.length && wakeWarned !== key) {
+  if (wakeWarned !== key) {
     wakeWarned = key;
     const bad = wanted.filter((l) => !valid.includes(l));
-    console.warn(
-      `[wake] 唤醒词“${config.WAKE_WORD}”的拼音 ${bad.map((l) => `“${l}”`).join('、')} 含本地唤醒模型不认识的 token，已忽略；${config.WAKE_WORD_PINYIN.trim() ? '请检查' : '可用'} WAKE_WORD_PINYIN 手动指定。`,
-    );
+    if (bad.length)
+      console.warn(
+        `[wake] 唤醒词“${config.WAKE_WORD}”的拼音 ${bad.map((l) => `“${l}”`).join('、')} 含本地唤醒模型不认识的 token，已忽略；${manual.length ? '请检查' : '可用'} WAKE_WORD_PINYIN 手动指定。`,
+      );
+    const orphan = unmatchedPinyin(manual, [...wakeWords, ...wakeAliases]);
+    if (orphan.length)
+      console.warn(
+        `[wake] WAKE_WORD_PINYIN 里的读法 ${orphan.map((l) => `“${l}”`).join('、')} 与 WAKE_WORD / WAKE_WORD_ALIASES 都对不上：本地会触发但服务端复核不认（回答中还会白白打断回答），请把对应汉字写法加进 WAKE_WORD 或 WAKE_WORD_ALIASES。`,
+      );
   }
   return valid;
 }
@@ -81,7 +96,7 @@ app.get('/api/config', (_req, res) =>
   res.json({
     provider: config.PROVIDER,
     qaProvider: config.PROVIDER === 'demo' ? 'demo' : config.QA_PROVIDER,
-    wakeWord: config.WAKE_WORD,
+    wakeWord: primaryWake,
     wakeAck: config.WAKE_ACK,
     rewakeAck: config.REWAKE_ACK,
     followupMs: config.FOLLOWUP_MS,
@@ -135,6 +150,7 @@ app.post('/api/sessions', (req, res) => {
     },
     {
       wakeWord: config.WAKE_WORD,
+      wakeAliases,
       wakeAck: config.WAKE_ACK.split(/[,，]/)
         .map((s) => s.trim())
         .filter(Boolean),
@@ -293,7 +309,7 @@ server.listen(config.PORT, config.HOST, () => {
           .map((n) => `http://${n!.address}:${config.PORT}`)
       : [];
   console.log(
-    `超宝服务已启动：http://${config.HOST === '0.0.0.0' ? '127.0.0.1' : config.HOST}:${config.PORT}${lan.length ? `（局域网：${lan.join('、')}）` : ''}，Provider=${config.PROVIDER}，唤醒词=${config.WAKE_WORD}（${wakeTokens().join(' / ') || '本地唤醒不可用'}）`,
+    `超宝服务已启动：http://${config.HOST === '0.0.0.0' ? '127.0.0.1' : config.HOST}:${config.PORT}${lan.length ? `（局域网：${lan.join('、')}）` : ''}，Provider=${config.PROVIDER}，唤醒词=${wakeWords.join(' / ')}${wakeAliases.length ? `（近音：${wakeAliases.join(' / ')}）` : ''}（${wakeTokens().join(' / ') || '本地唤醒不可用'}）`,
   );
 });
 for (const signal of ['SIGINT', 'SIGTERM'] as const)

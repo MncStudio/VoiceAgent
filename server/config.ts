@@ -24,7 +24,10 @@ const schema = z.object({
   LIVEKIT_INTERNAL_URL: z.url().default('ws://127.0.0.1:7880'),
   LIVEKIT_API_KEY: z.string().default('devkey'),
   LIVEKIT_API_SECRET: z.string().default('secret'),
+  // 唤醒词，可用逗号分隔多个（第一个用于界面显示），如 你好小圆,你好小月。
   WAKE_WORD: z.string().default('你好超宝'),
+  // 唤醒词常被听成的近音写法，逗号分隔（如 你好小严,你好小云）：本地唤醒也会听这些读音，复核时也算唤醒。
+  WAKE_WORD_ALIASES: z.string().default(''),
   // 只说唤醒词时的语音应答，逗号分隔多条随机播报；设为空字符串则改为提示音。
   /** 唤醒词的拼音 token（可选，多个读法用 | 分隔）；留空按 WAKE_WORD 自动生成。 */
   WAKE_WORD_PINYIN: z.string().default(''),

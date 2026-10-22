@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocketServer } from 'ws';
 import { Conversation } from '../server/engine';
-import { hasWake, isEcho, nextSegment, stripWake } from '../server/audio';
+import {
+  hasWake,
+  isEcho,
+  kwsTokens,
+  nextSegment,
+  stripWake,
+  unmatchedPinyin,
+} from '../server/audio';
 import { FunASR } from '../server/providers/local';
 import { DashScopeTTS } from '../server/providers/dashscope';
 import { SemanticPolicy } from '../server/semantic';
@@ -841,5 +848,43 @@ describe('没唤醒时打印听到的内容（WAKE_MISS_LOG）', () => {
     const line = log.mock.calls.map((a) => String(a[0])).find((m) => m.includes('未唤醒'));
     expect(line).toBe('[wake] 待机时未唤醒，听到：“今天吃什么”');
     log.mockRestore();
+  });
+});
+describe('多个唤醒词与近音写法（WAKE_WORD / WAKE_WORD_ALIASES）', () => {
+  const words = ['你好小圆', '你好小月', '嗨小圆'];
+  const aliases = ['你好小严', '你好小云', '你好小圈', '你好小丸', '你好小鱼', '你好小连'];
+  it('逗号分隔的多个唤醒词，命中任意一个都算', () => {
+    for (const t of ['你好小圆', '你好，小月。', '嗨小圆，几点了'])
+      expect(hasWake(t, words.join(','))).toBe(true);
+    expect(hasWake('你好小宝', words.join(','))).toBe(false);
+    expect(stripWake('你好小月帮我查库存', words)).toBe('帮我查库存');
+  });
+  it('近音写法：识别成“你好小严 / 小鱼…”也能复核通过', () => {
+    for (const t of ['你好小严', '你好小鱼帮我查库存', '你好小丸'])
+      expect(hasWake(t, [...words, ...aliases], true)).toBe(true);
+    expect(hasWake('你好小严', words, true)).toBe(false);
+  });
+  it('近音写法自动生成本地唤醒拼音，手动拼音对不上任何写法时能找出来', () => {
+    expect(kwsTokens(aliases)).toContain('n ǐ h ǎo x iǎo y án');
+    expect(kwsTokens('你好小圆,你好小月')).toEqual(
+      expect.arrayContaining(['n ǐ h ǎo x iǎo y uán', 'n ǐ h ǎo x iǎo y uè']),
+    );
+    expect(
+      unmatchedPinyin(
+        ['n ǐ h ǎo x iǎo y uè', 'h āi x iǎo y uán', 'w èi x iǎo y uán', 'n ín h ǎo x iǎo y uán'],
+        words,
+      ),
+    ).toEqual(['w èi x iǎo y uán']);
+  });
+  it('会话复核：本地唤醒命中后识别成近音写法也确认唤醒', async () => {
+    const { c, opened } = harness({ wakeWord: '你好小圆,你好小月', wakeAliases: ['你好小严'] });
+    c.handle({ type: 'wake', source: 'kws' });
+    await wait(10);
+    opened[0].result({ text: '你好小严', final: false });
+    expect(c.state).toBe('LISTENING');
+    c.handle({ type: 'wake', source: 'kws' });
+    await wait(10);
+    opened.at(-1)!.result({ text: '你好小月', final: false });
+    expect(c.state).toBe('LISTENING');
   });
 });

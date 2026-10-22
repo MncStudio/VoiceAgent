@@ -11,6 +11,7 @@ import {
   isEcho,
   nextSegment,
   stripWake,
+  wakeList,
 } from './audio.js';
 import type { SemanticPolicy } from './semantic.js';
 import { AsyncQueue, Semaphore } from './providers/queue.js';
@@ -112,7 +113,10 @@ export class Conversation {
     private p: Providers,
     private emit: (e: ServerEvent) => void,
     private opts: {
+      /** 唤醒词，可用逗号分隔多个（如“你好小圆,你好小月”）。 */
       wakeWord: string;
+      /** 唤醒词常被识别成的近音写法（如“你好小严”），复核时也算唤醒。 */
+      wakeAliases?: string[];
       /** 只说唤醒词时播报的短应答（随机选一条）；为空时只播提示音。 */
       wakeAck?: string[];
       /** 回答过程中再次唤醒时的短应答；为空时沿用 wakeAck。 */
@@ -132,7 +136,11 @@ export class Conversation {
       missLog?: boolean;
     },
     private audio?: AudioOutput,
-  ) {}
+  ) {
+    this.wakeWords = wakeList([...wakeList(opts.wakeWord), ...wakeList(opts.wakeAliases)]);
+  }
+  /** 复核时认可的全部写法：唤醒词（可多个）+ 近音写法（WAKE_WORD_ALIASES）。 */
+  private wakeWords: string[];
   attachAudio(audio: AudioOutput) {
     this.audio = audio;
     // 语音一接通就预合成应答，第一次唤醒也不用等 TTS。
@@ -385,7 +393,7 @@ export class Conversation {
       // 刚被免唤醒打断停掉回答：唤醒词就在这条识别流里，直接沿用它确认，不重开连接、不丢句首。
       if (this.rewakeOpen()) {
         this.kwsEpoch = this.recognizerEpoch;
-        if (hasWake(this.lastRaw, this.opts.wakeWord, true)) this.confirmWake(this.lastRaw, true);
+        if (hasWake(this.lastRaw, this.wakeWords, true)) this.confirmWake(this.lastRaw, true);
         else this.setState(this.state);
         return;
       }
@@ -538,19 +546,18 @@ export class Conversation {
     this.lastRaw = raw;
     const speakingNow = this.state === 'SPEAKING' || this.state === 'THINKING';
     if (this.candidate) {
-      if (!hasWake(raw, this.opts.wakeWord, true)) {
+      if (!hasWake(raw, this.wakeWords, true)) {
         this.lastVerifyText = raw;
         return;
       }
       // 播报内容本身含唤醒词时，残余回声不能算唤醒。
-      if (speakingNow && hasWake(this.answer, this.opts.wakeWord) && isEcho(raw, this.answer))
-        return;
+      if (speakingNow && hasWake(this.answer, this.wakeWords) && isEcho(raw, this.answer)) return;
       this.confirmWake(raw, speakingNow || mode === 'verify-speaking' || mode === 'barge');
     } else if (this.barge) {
       // 播报时过滤播报内容的回声；思考时还没出声，只过滤唤醒应答“我在”的回声。
       if (isEcho(raw, this.state === 'SPEAKING' ? this.answer : '')) return;
       if (this.ackEcho && isEcho(raw, this.ackEcho)) return;
-      if (hasWake(raw, this.opts.wakeWord)) this.confirmWake(raw, true);
+      if (hasWake(raw, this.wakeWords)) this.confirmWake(raw, true);
       else if (isBackchannel(raw)) {
         if (final) this.finishBarge();
         return;
@@ -572,12 +579,12 @@ export class Conversation {
       this.state === 'LISTENING' &&
       this.wakeEpoch !== this.recognizerEpoch &&
       this.rewakeOpen() &&
-      hasWake(raw, this.opts.wakeWord, this.kwsEpoch === this.recognizerEpoch)
+      hasWake(raw, this.wakeWords, this.kwsEpoch === this.recognizerEpoch)
     )
       // 打断时先听到“你好…”就停了回答，随后才认出完整唤醒词：同样按再次唤醒处理。
       this.confirmWake(raw, true);
     else if (mode !== 'query' && this.state !== 'LISTENING') return;
-    let clean = stripWake(raw, this.opts.wakeWord);
+    let clean = stripWake(raw, this.wakeWords);
     if (this.ackEcho) {
       // 应答“我在”的残余回声被识别进来时去掉，不当成用户的话。
       const echo = this.ackEcho.replace(/[，。,.!！?？\s]/g, '');
@@ -920,9 +927,9 @@ export class Conversation {
     // 回答中旁听到的多半是播报回声，回声不记。
     if (answering && isEcho(text, this.answer)) return;
     const where = answering ? '回答中' : '待机时';
-    const hint = hasWake(text, this.opts.wakeWord)
+    const hint = hasWake(text, this.wakeWords)
       ? '，识别结果含唤醒词，端侧唤醒没命中'
-      : hasWake(text, this.opts.wakeWord, true)
+      : hasWake(text, this.wakeWords, true)
         ? '，接近唤醒词（差一个音节），端侧唤醒没命中'
         : '';
     console.info(`[wake] ${where}未唤醒，听到：“${text}”${hint}`);

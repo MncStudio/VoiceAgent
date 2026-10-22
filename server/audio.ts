@@ -75,11 +75,19 @@ function syllableTokens(syllable: string) {
   const m = initials.exec(syllable);
   return m ? [m[1], m[2]] : [syllable];
 }
+/** 唤醒词配置 → 列表：WAKE_WORD / WAKE_WORD_ALIASES 可用逗号、顿号或 | 分隔多个。 */
+export function wakeList(value: string | readonly string[] | undefined) {
+  const items = typeof value === 'string' ? value.split(/[,，、|]/u) : (value ?? []);
+  return [...new Set(items.map((w) => w.replace(/\s+/gu, '')).filter(Boolean))];
+}
 /**
  * 唤醒词 → 本地唤醒模型的拼音 token 序列（每个元素是一种读法）。
  * 除标准读音外，再加三声连读变调的读法（“你好”实际读 ní hǎo），覆盖口语发音。
+ * 传多个唤醒词时逐个生成后去重。
  */
-export function kwsTokens(word: string) {
+export function kwsTokens(word: string | readonly string[]): string[] {
+  if (typeof word !== 'string' || wakeList(word).length > 1)
+    return [...new Set(wakeList(word).flatMap((w) => kwsTokens(w)))];
   const han = Array.from(word)
     .filter((c) => /\p{Script=Han}/u.test(c))
     .join('');
@@ -96,40 +104,94 @@ export function kwsTokens(word: string) {
   ];
   return [...new Set(variants.map((v) => v.flatMap(syllableTokens).join(' ')))].slice(0, 4);
 }
-/**
- * 在识别文本中定位唤醒词。loose=true 时（本地唤醒已命中后的复核）再容忍一个音节的
- * 识别错误或漏字，但唤醒词的最后两个音节（如“超宝”）必须完全对上；四个音节以下不放宽。
- */
-export function findWake(text: string, wakeWord: string, loose = false) {
-  const target = syllables(wakeWord).map((s) => s.sound);
-  const heard = syllables(text);
+/** 本地唤醒拼音 token 行（如“n ǐ h ǎo x iǎo y uán”）→ 去声调、近音归一后的音节。 */
+function tokenSounds(line: string) {
+  const out: string[] = [];
+  const tokens = line.trim().split(/\s+/u).filter(Boolean);
+  for (let i = 0; i < tokens.length; i++) {
+    const head = tokens[i];
+    const joined =
+      /^(zh|ch|sh|[bpmfdtnlgkhjqxrzcsyw])$/u.test(head) && tokens[i + 1]
+        ? head + tokens[++i]
+        : head;
+    const plain = joined
+      .normalize('NFD')
+      .replace(/u\u0308/gu, 'v')
+      .replace(/[\u0300-\u036f]/gu, '');
+    out.push(normalizeSyllable(plain));
+  }
+  return out;
+}
+/** 在音节序列里找目标音节，返回 [起点, 长度]。规则见 findWake。 */
+function matchSounds(heard: readonly string[], target: readonly string[], loose: boolean) {
   const n = target.length;
   if (!n) return undefined;
-  const range = (i: number, len: number) => ({
-    start: heard[i].start,
-    end: heard[i + len - 1].end,
-  });
   for (let i = 0; i + n <= heard.length; i++)
-    if (target.every((sound, j) => heard[i + j].sound === sound)) return range(i, n);
+    if (target.every((sound, j) => heard[i + j] === sound)) return [i, n] as const;
   if (!loose || n < 4) return undefined;
   // 替换：一个音节听错，例如“你号超宝”“我好超宝”
   for (let i = 0; i + n <= heard.length; i++) {
-    const wrong = target.filter((sound, j) => heard[i + j].sound !== sound).length;
-    const tailOk = target.slice(-2).every((sound, j) => heard[i + n - 2 + j].sound === sound);
-    if (wrong <= 1 && tailOk) return range(i, n);
+    const wrong = target.filter((sound, j) => heard[i + j] !== sound).length;
+    const tailOk = target.slice(-2).every((sound, j) => heard[i + n - 2 + j] === sound);
+    if (wrong <= 1 && tailOk) return [i, n] as const;
   }
   // 漏字：例如“好超宝”“你超宝”
   for (let skip = 0; skip < n - 2; skip++) {
     const short = target.filter((_, j) => j !== skip);
     for (let i = 0; i + short.length <= heard.length; i++)
-      if (short.every((sound, j) => heard[i + j].sound === sound)) return range(i, short.length);
+      if (short.every((sound, j) => heard[i + j] === sound)) return [i, short.length] as const;
   }
   return undefined;
 }
-export function hasWake(text: string, wakeWord: string, loose = false) {
+// pinyin-pro 无声调输出里 ü 写作 ü，统一成 v，与 token 行一致。
+const soundOf = (text: string) => syllables(text).map((s) => s.sound.replace(/ü/gu, 'v'));
+/**
+ * 在识别文本中定位唤醒词（可传多个唤醒词 / 近音写法，命中任意一个即可）。
+ * loose=true 时（本地唤醒已命中后的复核）再容忍一个音节的识别错误或漏字，
+ * 但唤醒词的最后两个音节（如“超宝”）必须完全对上；四个音节以下不放宽。
+ * 多个唤醒词时先按严格匹配找，都没有才放宽；同一档内取最靠前的一个。
+ */
+export function findWake(text: string, wakeWord: string | readonly string[], loose = false) {
+  const words = wakeList(wakeWord);
+  const heard = syllables(text);
+  const sounds = heard.map((s) => s.sound.replace(/ü/gu, 'v'));
+  for (const mode of loose ? [false, true] : [false]) {
+    let best: readonly [number, number] | undefined;
+    for (const word of words) {
+      const m = matchSounds(sounds, soundOf(word), mode);
+      if (m && (!best || m[0] < best[0] || (m[0] === best[0] && m[1] > best[1]))) best = m;
+    }
+    if (best) return { start: heard[best[0]].start, end: heard[best[0] + best[1] - 1].end };
+  }
+  return undefined;
+}
+/**
+ * 手动指定的本地唤醒拼音（WAKE_WORD_PINYIN）里，服务端复核认不出来的读法：
+ * 这些读法本地会触发、但复核按 WAKE_WORD / WAKE_WORD_ALIASES 对不上，只会白白打断回答。
+ */
+export function unmatchedPinyin(lines: readonly string[], wakeWord: string | readonly string[]) {
+  // 多音字（嗨 hāi/hēi、乐 lè/yuè）按所有读音展开，手写拼音对上任意一种读音即可。
+  const readings = (word: string) =>
+    Array.from(word)
+      .filter((c) => /\p{Script=Han}/u.test(c))
+      .reduce<string[][]>(
+        (acc, c) => {
+          const all = pinyin(c, { toneType: 'none', type: 'array', multiple: true }) as string[];
+          const sounds = [...new Set(all.map((x) => normalizeSyllable(x).replace(/ü/gu, 'v')))];
+          return acc.flatMap((prefix) => sounds.map((x) => [...prefix, x])).slice(0, 256);
+        },
+        [[]],
+      );
+  const targets = wakeList(wakeWord).flatMap(readings);
+  return lines.filter((line) => {
+    const heard = tokenSounds(line);
+    return !targets.some((t) => matchSounds(heard, t, true));
+  });
+}
+export function hasWake(text: string, wakeWord: string | readonly string[], loose = false) {
   return !!findWake(text, wakeWord, loose);
 }
-export function stripWake(text: string, wakeWord: string) {
+export function stripWake(text: string, wakeWord: string | readonly string[]) {
   const match = findWake(text, wakeWord, true);
   return match ? text.slice(match.end).replace(/^[，。！？、,.!?\s]+/u, '') : text;
 }
