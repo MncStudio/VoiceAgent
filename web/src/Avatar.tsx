@@ -7,10 +7,13 @@ import { SpineAvatar } from './SpineAvatar';
 export function Avatar({
   state,
   level,
+  hearing = false,
   vrmUrl,
 }: {
   state: AssistantState;
   level: number;
+  /** 用户正在说话（聆听动作）。 */
+  hearing?: boolean;
   vrmUrl?: string;
 }) {
   const mount = useRef<HTMLDivElement>(null),
@@ -113,7 +116,7 @@ export function Avatar({
       {vrmUrl && !failed ? (
         <div className="vrm-host" ref={mount} />
       ) : !spineFailed ? (
-        <SpineAvatar state={state} onError={() => setSpineFailed(true)} />
+        <SpineAvatar state={state} hearing={hearing} onError={() => setSpineFailed(true)} />
       ) : (
         <div className="robot" aria-label="超宝默认数字形象">
           <div className="antenna">

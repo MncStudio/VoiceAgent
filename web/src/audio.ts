@@ -8,6 +8,8 @@ export type AudioStatus = {
   noise: string;
   speaker: string;
   level: number;
+  /** 本地 VAD 判定用户正在说话。 */
+  speaking?: boolean;
 };
 export class MicrophonePipeline {
   private context?: AudioContext;
@@ -161,6 +163,7 @@ export class MicrophonePipeline {
           preSpeechPadMs: 300,
           onSpeechStart: () => {
             this.speaking = true;
+            this.report({ speaking: true });
             this.speechSamples = 4800; // 含 preSpeechPadMs 的 300ms
             this.lastMatch = false;
             this.voiceEpoch++;
@@ -168,11 +171,13 @@ export class MicrophonePipeline {
           },
           onVADMisfire: () => {
             this.speaking = false;
+            this.report({ speaking: false });
             this.voiceEpoch++;
             this.send({ type: 'vad', speaking: false, target: false });
           },
           onSpeechEnd: (audio) => {
             this.speaking = false;
+            this.report({ speaking: false });
             const epoch = this.voiceEpoch;
             // 立即上报说话结束，断句不再等待声纹推理；整段声纹结果随后单独更新。
             this.send({ type: 'vad', speaking: false, target: this.lastMatch });
