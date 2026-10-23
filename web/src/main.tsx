@@ -286,6 +286,9 @@ function App() {
   // 追问只对语音有意义；纯文字时不显示倒计时。
   const countdown = voice ? Math.max(0, Math.ceil((followup - now) / 1000)) : 0;
   const followupMs = config?.followupMs ?? 8000;
+  // 追问窗口内（回答完、还能免唤醒接着问）仍算醒着：形象保持聆听，不睡觉也不走动
+  const awake = state !== 'IDLE' || countdown > 0;
+  const avatarState: AssistantState = state === 'IDLE' && awake ? 'LISTENING' : state;
   const followupLeft = countdown && state === 'IDLE' ? Math.max(0, followup - now) / followupMs : 0;
   const answering = state === 'THINKING' || state === 'SPEAKING';
   const lastAssistant = [...entries].reverse().find((e) => e.role === 'assistant');
@@ -332,10 +335,10 @@ function App() {
     >
       <main className="layout">
         <section className="stage" aria-label="数字人">
-          <Roamer active={state === 'IDLE'}>
+          <Roamer active={!awake}>
             {({ walking, touch, dragging }) => (
               <Avatar
-                state={state}
+                state={avatarState}
                 level={level}
                 dragging={dragging}
                 walking={walking}
