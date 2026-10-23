@@ -171,7 +171,8 @@ button:not(:disabled):active {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 420px;
   gap: 20px;
-  padding: 20px;
+  --pad: 20px;
+  padding: var(--pad);
   transition:
     grid-template-columns 0.35s ease,
     gap 0.35s ease;
@@ -187,9 +188,10 @@ button:not(:disabled):active {
   min-height: 0;
   min-width: 0;
 }
+/* 活动区铺到浏览器边上（抵消页面内边距），趴边时贴着浏览器最边缘，不留白边 */
 .roam-area {
   position: absolute;
-  inset: 0;
+  inset: calc(-1 * var(--pad));
   overflow: clip;
 }
 .roamer {
@@ -1078,7 +1080,7 @@ button:not(:disabled):active {
     display: flex;
     flex-direction: column;
     gap: 14px;
-    padding: 12px;
+    --pad: 12px;
   }
   .stage {
     flex: none;
