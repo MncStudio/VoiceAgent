@@ -8,6 +8,7 @@ import {
 import type { ClientEvent, ServerEvent } from '../../shared/protocol';
 import { MicrophonePipeline, type AudioStatus } from './audio';
 import { serviceUrl, socketUrl } from './endpoint';
+import { onUserGesture, resumeAudio, settle } from './unlock';
 export type AppConfig = {
   provider: 'demo' | 'dashscope' | 'local';
   qaProvider: 'demo' | 'openai' | 'yuxi';
@@ -231,7 +232,7 @@ export class AssistantClient {
       if (!response.ok) throw new Error(data.error);
       this.room = new Room({ adaptiveStream: false, dynacast: false });
       this.context = new AudioContext();
-      await this.context.resume();
+      void resumeAudio(this.context);
       this.room.on(RoomEvent.TrackSubscribed, (track, _publication, participant) => {
         if (participant.identity !== `agent-${this.id}` || track.kind !== Track.Kind.Audio) return;
         // Keep WebRTC audio on the native HTML audio path for browser AEC reference.
@@ -240,12 +241,8 @@ export class AssistantClient {
         element.volume = this.volume;
         document.body.appendChild(element);
         this.elements.add(element);
-        void element.play().catch(() =>
-          this.onEvent({
-            type: 'error',
-            message: '浏览器阻止自动播放，请点击页面后重新连接语音。',
-          }),
-        );
+        // 页面还没被点击过时浏览器会拦截自动播放：等第一次点击 / 按键再播。
+        void element.play().catch(() => onUserGesture(() => void element.play().catch(() => {})));
         const source = this.context!.createMediaStreamSource(
           new MediaStream([track.mediaStreamTrack]),
         );
@@ -257,7 +254,7 @@ export class AssistantClient {
         if (!this.closed && !this.disabling) this.onLost();
       });
       await this.room.connect(data.url, data.token);
-      await this.room.startAudio();
+      await settle(this.room.startAudio(), 1000);
       await this.room.localParticipant.publishTrack(this.mic);
       this.pipeline = new MicrophonePipeline(
         (e) => this.send(e),
@@ -277,6 +274,8 @@ export class AssistantClient {
         },
       );
       await this.pipeline.start(new MediaStream([this.mic.mediaStreamTrack]), config.assets);
+      /** false：浏览器要求先点一下页面，点击 / 按键后自动开始监听。 */
+      return this.pipeline.running;
     } catch (error) {
       await this.disableVoice();
       throw error;

@@ -2,6 +2,7 @@ import { MicVAD } from '@ricky0123/vad-web';
 import { RnnoiseWorkletNode, loadRnnoise } from '@sapphi-red/web-noise-suppressor';
 import type { ClientEvent } from '../../shared/protocol';
 import { createWorker, serviceUrl } from './endpoint';
+import { resumeAudio } from './unlock';
 export type AudioStatus = {
   kws: string;
   vad: string;
@@ -13,6 +14,8 @@ export type AudioStatus = {
 };
 export class MicrophonePipeline {
   private context?: AudioContext;
+  /** 音频处理是否已在运行（页面没被点击过时浏览器会先挂起）。 */
+  running = false;
   private vad?: Awaited<ReturnType<typeof MicVAD.new>>;
   private worker?: Worker;
   private noise?: RnnoiseWorkletNode;
@@ -57,7 +60,8 @@ export class MicrophonePipeline {
   }
   async start(stream: MediaStream, assets: { kws: boolean; vad: boolean; speaker: boolean }) {
     this.context = new AudioContext({ sampleRate: 48000 });
-    await this.context.resume();
+    // 页面还没被点击过时不会立即运行，第一次点击 / 按键后自动开始监听。
+    this.running = await resumeAudio(this.context);
     const source = this.context.createMediaStreamSource(stream);
     this.nodes.push(source);
     let processed: AudioNode = source;
@@ -153,6 +157,8 @@ export class MicrophonePipeline {
           model: 'v5',
           baseAssetPath: serviceUrl('/vendor/vad/'),
           onnxWASMBasePath: serviceUrl('/vendor/ort/'),
+          // 共用已按用户手势恢复的 AudioContext，免得 VAD 自建的那个被自动播放策略挂起
+          audioContext: this.context,
           getStream: async () => stream,
           pauseStream: async () => {},
           resumeStream: async () => stream,

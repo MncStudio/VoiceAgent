@@ -8,12 +8,18 @@ export function Avatar({
   state,
   level,
   hearing = false,
+  walking = false,
+  touch = 0,
   vrmUrl,
 }: {
   state: AssistantState;
   level: number;
   /** 用户正在说话（聆听动作）。 */
   hearing?: boolean;
+  /** 待命时正在走动。 */
+  walking?: boolean;
+  /** 每变一次播一次摸头动作。 */
+  touch?: number;
   vrmUrl?: string;
 }) {
   const mount = useRef<HTMLDivElement>(null),
@@ -116,7 +122,13 @@ export function Avatar({
       {vrmUrl && !failed ? (
         <div className="vrm-host" ref={mount} />
       ) : !spineFailed ? (
-        <SpineAvatar state={state} hearing={hearing} onError={() => setSpineFailed(true)} />
+        <SpineAvatar
+          state={state}
+          hearing={hearing}
+          walking={walking}
+          touch={touch}
+          onError={() => setSpineFailed(true)}
+        />
       ) : (
         <div className="robot" aria-label="超宝默认数字形象">
           <div className="antenna">

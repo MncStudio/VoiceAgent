@@ -43,7 +43,7 @@ test('浏览器本地 KWS + VAD + CAM++ 和 WebRTC 语音往返', async () => {
   });
   try {
     await page.goto('http://127.0.0.1:5173/');
-    await page.getByRole('button', { name: '连接麦克风', exact: true }).click();
+    // 页面打开后默认自动连接麦克风
     await expect(page.getByText('语音已连接', { exact: true })).toBeVisible({ timeout: 30000 });
     await page.getByRole('button', { name: '打开设置' }).click();
     await expect(page.getByRole('dialog')).toContainText('Silero VAD · 本地', { timeout: 20000 });

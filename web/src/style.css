@@ -89,39 +89,15 @@ button:not(:disabled):active {
   --eye: #ffe0a6;
 }
 
-/* ---------- 顶栏 ---------- */
-.topbar {
+/* ---------- 面板顶部 ---------- */
+.panel-top {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 16px 28px;
+  gap: 8px;
   flex: none;
 }
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  text-decoration: none;
-  color: var(--ink);
-  margin-right: auto;
-}
-.brand img {
-  border-radius: 11px;
-  box-shadow: 0 6px 16px #8170d940;
-}
-.brand strong {
-  font-size: 19px;
-  letter-spacing: 0.04em;
-}
-.brand span {
-  font-size: 12px;
-  color: var(--faint);
-  padding-left: 10px;
-  border-left: 1px solid var(--line);
-}
-.topbar-status {
-  display: flex;
-  gap: 8px;
+.panel-top .spacer {
+  flex: 1;
 }
 .status-pill,
 .mode-pill {
@@ -149,10 +125,6 @@ button:not(:disabled):active {
 .status-pill.online i {
   background: #22c07a;
   box-shadow: 0 0 0 4px #22c07a26;
-}
-.topbar-actions {
-  display: flex;
-  gap: 8px;
 }
 .icon-button {
   position: relative;
@@ -192,38 +164,87 @@ button:not(:disabled):active {
   background: var(--accent);
 }
 
-/* ---------- 布局 ---------- */
+/* ---------- 布局：左侧数字人活动区 + 右侧信息面板（可收起） ---------- */
 .layout {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 1fr 0;
-  gap: 0;
-  padding: 0 28px 24px;
-  transition: grid-template-columns 0.35s ease;
-}
-.history-open .layout {
-  grid-template-columns: 1fr 380px;
+  grid-template-columns: minmax(0, 1fr) 420px;
   gap: 20px;
+  padding: 20px;
+  transition:
+    grid-template-columns 0.35s ease,
+    gap 0.35s ease;
+}
+.panel-collapsed .layout {
+  grid-template-columns: minmax(0, 1fr) 0;
+  gap: 0;
 }
 
-/* ---------- 舞台 ---------- */
+/* ---------- 舞台：形象在这里走动、可拖拽 ---------- */
 .stage {
   position: relative;
   min-height: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 8px 16px 0;
+  min-width: 0;
 }
-.visual {
-  position: relative;
-  width: 100%;
-  flex: 1 1 auto;
-  min-height: 250px;
-  max-height: 420px;
+.roam-area {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+}
+.roamer {
+  --size: 300px;
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: var(--size);
+  width: calc(var(--size) * 620 / 760);
   display: flex;
+  cursor: grab;
+  touch-action: none;
+  outline: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.roamer:focus-visible {
+  border-radius: 24px;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.roamer.dragging {
+  cursor: grabbing;
+  z-index: 2;
+}
+.roamer.dragging .roamer-body {
+  scale: 1.04;
+  filter: drop-shadow(0 18px 24px #2a2f5a26);
+}
+.roamer-body {
+  position: relative;
+  flex: 1;
+  display: flex;
+  transition:
+    scale 0.2s,
+    filter 0.2s;
+}
+.roamer-body.face-left .avatar-scene {
+  scale: -1 1;
+}
+.panel-expand {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 3;
+}
+.panel-expand.alert::after {
+  content: '';
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #e25555;
 }
 .aura {
   position: absolute;
@@ -241,8 +262,8 @@ button:not(:disabled):active {
   top: 0;
 }
 .aura-glow {
-  width: 520px;
-  height: 520px;
+  width: calc(var(--size) * 1.2);
+  height: calc(var(--size) * 1.2);
   background: radial-gradient(circle, var(--accent-soft) 0%, transparent 68%);
   scale: calc(1 + var(--level) * 0.35);
   transition:
@@ -255,12 +276,12 @@ button:not(:disabled):active {
   transition: border-color 0.6s;
 }
 .aura-ring.one {
-  width: 330px;
-  height: 330px;
+  width: calc(var(--size) * 0.8);
+  height: calc(var(--size) * 0.8);
 }
 .aura-ring.two {
-  width: 420px;
-  height: 420px;
+  width: calc(var(--size) * 1);
+  height: calc(var(--size) * 1);
   border-style: dashed;
   opacity: 0.1;
 }
@@ -289,6 +310,7 @@ button:not(:disabled):active {
 .avatar-scene {
   position: relative;
   width: 100%;
+  height: 100%;
   display: flex;
   justify-content: center;
   align-items: center;
@@ -298,7 +320,7 @@ button:not(:disabled):active {
   display: none;
 }
 .avatar-scene .robot {
-  scale: 1.12;
+  scale: 0.85;
 }
 .avatar-warning {
   position: absolute;
@@ -489,15 +511,11 @@ button:not(:disabled):active {
 .vrm-host canvas {
   display: block;
 }
-/* Spine 形象（猫耳电视机器人），画布按容器高度铺满，点击触发 touch 动画 */
+/* Spine 形象（猫耳电视机器人），画布铺满活动形象框 */
 .spine-host {
   position: relative;
+  width: 100%;
   height: 100%;
-  min-height: 250px;
-  aspect-ratio: 620 / 760;
-  max-width: 100%;
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
 }
 .spine-host .spine-player {
   width: 100%;
@@ -518,10 +536,9 @@ button:not(:disabled):active {
 /* ---------- 字幕 ---------- */
 .caption {
   position: relative;
+  flex: none;
   text-align: center;
-  max-width: 640px;
-  width: 100%;
-  margin-top: 4px;
+  padding: 4px 4px 0;
 }
 .state-chip {
   display: inline-flex;
@@ -550,17 +567,16 @@ button:not(:disabled):active {
   animation: dot 1s ease-in-out infinite alternate;
 }
 .caption h1 {
-  margin: 14px 0 10px;
-  font-size: clamp(24px, 3.2vw, 34px);
+  margin: 12px 0 8px;
+  font-size: 26px;
   font-weight: 700;
   letter-spacing: 0.02em;
   line-height: 1.25;
 }
 .live-text {
   margin: 0 auto;
-  min-height: 52px;
-  max-width: 560px;
-  font-size: 16px;
+  min-height: 48px;
+  font-size: 15px;
   line-height: 1.65;
   color: var(--muted);
   display: -webkit-box;
@@ -570,7 +586,7 @@ button:not(:disabled):active {
 }
 .live-text.is-partial {
   color: var(--ink);
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 500;
 }
 .typing-cursor {
@@ -585,12 +601,7 @@ button:not(:disabled):active {
 
 /* ---------- 提示 ---------- */
 .toast {
-  position: absolute;
-  top: 6px;
-  left: 50%;
-  translate: -50% 0;
-  z-index: 5;
-  max-width: min(520px, 92%);
+  flex: none;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -621,12 +632,18 @@ button:not(:disabled):active {
 }
 
 /* ---------- 控制坞 ---------- */
+.controls {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
 .dock {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 28px;
-  margin: 18px 0 18px;
+  margin: 0 0 12px;
 }
 .dock-button {
   width: 76px;
@@ -672,8 +689,8 @@ button:not(:disabled):active {
 }
 .orb-wrap {
   position: relative;
-  width: 120px;
-  height: 120px;
+  width: 96px;
+  height: 96px;
   display: grid;
   place-items: center;
 }
@@ -697,8 +714,8 @@ button:not(:disabled):active {
 }
 .orb {
   position: relative;
-  width: 92px;
-  height: 92px;
+  width: 74px;
+  height: 74px;
   border-radius: 50%;
   display: grid;
   place-items: center;
@@ -747,7 +764,7 @@ button:not(:disabled):active {
 
 /* ---------- 文字输入 ---------- */
 .composer {
-  width: min(560px, 100%);
+  width: 100%;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -786,33 +803,42 @@ button:not(:disabled):active {
   background: var(--accent);
 }
 
-/* ---------- 对话记录 ---------- */
-.history {
+/* ---------- 右侧信息面板 ---------- */
+.panel {
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  gap: 14px;
+  padding: 16px;
   overflow: hidden;
   border-radius: 24px;
   background: var(--panel);
   border: 1px solid var(--line);
   box-shadow: 0 20px 50px #2a2f5a0f;
   backdrop-filter: blur(16px);
-  opacity: 0;
-  visibility: hidden;
   transition:
     opacity 0.3s,
     visibility 0.3s;
 }
-.history-open .history {
-  opacity: 1;
-  visibility: visible;
+.panel-collapsed .panel {
+  opacity: 0;
+  visibility: hidden;
+}
+.history {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: 18px;
+  background: #ffffff8c;
+  border: 1px solid var(--line);
 }
 .history-header {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 16px 16px 14px 22px;
+  padding: 10px 10px 10px 16px;
   border-bottom: 1px solid var(--line);
 }
 .history-header h2 {
@@ -832,7 +858,7 @@ button:not(:disabled):active {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 18px 18px 8px;
+  padding: 14px 14px 10px;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -934,13 +960,10 @@ button:not(:disabled):active {
 }
 .history-tip {
   margin: 0;
-  padding: 10px 18px 14px;
+  padding: 8px 0 0;
   font-size: 11px;
   color: var(--faint);
   text-align: center;
-}
-.history-close {
-  display: none;
 }
 
 /* ---------- 设置 ---------- */
@@ -1091,8 +1114,8 @@ button:not(:disabled):active {
 
 /* ---------- 响应式 ---------- */
 @media (max-width: 1100px) {
-  .history-open .layout {
-    grid-template-columns: 1fr 340px;
+  .layout {
+    grid-template-columns: minmax(0, 1fr) 360px;
   }
 }
 @media (max-width: 860px) {
@@ -1100,56 +1123,38 @@ button:not(:disabled):active {
     height: auto;
     min-height: 100%;
   }
-  .topbar {
-    padding: 12px 16px;
-    gap: 10px;
-  }
-  .brand span,
-  .mode-pill,
-  .history-toggle {
-    display: none;
-  }
   .layout,
-  .history-open .layout {
+  .panel-collapsed .layout {
     display: flex;
     flex-direction: column;
-    padding: 0 14px 18px;
-    gap: 16px;
+    gap: 14px;
+    padding: 12px;
   }
   .stage {
-    min-height: calc(100svh - 70px);
-    padding: 0;
+    flex: none;
+    height: 290px;
   }
-  .visual {
-    min-height: 260px;
-    max-height: 300px;
+  .panel-collapsed .stage {
+    height: calc(100svh - 24px);
   }
-  .avatar-scene .robot {
-    scale: 0.9;
+  .roamer {
+    --size: 220px;
   }
-  .aura-glow {
-    width: 340px;
-    height: 340px;
+  .panel-collapsed .panel {
+    display: none;
   }
-  .aura-ring.one {
-    width: 250px;
-    height: 250px;
+  .panel {
+    padding: 14px;
   }
-  .aura-ring.two {
-    width: 310px;
-    height: 310px;
+  .history {
+    flex: none;
+    max-height: 55vh;
+  }
+  .caption h1 {
+    font-size: 22px;
   }
   .dock {
     gap: 18px;
-    margin: 14px 0;
-  }
-  .history {
-    opacity: 1;
-    visibility: visible;
-    max-height: 70vh;
-  }
-  .live-text {
-    font-size: 15px;
   }
 }
 @media (prefers-reduced-motion: reduce) {
