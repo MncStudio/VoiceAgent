@@ -23,6 +23,6 @@ test('文字对话、设置与响应式界面', async ({ page }) => {
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: '.runtime/mobile.png', fullPage: true });
   await page.getByRole('button', { name: '清空对话' }).click();
-  await expect(page.getByRole('heading', { name: '你好，我是超宝', exact: true })).toBeVisible();
+  await expect(page.locator('.message')).toHaveCount(0);
   expect(errors).toEqual([]);
 });

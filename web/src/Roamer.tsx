@@ -3,14 +3,14 @@ import { clamp, napMs, pickTarget, step } from './roam';
 
 /**
  * 形象活动区：active（待命）时打盹和随机走动交替；可以拖到任意位置，
- * 松手（或直接点一下）播一次摸头动作。非待命状态原地不动。
+ * 拖动中（任何状态）播摸头动作，直接点一下播一次。非待命状态原地不动。
  */
 export function Roamer({
   active,
   children,
 }: {
   active: boolean;
-  children: (p: { walking: boolean; touch: number }) => React.ReactNode;
+  children: (p: { walking: boolean; touch: number; dragging: boolean }) => React.ReactNode;
 }) {
   const area = useRef<HTMLDivElement>(null),
     body = useRef<HTMLDivElement>(null),
@@ -132,7 +132,8 @@ export function Roamer({
     drag.current = undefined;
     setDragging(false);
     setRest((n) => n + 1);
-    if (e.type === 'pointerup') setTouch((n) => n + 1);
+    // 拖动过程中播摸头动作（见 dragging），松手回到当前状态；没拖动只是点一下就播一次
+    if (!d.moved && e.type === 'pointerup') setTouch((n) => n + 1);
   };
   return (
     <div className="roam-area" ref={area}>
@@ -153,7 +154,7 @@ export function Roamer({
         title="拖动或点一下超宝"
       >
         <div className={`roamer-body ${facing < 0 ? 'face-left' : ''}`}>
-          {children({ walking, touch })}
+          {children({ walking, touch, dragging })}
         </div>
       </div>
     </div>

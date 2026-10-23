@@ -1,33 +1,29 @@
 import { describe, expect, it } from 'vitest';
-import { cutsOnce, playsWake, stateAnimation } from '../web/src/spineAnimation';
+import { cutsOnce, stateAnimation } from '../web/src/spineAnimation';
 import { clamp, napMs, pickTarget, step } from '../web/src/roam';
 describe('Spine 形象动画', () => {
-  it('唤醒前待唤醒，唤醒后待机，用户说话时聆听，助手说话时说话', () => {
+  it('待命睡眠 / 走动，唤醒后不管有没有人说话都用聆听，助手说话时说话', () => {
     expect(stateAnimation('IDLE')).toBe('sleep');
-    expect(stateAnimation('IDLE', true)).toBe('sleep');
+    expect(stateAnimation('IDLE', true)).toBe('walk');
     for (const s of ['CANDIDATE', 'LISTENING', 'THINKING', 'INTERRUPT'] as const)
-      expect(stateAnimation(s)).toBe('idle');
+      expect(stateAnimation(s)).toBe('listen');
     expect(stateAnimation('LISTENING', true)).toBe('listen');
-    expect(stateAnimation('THINKING', true)).toBe('idle');
     expect(stateAnimation('SPEAKING')).toBe('speak');
   });
-  it('待命时走动用 walk，唤醒后不再走', () => {
-    expect(stateAnimation('IDLE', false, true)).toBe('walk');
-    expect(stateAnimation('LISTENING', false, true)).toBe('idle');
-    expect(stateAnimation('SPEAKING', false, true)).toBe('speak');
+  it('任何状态拖动中都用摸头动作', () => {
+    for (const s of [
+      'IDLE',
+      'CANDIDATE',
+      'LISTENING',
+      'THINKING',
+      'SPEAKING',
+      'INTERRUPT',
+    ] as const)
+      expect(stateAnimation(s, true, true)).toBe('touch');
   });
-  it('只有从睡眠醒来进入待机才播唤醒动作，直接聆听 / 说话不播', () => {
-    expect(playsWake('sleep', 'idle')).toBe(true);
-    expect(playsWake('sleep', 'listen')).toBe(false);
-    expect(playsWake('sleep', 'speak')).toBe(false);
-    expect(playsWake('sleep', 'walk')).toBe(false);
-    expect(playsWake('walk', 'idle')).toBe(false);
-    expect(playsWake('idle', 'listen')).toBe(false);
-    expect(playsWake('speak', 'sleep')).toBe(false);
-  });
-  it('唤醒 / 摸头动作中：开口聆听、说话、走路立刻切换，回待机 / 睡眠等播完', () => {
-    for (const t of ['listen', 'speak', 'walk']) expect(cutsOnce(t)).toBe(true);
-    for (const t of ['idle', 'sleep']) expect(cutsOnce(t)).toBe(false);
+  it('点击动作中：回睡眠等播完，其余立刻切换', () => {
+    for (const t of ['listen', 'speak', 'walk', 'touch']) expect(cutsOnce(t)).toBe(true);
+    expect(cutsOnce('sleep')).toBe(false);
   });
 });
 describe('形象走动', () => {

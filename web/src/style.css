@@ -802,39 +802,6 @@ button:not(:disabled):active {
   flex-direction: column;
   gap: 14px;
 }
-.empty-conversation {
-  padding: 10px 4px;
-}
-.empty-conversation h3 {
-  margin: 0 0 6px;
-  font-size: 18px;
-}
-.empty-conversation p {
-  margin: 0 0 16px;
-  font-size: 13.5px;
-  line-height: 1.6;
-  color: var(--muted);
-}
-.suggestions {
-  display: grid;
-  gap: 8px;
-}
-.suggestions button {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 14px;
-  border-radius: 13px;
-  font-size: 13.5px;
-  text-align: left;
-  color: var(--ink);
-  background: #fff;
-  border: 1px solid var(--line);
-}
-.suggestions button:hover {
-  border-color: var(--accent-soft);
-  color: var(--accent);
-}
 .message {
   display: flex;
   flex-direction: column;
@@ -896,13 +863,6 @@ button:not(:disabled):active {
 }
 .thinking-dots i:nth-child(3) {
   animation-delay: 0.3s;
-}
-.history-tip {
-  margin: 0;
-  padding: 8px 0 0;
-  font-size: 11px;
-  color: var(--faint);
-  text-align: center;
 }
 
 /* ---------- 设置 ---------- */

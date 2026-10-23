@@ -116,9 +116,9 @@ function App() {
   const [input, setInput] = useState(''),
     [entries, setEntries] = useState<Entry[]>([]),
     [partial, setPartial] = useState(''),
-    [heardAt, setHeardAt] = useState(0);
+    // 浏览器要求页面先有一次点击 / 按键才能处理音频
+    [needGesture, setNeedGesture] = useState(false);
   const [error, setError] = useState(''),
-    [notice, setNotice] = useState(''),
     [settings, setSettings] = useState(false),
     // 右侧信息面板可以整个收起，只留数字人
     [panelOpen, setPanelOpen] = useState(() => localStorage.getItem(panelKey) !== '0');
@@ -170,7 +170,6 @@ function App() {
     }
     if (e.type === 'transcript') {
       setPartial(e.text);
-      if (e.text) setHeardAt(Date.now());
       if (e.final) {
         setEntries((items) => [...items, { id: crypto.randomUUID(), role: 'user', text: e.text }]);
         setPartial('');
@@ -196,7 +195,6 @@ function App() {
         ),
       );
     if (e.type === 'metrics' && e.name === 'firstAudio') setLatency(e.ms);
-    if (e.type === 'notice') setNotice(e.message);
     if (e.type === 'error') setError(e.message);
   };
   const recover = async () => {
@@ -208,7 +206,6 @@ function App() {
     setState('IDLE');
     await old?.close().catch(() => {});
     for (let attempt = 0; !unmounted.current; attempt++) {
-      setNotice('连接中断，正在自动重连…');
       await new Promise((r) => setTimeout(r, Math.min(15000, 1000 * 2 ** attempt)));
       const next = new AssistantClient(onEvent, setAudio, setLevel, () => void recover());
       try {
@@ -217,7 +214,6 @@ function App() {
         client.current = next;
         setConnected(true);
         setError('');
-        setNotice('已重新连接。');
         break;
       } catch {
         await next.close().catch(() => {});
@@ -251,12 +247,9 @@ function App() {
         const ready = await c.enableVoice(config);
         setVoice(true);
         localStorage.setItem(voiceKey, '1');
-        const hint = `说“${config.wakeWord}”唤醒我，也可以点按唤醒按钮。`;
-        if (ready) setNotice(`麦克风已连接。${hint}`);
-        else {
-          // 浏览器要求页面先有一次点击 / 按键，音频才能开始处理
-          setNotice('麦克风已连接，点一下页面即可开始语音对话。');
-          onUserGesture(() => setNotice(`已开始聆听。${hint}`));
+        if (!ready) {
+          setNeedGesture(true);
+          onUserGesture(() => setNeedGesture(false));
         }
       }
     } catch (e) {
@@ -289,7 +282,6 @@ function App() {
     setEntries([]);
     setPartial('');
     setError('');
-    setNotice('');
   };
   // 追问只对语音有意义；纯文字时不显示倒计时。
   const countdown = voice ? Math.max(0, Math.ceil((followup - now) / 1000)) : 0;
@@ -312,27 +304,23 @@ function App() {
     partial ||
     (answering && lastAssistant?.text
       ? lastAssistant.text.slice(-72)
-      : state === 'LISTENING'
-        ? '说出你的问题，说完我会自动开始回答'
-        : countdown
-          ? `${countdown} 秒内可直接追问，不用再叫我`
-          : voice
-            ? '回答时可以直接开口打断，也可以说「别说了」'
-            : config?.provider === 'demo'
-              ? '当前为演示模式，可在下方输入文字体验'
-              : '连接麦克风后即可语音对话，也可以直接输入文字');
+      : voice && needGesture && state === 'IDLE'
+        ? '点一下页面即可开始语音对话'
+        : state === 'LISTENING'
+          ? '说出你的问题，说完我会自动开始回答'
+          : countdown
+            ? `${countdown} 秒内可直接追问，不用再叫我`
+            : voice
+              ? '回答时可以直接开口打断，也可以说「别说了」'
+              : config?.provider === 'demo'
+                ? '当前为演示模式，可在下方输入文字体验'
+                : '连接麦克风后即可语音对话，也可以直接输入文字');
   const micLevel = state === 'LISTENING' || state === 'CANDIDATE' ? (audio?.level ?? 0) : level;
   const ring = 2 * Math.PI * 54;
-  const toast = (error || notice) && (
-    <div className={`toast ${error ? 'error' : ''}`} role={error ? 'alert' : 'status'}>
-      <span>{error || notice}</span>
-      <button
-        aria-label="关闭提示"
-        onClick={() => {
-          setError('');
-          setNotice('');
-        }}
-      >
+  const toast = error && (
+    <div className="toast error" role="alert">
+      <span>{error}</span>
+      <button aria-label="关闭提示" onClick={() => setError('')}>
         <Icon name="close" size={14} />
       </button>
     </div>
@@ -345,12 +333,11 @@ function App() {
       <main className="layout">
         <section className="stage" aria-label="数字人">
           <Roamer active={state === 'IDLE'}>
-            {({ walking, touch }) => (
+            {({ walking, touch, dragging }) => (
               <Avatar
                 state={state}
                 level={level}
-                // 用户正在说话：本地 VAD 判定开口，或刚收到识别结果（无 VAD 时兜底）
-                hearing={state === 'LISTENING' && (!!audio?.speaking || now - heardAt < 1200)}
+                dragging={dragging}
                 walking={walking}
                 touch={touch}
                 vrmUrl={vrm}
@@ -418,34 +405,17 @@ function App() {
               </button>
             </div>
             <div className="messages" ref={list}>
-              {entries.length === 0 ? (
-                <div className="empty-conversation">
-                  <h3>你好，我是超宝</h3>
-                  <p>想聊什么，尽管开口。也可以从这些话题开始：</p>
-                  <div className="suggestions">
-                    {['介绍一下你自己', '帮我整理今天的工作思路', '如何在回答时打断你？'].map(
-                      (text) => (
-                        <button onClick={() => void send(text)} key={text}>
-                          {text}
-                          <Icon name="arrow" size={14} />
-                        </button>
-                      ),
-                    )}
+              {entries.map((item) => (
+                <article className={`message ${item.role}`} key={item.id}>
+                  <div className="message-author">
+                    {item.role === 'user' ? '你' : '超宝'}
+                    {item.interrupted && <small>已打断</small>}
                   </div>
-                </div>
-              ) : (
-                entries.map((item) => (
-                  <article className={`message ${item.role}`} key={item.id}>
-                    <div className="message-author">
-                      {item.role === 'user' ? '你' : '超宝'}
-                      {item.interrupted && <small>已打断</small>}
-                    </div>
-                    <div className="message-text">
-                      {item.text || (item.interrupted ? '回答已停止' : '…')}
-                    </div>
-                  </article>
-                ))
-              )}
+                  <div className="message-text">
+                    {item.text || (item.interrupted ? '回答已停止' : '…')}
+                  </div>
+                </article>
+              ))}
               {partial && (
                 <article className="message user partial">
                   <div className="message-author">正在识别</div>
@@ -529,7 +499,6 @@ function App() {
                 <Icon name="send" size={18} />
               </button>
             </form>
-            <p className="history-tip">回复由 AI 生成，请核实重要信息</p>
           </div>
         </aside>
       </main>

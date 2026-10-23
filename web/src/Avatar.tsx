@@ -7,17 +7,17 @@ import { SpineAvatar } from './SpineAvatar';
 export function Avatar({
   state,
   level,
-  hearing = false,
   walking = false,
+  dragging = false,
   touch = 0,
   vrmUrl,
 }: {
   state: AssistantState;
   level: number;
-  /** 用户正在说话（聆听动作）。 */
-  hearing?: boolean;
   /** 待命时正在走动。 */
   walking?: boolean;
+  /** 正被拖动。 */
+  dragging?: boolean;
   /** 每变一次播一次摸头动作。 */
   touch?: number;
   vrmUrl?: string;
@@ -124,8 +124,8 @@ export function Avatar({
       ) : !spineFailed ? (
         <SpineAvatar
           state={state}
-          hearing={hearing}
           walking={walking}
+          dragging={dragging}
           touch={touch}
           onError={() => setSpineFailed(true)}
         />
