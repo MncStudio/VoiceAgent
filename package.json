@@ -23,6 +23,7 @@
     "build:sdk": "vite build --config vite.sdk.config.ts && node -e \"require('node:fs').copyFileSync('sdk/chaobao-sdk.d.ts','dist/sdk/chaobao-sdk.d.ts')\""
   },
   "dependencies": {
+    "@esotericsoftware/spine-player": "~4.3.13",
     "@livekit/rtc-node": "^0.13.0",
     "@pixiv/three-vrm": "^3.4.4",
     "@ricky0123/vad-web": "^0.0.31",

@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils, type VRM } from '@pixiv/three-vrm';
 import type { AssistantState } from '../../shared/protocol';
+import { SpineAvatar } from './SpineAvatar';
 export function Avatar({
   state,
   level,
@@ -16,6 +17,7 @@ export function Avatar({
     values = useRef({ state, level });
   values.current = { state, level };
   const [failed, setFailed] = useState(false);
+  const [spineFailed, setSpineFailed] = useState(false);
   useEffect(() => {
     if (!vrmUrl || !mount.current) return;
     let stopped = false,
@@ -110,6 +112,8 @@ export function Avatar({
       <div className="avatar-floor" />
       {vrmUrl && !failed ? (
         <div className="vrm-host" ref={mount} />
+      ) : !spineFailed ? (
+        <SpineAvatar state={state} onError={() => setSpineFailed(true)} />
       ) : (
         <div className="robot" aria-label="超宝默认数字形象">
           <div className="antenna">
