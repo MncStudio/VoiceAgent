@@ -1,14 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import { cutsOnce, stateAnimation } from '../web/src/spineAnimation';
-import { clamp, napMs, pickTarget, step } from '../web/src/roam';
+import {
+  clamp,
+  pauseMs,
+  pickTarget,
+  restPhase,
+  step,
+  walkAfterDragMs,
+  walkAfterMs,
+} from '../web/src/roam';
 describe('Spine 形象动画', () => {
-  it('待命睡眠 / 走动，唤醒后不管有没有人说话都用聆听，助手说话时说话', () => {
+  it('没唤醒按作息待机 / 走动 / 睡觉，唤醒后（含追问）都用聆听，助手说话时说话', () => {
     expect(stateAnimation('IDLE')).toBe('sleep');
-    expect(stateAnimation('IDLE', true)).toBe('walk');
+    expect(stateAnimation('IDLE', 'idle')).toBe('idle');
+    expect(stateAnimation('IDLE', 'walk')).toBe('walk');
     for (const s of ['CANDIDATE', 'LISTENING', 'THINKING', 'INTERRUPT'] as const)
-      expect(stateAnimation(s)).toBe('listen');
-    expect(stateAnimation('LISTENING', true)).toBe('listen');
-    expect(stateAnimation('SPEAKING')).toBe('speak');
+      expect(stateAnimation(s, 'walk')).toBe('listen');
+    expect(stateAnimation('SPEAKING', 'idle')).toBe('speak');
   });
   it('任何状态拖动中都用摸头动作', () => {
     for (const s of [
@@ -19,17 +27,26 @@ describe('Spine 形象动画', () => {
       'SPEAKING',
       'INTERRUPT',
     ] as const)
-      expect(stateAnimation(s, true, true)).toBe('touch');
+      expect(stateAnimation(s, 'walk', true)).toBe('touch');
   });
-  it('点击动作中：回睡眠等播完，其余立刻切换', () => {
+  it('点击动作中：回待机 / 睡眠等播完，其余立刻切换', () => {
     for (const t of ['listen', 'speak', 'walk', 'touch']) expect(cutsOnce(t)).toBe(true);
-    expect(cutsOnce('sleep')).toBe(false);
+    for (const t of ['idle', 'sleep']) expect(cutsOnce(t)).toBe(false);
   });
 });
-describe('形象走动', () => {
-  it('打盹 8–15 秒', () => {
-    expect(napMs(() => 0)).toBe(8000);
-    expect(napMs(() => 1)).toBe(15000);
+describe('形象作息与走动', () => {
+  it('眨眼待机 5 秒后走动，1 分钟没唤醒就睡觉；拖动放下后 2 秒就走', () => {
+    expect(restPhase(0)).toBe('idle');
+    expect(restPhase(walkAfterMs - 1)).toBe('idle');
+    expect(restPhase(walkAfterMs)).toBe('roam');
+    expect(restPhase(59999)).toBe('roam');
+    expect(restPhase(60000)).toBe('sleep');
+    expect(restPhase(1999, walkAfterDragMs)).toBe('idle');
+    expect(restPhase(2000, walkAfterDragMs)).toBe('roam');
+  });
+  it('两段走动之间歇 1.5–4 秒', () => {
+    expect(pauseMs(() => 0)).toBe(1500);
+    expect(pauseMs(() => 1)).toBe(4000);
   });
   it('目的地在区域内且离当前位置足够远', () => {
     for (let i = 0; i < 50; i++) {

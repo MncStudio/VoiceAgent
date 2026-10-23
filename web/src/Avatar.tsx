@@ -4,18 +4,19 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils, type VRM } from '@pixiv/three-vrm';
 import type { AssistantState } from '../../shared/protocol';
 import { SpineAvatar } from './SpineAvatar';
+import type { Rest } from './roam';
 export function Avatar({
   state,
   level,
-  walking = false,
+  rest = 'sleep',
   dragging = false,
   touch = 0,
   vrmUrl,
 }: {
   state: AssistantState;
   level: number;
-  /** 待命时正在走动。 */
-  walking?: boolean;
+  /** 没唤醒时的作息动作：待机 / 走动 / 睡觉。 */
+  rest?: Rest;
   /** 正被拖动。 */
   dragging?: boolean;
   /** 每变一次播一次摸头动作。 */
@@ -124,7 +125,7 @@ export function Avatar({
       ) : !spineFailed ? (
         <SpineAvatar
           state={state}
-          walking={walking}
+          rest={rest}
           dragging={dragging}
           touch={touch}
           onError={() => setSpineFailed(true)}

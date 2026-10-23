@@ -335,13 +335,13 @@ function App() {
     >
       <main className="layout">
         <section className="stage" aria-label="数字人">
-          <Roamer active={!awake}>
-            {({ walking, touch, dragging }) => (
+          <Roamer awake={awake}>
+            {({ rest, touch, dragging }) => (
               <Avatar
                 state={avatarState}
                 level={level}
                 dragging={dragging}
-                walking={walking}
+                rest={rest}
                 touch={touch}
                 vrmUrl={vrm}
               />
