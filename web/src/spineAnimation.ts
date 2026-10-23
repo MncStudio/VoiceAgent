@@ -1,9 +1,10 @@
 import type { AssistantState } from '../../shared/protocol';
 import type { Rest } from './roam';
 /**
- * 状态 → Spine 循环动画（模型动作：sleep / idle / blink / listen / speak / touch / walk）。
+ * 状态 → Spine 循环动画（模型动作：sleep / idle / blink / listen / speak / touch / walk / peek_left / peek_bottom）。
  * - 拖动中（任何状态）：touch
- * - 没唤醒：按作息 rest——眨眼待机 idle（叠加随机 blink）→ 来回走动 walk → 睡觉 sleep
+ * - 没唤醒：按作息 rest——眨眼待机 idle（叠加随机 blink）→ 来回走动 walk → 睡觉 sleep；
+ *   被拖到窗口边上时一直趴着 peek_left / peek_bottom
  * - 助手说话：speak
  * - 其余唤醒状态（疑似唤醒 / 聆听 / 思考 / 打断 / 追问窗口），不管用户有没有在说话：listen
  */

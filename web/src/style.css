@@ -230,6 +230,57 @@ button:not(:disabled):active {
 .roamer-body.face-left .avatar-scene {
   scale: -1 1;
 }
+/* 趴窗口边：右边镜像左边的动作，上边翻转下边的动作 */
+.roamer-body.dock-right .avatar-scene {
+  scale: -1 1;
+}
+.roamer-body.dock-top .avatar-scene {
+  scale: 1 -1;
+}
+.roamer.gliding {
+  transition: translate 0.4s cubic-bezier(0.3, 0.7, 0.4, 1);
+}
+/* 拖动中靠到边上：高亮那条边，松手就趴上去 */
+.roam-area::after {
+  content: '';
+  position: absolute;
+  z-index: 1;
+  pointer-events: none;
+  background: var(--accent);
+  border-radius: 3px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.roam-area.hint-left::after,
+.roam-area.hint-right::after,
+.roam-area.hint-top::after,
+.roam-area.hint-bottom::after {
+  opacity: 0.55;
+}
+.roam-area.hint-left::after,
+.roam-area.hint-right::after {
+  top: 8%;
+  bottom: 8%;
+  width: 4px;
+}
+.roam-area.hint-left::after {
+  left: 0;
+}
+.roam-area.hint-right::after {
+  right: 0;
+}
+.roam-area.hint-top::after,
+.roam-area.hint-bottom::after {
+  left: 8%;
+  right: 8%;
+  height: 4px;
+}
+.roam-area.hint-top::after {
+  top: 0;
+}
+.roam-area.hint-bottom::after {
+  bottom: 0;
+}
 .panel-expand {
   position: absolute;
   top: 0;

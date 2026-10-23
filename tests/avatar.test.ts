@@ -2,6 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { cutsOnce, stateAnimation } from '../web/src/spineAnimation';
 import {
   clamp,
+  dockAnimation,
+  dockEdge,
+  dockPos,
+  originX,
+  originY,
   pauseMs,
   pickTarget,
   restPhase,
@@ -67,5 +72,45 @@ describe('形象作息与走动', () => {
     expect(step(90, 100, 0.5, 70)).toBe(100);
     expect(clamp(-5, 0, 10)).toBe(0);
     expect(clamp(15, 0, 10)).toBe(10);
+  });
+});
+
+describe('趴窗口边', () => {
+  const max = { x: 500, y: 300 };
+  it('拖到哪条边附近松手就趴哪条边，离得最近的优先', () => {
+    expect(dockEdge({ x: 250, y: 150 }, max)).toBeUndefined();
+    expect(dockEdge({ x: 0, y: 150 }, max)).toBe('left');
+    expect(dockEdge({ x: 495, y: 150 }, max)).toBe('right');
+    expect(dockEdge({ x: 250, y: 300 }, max)).toBe('bottom');
+    expect(dockEdge({ x: 250, y: 4 }, max)).toBe('top');
+    expect(dockEdge({ x: 8, y: 300 }, max)).toBe('bottom');
+    expect(dockEdge({ x: 0, y: 296 }, max)).toBe('left');
+    expect(dockEdge({ x: 13, y: 150 }, max)).toBeUndefined();
+  });
+  it('左右边用 peek_left，上下边用 peek_bottom，趴着时 IDLE 一直用它', () => {
+    expect(dockAnimation('left')).toBe('peek_left');
+    expect(dockAnimation('right')).toBe('peek_left');
+    expect(dockAnimation('bottom')).toBe('peek_bottom');
+    expect(dockAnimation('top')).toBe('peek_bottom');
+    expect(stateAnimation('IDLE', 'peek_left')).toBe('peek_left');
+    expect(stateAnimation('LISTENING', 'peek_bottom')).toBe('listen');
+    expect(cutsOnce('peek_left')).toBe(true);
+  });
+  it('趴边时骨架原点落在活动区的边上，沿边方向不动', () => {
+    const size = { w: 245, h: 300 },
+      area = { w: 745, h: 600 },
+      p = { x: 100, y: 200 };
+    const left = dockPos('left', p, size, area);
+    expect(left.y).toBe(200);
+    expect(left.x + originX * size.w).toBeCloseTo(0);
+    const right = dockPos('right', p, size, area);
+    // 右边镜像：原点在框里的位置也镜像
+    expect(right.x + (1 - originX) * size.w).toBeCloseTo(area.w);
+    const bottom = dockPos('bottom', p, size, area);
+    expect(bottom.x).toBe(100);
+    expect(bottom.y + (1 - originY) * size.h).toBeCloseTo(area.h);
+    const top = dockPos('top', p, size, area);
+    // 上边翻转：原点离框顶的距离变成原来离框底的距离
+    expect(top.y + originY * size.h).toBeCloseTo(0);
   });
 });

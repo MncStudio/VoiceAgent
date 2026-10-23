@@ -12,9 +12,11 @@ const labels: Record<string, string> = {
   listen: '聆听中',
   speak: '说话中',
   touch: '被拖动',
+  peek_left: '趴在窗口边',
+  peek_bottom: '趴在窗口边',
 };
 /**
- * 猫耳电视机器人（Spine 4.3）。rest：没唤醒时的作息动作（待机 / 走动 / 睡觉）；dragging：正被拖动（播 touch）；
+ * 猫耳电视机器人（Spine 4.3）。rest：没唤醒时的作息动作（待机 / 走动 / 睡觉 / 趴窗口边）；dragging：正被拖动（播 touch）；
  * touch 每变一次播一次摸头动作（点一下）。
  * 加载失败（无 WebGL / 资源缺失）时回调 onError，由外层换回默认形象。
  */
