@@ -329,6 +329,17 @@ describe('追问灵敏度', () => {
     await wait(20);
     expect(c.state).toBe('LISTENING');
   });
+  it('FOLLOWUP_MS=0（默认）时回答后不能免唤醒追问', async () => {
+    const { c, events } = harness({ followupMs: 0 });
+    c.handle({ type: 'text', text: '你好' });
+    await wait(250);
+    const last = events.filter((e) => e.type === 'state').at(-1) as { followupUntil?: number };
+    expect(c.state).toBe('IDLE');
+    expect(last.followupUntil ?? 0).toBe(0);
+    c.handle({ type: 'vad', speaking: true, target: false });
+    await wait(50);
+    expect(c.state).toBe('IDLE');
+  });
   it('追问窗口到期时正在说的话不会被丢弃', async () => {
     const { c, opened } = harness({ followupMs: 300 });
     c.handle({ type: 'text', text: '你好' });
@@ -374,16 +385,32 @@ describe('唤醒应答', () => {
     expect(events.some((e) => e.type === 'ack' && e.text === '我在')).toBe(true);
     expect(played.length).toBeGreaterThan(0);
   });
-  it('唤醒词后直接说命令（一句话直达）不应答', async () => {
-    const { events } = await wakeOnly('你好超宝明天天气怎么样');
-    await wait(400);
-    expect(events.some((e) => e.type === 'ack')).toBe(false);
+  it('唤醒词后直接说命令（一句话直达）也先应答“我在”，再回答', async () => {
+    const { events, c, opened } = await wakeOnly('你好超宝明天天气怎么样');
+    opened[0].result({ text: '你好超宝明天天气怎么样', final: true });
+    await wait(1200);
+    const ack = events.findIndex((e) => e.type === 'ack' && e.text === '我在');
+    expect(ack).toBeGreaterThanOrEqual(0);
+    expect(c.history.find((m) => m.role === 'user')?.content).toBe('明天天气怎么样');
+    // 回答在应答之后开始
+    expect(events.findIndex((e) => e.type === 'state' && e.state === 'THINKING')).toBeGreaterThan(
+      ack,
+    );
   });
-  it('唤醒后用户马上接着说，不应答', async () => {
+  it('唤醒后用户接着说，等说完再应答', async () => {
     const { c, events } = await wakeOnly('你好超宝');
     c.handle({ type: 'vad', speaking: true, target: false });
     await wait(400);
     expect(events.some((e) => e.type === 'ack')).toBe(false);
+    c.handle({ type: 'vad', speaking: false, target: false });
+    await wait(400);
+    expect(events.some((e) => e.type === 'ack')).toBe(true);
+  });
+  it('点按唤醒也先应答“我在”', async () => {
+    const h = harness({ wakeAck: ['我在'] });
+    h.c.handle({ type: 'wake', source: 'button' });
+    await wait(400);
+    expect(h.events.some((e) => e.type === 'ack' && e.text === '我在')).toBe(true);
   });
   it('应答的回声不会混进用户的话', async () => {
     const { c, opened } = await wakeOnly('你好超宝');

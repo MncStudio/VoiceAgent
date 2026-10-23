@@ -346,22 +346,15 @@ function App() {
         <section className="stage" aria-label="数字人">
           <Roamer active={state === 'IDLE'}>
             {({ walking, touch }) => (
-              <>
-                <div className="aura" aria-hidden="true">
-                  <i className="aura-glow" />
-                  <i className="aura-ring one" />
-                  <i className="aura-ring two" />
-                </div>
-                <Avatar
-                  state={state}
-                  level={level}
-                  // 用户正在说话：本地 VAD 判定开口，或刚收到识别结果（无 VAD 时兜底）
-                  hearing={state === 'LISTENING' && (!!audio?.speaking || now - heardAt < 1200)}
-                  walking={walking}
-                  touch={touch}
-                  vrmUrl={vrm}
-                />
-              </>
+              <Avatar
+                state={state}
+                level={level}
+                // 用户正在说话：本地 VAD 判定开口，或刚收到识别结果（无 VAD 时兜底）
+                hearing={state === 'LISTENING' && (!!audio?.speaking || now - heardAt < 1200)}
+                walking={walking}
+                touch={touch}
+                vrmUrl={vrm}
+              />
             )}
           </Roamer>
           {!panelOpen && (

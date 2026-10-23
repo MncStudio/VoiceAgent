@@ -63,6 +63,8 @@ export class Conversation {
   private speakerMatch = false;
   private followupListening = false;
   private acking?: AbortController;
+  /** 本次唤醒的“我在”应答（含等用户说完唤醒词的时间）；回答要等它播完再开始。 */
+  private ackDone?: Promise<void>;
   /** 唤醒复核期间最后一次识别结果，复核失败时写日志，便于判断是哪一级没通过。 */
   private lastVerifyText = '';
   /** 刚播过的应答文本，识别结果开头若是它的回声需去掉。 */
@@ -110,24 +112,35 @@ export class Conversation {
     }
     return cached;
   }
+  private get voiceAck() {
+    return !!this.opts.wakeAck?.length && !this.p.demo && !!this.audio;
+  }
+  /** 每次唤醒都先应一声“我在”，再听问题；回答会等应答播完。 */
+  private acknowledge() {
+    if (!this.voiceAck) return;
+    const done = this.playAck().finally(() => {
+      if (this.ackDone === done) this.ackDone = undefined;
+    });
+    this.ackDone = done;
+  }
   /**
-   * 只说了唤醒词时，像小爱一样先应一声“我在”；唤醒词后紧接着说了命令（一句话直达）
-   * 或用户已经开口，就不应答，直接听。应答过程中用户开口会立即停止播放。
+   * 等用户把唤醒词这句话说完（VAD 结束，唤醒词后接着说了问题也等说完）再应答。
+   * 应答过程中用户开口会立即停止播放。
    */
-  private async acknowledge() {
+  private async playAck() {
     const texts = this.opts.wakeAck ?? [];
-    if (!texts.length || this.p.demo || !this.audio) return;
     const epoch = this.recognizerEpoch;
-    const still = () =>
-      epoch === this.recognizerEpoch &&
-      this.state === 'LISTENING' &&
-      !this.userSpeaking &&
-      !this.transcript;
-    // 等唤醒词这句话的 VAD 结束，再留 250ms 给“唤醒词 + 短停顿 + 命令”接话。
+    const still = () => epoch === this.recognizerEpoch && this.state === 'LISTENING';
+    // 等出现 250ms 的停顿（最多 10 秒）再应答
     const start = performance.now();
-    while (this.userSpeaking && performance.now() - start < 1500) await delay(30);
-    await delay(250);
-    if (!still()) return;
+    let quietSince = performance.now();
+    while (performance.now() - start < 10000) {
+      await delay(30);
+      if (!still()) return;
+      if (this.userSpeaking) quietSince = performance.now();
+      else if (performance.now() - quietSince >= 250) break;
+    }
+    if (this.userSpeaking) return;
     const text = texts[Math.floor(Math.random() * texts.length)];
     let pcm: Buffer;
     try {
@@ -138,7 +151,7 @@ export class Conversation {
     } catch {
       return;
     }
-    if (!still() || !pcm.length) return;
+    if (!still() || this.userSpeaking || !pcm.length || !this.audio) return;
     this.acking = new AbortController();
     this.ackEcho = text;
     this.emit({ type: 'ack', text });
@@ -151,7 +164,7 @@ export class Conversation {
       this.acking = undefined;
     }
     // 应答期间没人说话，从应答结束起重新计“无语音”超时。
-    if (still()) this.armNoSpeech(6000);
+    if (still() && !this.userSpeaking && !this.transcript) this.armNoSpeech(6000);
   }
   private stopAck() {
     if (!this.acking) return;
@@ -309,6 +322,7 @@ export class Conversation {
     this.setState('LISTENING');
     // 点按打断时缓冲里多是播报回声，只回放很短的一段。
     void this.listen('query', reason === 'wake' ? 300 : 700).catch((e) => this.fail(e));
+    if (reason === 'wake') this.acknowledge();
   }
   private async wake(source: 'button' | 'kws') {
     if (this.state === 'SPEAKING' || this.state === 'THINKING') {
@@ -338,7 +352,10 @@ export class Conversation {
       this.emit({ type: 'notice', message: '演示模式：请在下方输入文字。' });
       return;
     }
-    await this.listen(source === 'kws' ? 'verify' : 'query');
+    const listening = this.listen(source === 'kws' ? 'verify' : 'query');
+    // 点按唤醒同样先应“我在”；语音唤醒等复核通过后再应答。
+    if (source === 'button') this.acknowledge();
+    await listening;
   }
   private armNoSpeech(ms = this.noSpeechMs) {
     this.noSpeechMs = ms;
@@ -418,13 +435,11 @@ export class Conversation {
       if (speakingNow || mode === 'verify-speaking' || mode === 'barge') this.stopResponse();
       this.barge = false;
       this.setState('LISTENING');
-      const voiceAck = !!this.opts.wakeAck?.length && !this.p.demo && !!this.audio;
-      this.emit({ type: 'wake-confirmed', chime: !voiceAck });
+      this.emit({ type: 'wake-confirmed', chime: !this.voiceAck });
       this.emit({ type: 'notice', message: '我在，请说。' });
       this.armNoSpeech(6000);
       this.ackEcho = '';
-      // 本次结果里唤醒词后面已经有命令，就是一句话直达，不应答。
-      if (voiceAck && !stripWake(raw, this.opts.wakeWord).trim()) void this.acknowledge();
+      this.acknowledge();
     } else if (this.barge) {
       if (isEcho(raw, this.answer)) return;
       if (isBackchannel(raw)) {
@@ -534,6 +549,9 @@ export class Conversation {
         this.state !== 'LISTENING';
       if (stale()) return;
       await this.settle();
+      if (stale()) return;
+      // 先把“我在”说完再回答（一句话直达时也一样）
+      if (this.ackDone) await this.ackDone;
       if (stale()) return;
       if (!(await this.speakerAccepted()) || stale()) {
         if (!stale()) this.dropUtterance();
@@ -860,6 +878,12 @@ export class Conversation {
       this.answer = '';
       this.turnId = undefined;
       this.emit({ type: 'done', turnId, text: answer });
+      // FOLLOWUP_MS=0（默认）：每次提问都要重新唤醒；大于 0 时回答后这段时间内可直接追问。
+      if (this.opts.followupMs <= 0) {
+        this.followupUntil = 0;
+        this.setState('IDLE');
+        return;
+      }
       this.followupUntil = Date.now() + this.opts.followupMs;
       this.setState('IDLE');
       this.timeout = setTimeout(() => {

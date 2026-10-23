@@ -246,67 +246,6 @@ button:not(:disabled):active {
   border-radius: 50%;
   background: #e25555;
 }
-.aura {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 0;
-  height: 0;
-  pointer-events: none;
-}
-.aura > i {
-  position: absolute;
-  border-radius: 50%;
-  transform: translate(-50%, -50%);
-  left: 0;
-  top: 0;
-}
-.aura-glow {
-  width: calc(var(--size) * 1.2);
-  height: calc(var(--size) * 1.2);
-  background: radial-gradient(circle, var(--accent-soft) 0%, transparent 68%);
-  scale: calc(1 + var(--level) * 0.35);
-  transition:
-    scale 0.12s linear,
-    background 0.6s;
-}
-.aura-ring {
-  border: 1.5px solid var(--accent);
-  opacity: 0.16;
-  transition: border-color 0.6s;
-}
-.aura-ring.one {
-  width: calc(var(--size) * 0.8);
-  height: calc(var(--size) * 0.8);
-}
-.aura-ring.two {
-  width: calc(var(--size) * 1);
-  height: calc(var(--size) * 1);
-  border-style: dashed;
-  opacity: 0.1;
-}
-.state-idle .aura-glow {
-  animation: idle-breathe 5s ease-in-out infinite;
-}
-.state-candidate .aura-ring,
-.state-listening .aura-ring {
-  animation: ripple 2.2s ease-out infinite;
-}
-.state-listening .aura-ring.two {
-  animation-delay: 1.1s;
-}
-.state-thinking .aura-ring.two {
-  animation: spin 6s linear infinite;
-  opacity: 0.3;
-}
-.state-speaking .aura-ring {
-  opacity: calc(0.14 + var(--level) * 0.5);
-  scale: calc(1 + var(--level) * 0.08);
-  transition:
-    opacity 0.1s,
-    scale 0.1s;
-}
-
 .avatar-scene {
   position: relative;
   width: 100%;

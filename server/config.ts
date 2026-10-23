@@ -46,7 +46,8 @@ const schema = z.object({
   LOCAL_LLM_API_KEY: z.string().default('local'),
   TURN_MODEL: z.string().default(''),
   SPECULATIVE: z.enum(['true', 'false']).default('true'),
-  FOLLOWUP_MS: z.coerce.number().min(1000).max(30000).default(8000),
+  // 0：每次提问都要重新唤醒（默认）；1000~30000：回答后这段时间内可免唤醒追问
+  FOLLOWUP_MS: z.coerce.number().min(0).max(30000).default(0),
 });
 export type Config = z.infer<typeof schema>;
 export const config = schema.parse(process.env);
